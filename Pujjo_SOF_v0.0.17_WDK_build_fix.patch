@@ -1,0 +1,219 @@
+diff --git a/.github/workflows/compile-windows.yml b/.github/workflows/compile-windows.yml
+index 8f982e1..502a560 100644
+--- a/.github/workflows/compile-windows.yml
++++ b/.github/workflows/compile-windows.yml
+@@ -1,6 +1,8 @@
+ name: Pujjo source-only Windows compile
+ on:
+   workflow_dispatch:
++  push:
++    branches: [codex/wdk-build-fix]
+ permissions:
+   contents: read
+ jobs:
+@@ -92,6 +94,20 @@ jobs:
+         run: |
+           msbuild sof_windows_driver.sln /m /t:Rebuild /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:normal /bl:build-logs/msbuild.binlog /fl '/flp:LogFile=build-logs/msbuild.log;Verbosity=normal'
+           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
++      - name: Verify all expected unsigned development products
++        shell: pwsh
++        run: |
++          $output = 'bin/x64/${{ matrix.configuration }}'
++          foreach ($name in @('sof_core.lib', 'sof_dsp.sys', 'pujjo_rt5682_probe.sys', 'pujjo_rt1019_probe.sys')) {
++            $file = Join-Path $output $name
++            if (!(Test-Path $file) -or (Get-Item $file).Length -eq 0) { throw "Missing build product: $file" }
++            Get-FileHash $file -Algorithm SHA256 | Format-List | Out-File build-logs/products.txt -Append
++            if ($file.EndsWith('.sys')) {
++              $signature = Get-AuthenticodeSignature $file
++              if ($signature.Status -ne 'NotSigned') { throw "Expected unsigned development binary: $file" }
++            }
++          }
++          'NOT INSTALLABLE - NOT HARDWARE VERIFIED. Unsigned compile-only development products.' | Set-Content "$output/NOT-INSTALLABLE.txt"
+       - name: Preserve logs even when checks or compilation fail
+         if: always()
+         uses: actions/upload-artifact@v4
+@@ -105,6 +121,7 @@ jobs:
+         with:
+           name: Pujjo-${{ matrix.configuration }}-NOT-INSTALLABLE-NOT-HARDWARE-VERIFIED
+           path: |
++            bin/x64/${{ matrix.configuration }}/NOT-INSTALLABLE.txt
+             bin/x64/${{ matrix.configuration }}/**/*.sys
+             bin/x64/${{ matrix.configuration }}/**/*.lib
+             bin/x64/${{ matrix.configuration }}/**/*.pdb
+diff --git a/BUILD_DEBUG_REPORT.md b/BUILD_DEBUG_REPORT.md
+new file mode 100644
+index 0000000..f9ac803
+--- /dev/null
++++ b/BUILD_DEBUG_REPORT.md
+@@ -0,0 +1,79 @@
++# Windows build debugging — v0.0.17 (no version bump)
++
++## Outcome
++
++Prepared a focused fix for the latest actual failure. **The revised Windows build is not verified.** The GitHub integration refused branch creation with HTTP 403, the browser was signed out, and this Linux host has no MSBuild/WDK. No remote change, new run, merge, installation or hardware activation was performed.
++
++## Baseline and latest CI evidence
++
++Baseline: `6013d5da201bc10fc0167f885a180320492853bf` on `Lennie-lol/pujjo-SOF-windows-audio/main`, matching the attached Resource Hub hotfix source after normalizing line endings. The solution contains `sof_core` and three driver projects. The full tree, solution/project configurations, consolidated README, existing tests and current CI outputs were inspected for this focused build fix.
++
++[Latest failed run #4](https://github.com/Lennie-lol/pujjo-SOF-windows-audio/actions/runs/44145039516), 17 November 2026:
++
++| Configuration | Job | Actual result |
++| --- | --- | --- |
++| Release x64 | 134257749369 | All four outputs linked; 0 warnings; 3 TestSign errors |
++| Debug x64 | 134257749374 | All four outputs linked; 0 warnings; 3 TestSign errors |
++| Offline | 134257748812 | Passed |
++
++The first actual errors are `SIGNTASK : SignTool error : No file digest algorithm specified`, one per `.sys` project. The Resource Hub helper hotfix **did resolve the prior compiler errors for this run**. There are no C4013/C1189 failures or unresolved linker symbols in these latest logs. This is evidence that the baseline compiled and linked, not evidence of an overall successful build or functioning audio.
++
++Full original job logs and the original Debug/Release artifact ZIPs (MSBuild text/binlogs, kit installation logs, toolset list) are in `validation-build-debug/`. Their SHA256 digests were checked against GitHub's artifact metadata. No driver binaries were uploaded by that failed run, so none can be supplied from it.
++
++## Focused changes
++
++| File | Change and reason |
++| --- | --- |
++| `sof_dsp.vcxproj` | Set `SignMode=Off` before importing build targets; unsigned compile-only output instead of unintended default test signing |
++| `pujjo_rt5682_probe.vcxproj` | Same explicit signing mode |
++| `pujjo_rt1019_probe.vcxproj` | Same explicit signing mode |
++| `.github/workflows/compile-windows.yml` | Add push trigger limited to `codex/wdk-build-fix`, retain manual dispatch; require all three `.sys` outputs and `sof_core.lib`, check that drivers are unsigned, record hashes and add NOT-INSTALLABLE label |
++| `tests/test_windows_ci_v017.py` | Require explicit unsigned build policy; require Resource Hub helper feature definition before including its header |
++| `README.md` | Correct current build status and link this report |
++
++No C/C++ runtime implementation, warning policy, safety gate, license or project version was changed. `sof_core.vcxproj` and the solution require no change for the observed failure. Off is Microsoft's documented signing mode for building without a certificate. This does **not** disable Windows signature enforcement, create an installable package or authorize loading. Adding `/fd SHA256` would instead continue test-signing, contrary to the intended unsigned compile-only deliverable.
++
++References: [Microsoft driver signing properties](https://learn.microsoft.com/en-us/windows-hardware/drivers/develop/driver-signing-properties), [building with WDK](https://learn.microsoft.com/en-us/windows-hardware/drivers/develop/building-a-driver). Actual SDK/WDK 26100 compilation in run #4 provides direct evidence for the Resource Hub declarations; no mock-header result is presented as WDK evidence.
++
++## Tests executed on revised source
++
++- 26/26 offline suite commands passed after installing an isolated Debian Clang 19.1.7 toolchain. The first attempt failed solely because Clang was absent; that failure log is retained.
++- 80/80 GCC 14.2 and Clang 19.1.7 variants passed: strict warnings, AddressSanitizer/UBSan and GCC `-fanalyzer`.
++- Kernel-type mock suite passed eight GCC/Clang build-and-run cases, four Windows-target Clang syntax checks and two negative tests rejecting kernel test-only codec writes. These are included within the 26-command suite, not additional WDK builds.
++- ThreadSanitizer passed the pthread/WDF-doubles transport test.
++- Python syntax, project XML, workflow YAML, patch whitespace and upstream integrity checks passed. The new signing assertion detects the absent setting in the original project.
++- ASan matrix uses `detect_leaks=0` because this environment runs under ptrace; no LeakSanitizer success is claimed.
++- One ELF-dependent Zephyr subcase and external topology/kernel-archive checks are skipped where their fixtures are absent. DUT, Windows Driver Verifier, CodeQL/HLK and live IRQL/power/audio tests were not run.
++
++The 80 variants repeat algorithms under different flags. All mock tests remain simulations. Machine-readable results and complete command output accompany this report. Historical v0.0.16/v0.0.17 reports are not fresh results of this debugging task.
++
++## Exact blocker and how to continue
++
++Attempted `create_branch(codex/wdk-build-fix, 6013d5da...)` using the connected Lennie-lol account. GitHub returned:
++
++```
++HTTP 403
++Resource not accessible by integration
++POST /repos/Lennie-lol/pujjo-SOF-windows-audio/git/refs
++```
++
++Repository metadata reports the user's push permission, but the integration cannot perform that write. The local `gh auth status` is unauthenticated. The GitHub browser showed Sign in and no authenticated session. Local Debug and Release msbuild attempts both failed before compilation because the executable is absent. Exact evidence is retained in `validation-build-debug/access-and-environment.json` and local Windows attempt logs. Retrying unchanged CI would not test this patch, so it was not substituted for a new build.
++
++To continue automatically, provide a GitHub connection authorized for repository contents/workflow changes and Actions execution, or apply this prepared patch yourself. Never provide a token/password in chat.
++
++From a clean checkout at the baseline (or first check applicability against newer code):
++
++```sh
++git switch -c codex/wdk-build-fix
++git apply --check /path/to/Pujjo_SOF_v0.0.17_WDK_build_fix.patch
++git apply /path/to/Pujjo_SOF_v0.0.17_WDK_build_fix.patch
++git add sof_dsp.vcxproj pujjo_rt5682_probe.vcxproj pujjo_rt1019_probe.vcxproj .github/workflows/compile-windows.yml tests/test_windows_ci_v017.py README.md BUILD_DEBUG_REPORT.md
++git commit -m "Build unsigned Pujjo development drivers and verify all outputs"
++git push -u origin codex/wdk-build-fix
++```
++
++The branch push triggers the workflow. Alternatively use Actions > Pujjo source-only Windows compile > Run workflow and select the changed branch. Require **both** Windows jobs and the offline job green, all four output files present and no unresolved errors. Inspect the new logs and address any newly revealed errors before claiming completion. This patch was not run on Windows; the added product-verification step is likewise unverified on the runner.
++
++## Audio functionality remains incomplete
++
++Signed SOF firmware authentication/ROM boot and IPC4 readiness, real DSP graphs/SSP routing, full RT5682S initialization/PLL/calibration/jack/microphone integration, RTL1019 GPIO polarity/calibration/mute/gain validation, PortCls/WaveRT render/capture, and real power/removal/DMA synchronization remain incomplete or hardware-unverified. Build success would only be a compile milestone. Keep DSP/codec/amp activation disabled. Any future development binaries must be labeled **NOT INSTALLABLE — NOT HARDWARE VERIFIED**.
+diff --git a/README.md b/README.md
+index f36b4c0..1c2364d 100644
+--- a/README.md
++++ b/README.md
+@@ -1,10 +1,12 @@
+ # Pujjo SOF Windows Audio Driver
+ 
+ **Experimental open-source Windows 11 audio driver development for Google Pujjo / Pujjo1e Chromebooks**  
++**Current build investigation:** see [BUILD_DEBUG_REPORT.md](BUILD_DEBUG_REPORT.md) for run #4, the signing fix, test logs and the GitHub write-access blocker. No version bump.
++
+ **Current source version:** `v0.0.17` · **Status:** source-only / development · **License:** see [`LICENSE`](LICENSE)
+ 
+ > [!CAUTION]
+-> **This project does not yet provide working Windows audio.** It has **not** successfully compiled with the Windows Driver Kit (WDK), installed on the target device, booted Intel SOF firmware, or played audio through the internal speakers. There is **no validated installable driver package**. Live DSP boot, codec writes, and amplifier activation remain disabled by default. **Do not install or force-load the prototype, bypass its guards, or use the preserved upstream installation instructions.**
++> **This project does not yet provide working Windows audio.** The latest WDK run compiled and linked all projects but failed during signing; the revised unsigned build is **not yet verified**. It has not been installed on the target device, booted Intel SOF firmware, or played audio through the internal speakers. There is **no validated installable driver package**. Live DSP boot, codec writes, and amplifier activation remain disabled by default. **Do not install or force-load the prototype, bypass its guards, or use the preserved upstream installation instructions.**
+ 
+ This README consolidates the important Pujjo-specific information from the previous 14 `README*.md` files. Older release notes are historical, not proof of what v0.0.17 can do. The inherited SOF Windows source also contains generic HDA, SoundWire, USB, HDMI, AMD and other-platform code; **those upstream features and support claims are not verified for this Pujjo fork**.
+ 
+@@ -36,7 +38,7 @@ The goal is an independently developed Windows 11 x64 audio solution for an Inte
+ | Intel SOF firmware | ADL-N selection and manifest metadata parser improved; no authenticated, working DSP boot |
+ | DMA / concurrency | Safer common-buffer policy and serialized transport lifecycle source; mock/host-tested only |
+ | SSP topology and Windows endpoint | Candidate Linux graph inspected; **no working Windows WaveRT render/capture pipeline** |
+-| Windows WDK build | Two real CI attempts reached the compiler but failed; fixes prepared in v0.0.17, **not yet WDK-verified** |
++| Windows WDK build | Run #4 compiled/linked all projects; failed in TestSign. Unsigned fix prepared; **new Windows run blocked by integration write access** |
+ | Speaker / headset / microphone audio | **Not working and not hardware-tested** |
+ 
+ A successful host test or a future `.sys` compilation is **not** proof that hardware sound works.
+diff --git a/pujjo_rt1019_probe.vcxproj b/pujjo_rt1019_probe.vcxproj
+index 92b4708..c011f67 100644
+--- a/pujjo_rt1019_probe.vcxproj
++++ b/pujjo_rt1019_probe.vcxproj
+@@ -16,5 +16,7 @@
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="src\driver\peripheral\PujjoResourcePolicy.c" /><ClCompile Include="src\driver\peripheral\PujjoPeripheralKmdf.c" /><ClCompile Include="src\driver\peripheral\PujjoRt1019pGpioWindows.c" /><ClCompile Include="src\driver\PujjoBoardGuard.c" /><ClCompile Include="src\driver\PujjoBoardId.c" /></ItemGroup>
+  <ItemGroup><ClInclude Include="src\driver\peripheral\PujjoResourcePolicy.h" /><ClInclude Include="src\driver\peripheral\PujjoRt1019pGpioWindows.h" /><ClInclude Include="src\driver\PujjoBoardGuard.h" /><ClInclude Include="src\driver\PujjoBoardId.h" /></ItemGroup>
++ <!-- Compile-only prototypes: no signing certificate or installable package. -->
++ <PropertyGroup><SignMode>Off</SignMode></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+ </Project>
+diff --git a/pujjo_rt5682_probe.vcxproj b/pujjo_rt5682_probe.vcxproj
+index 2124cf8..41416c9 100644
+--- a/pujjo_rt5682_probe.vcxproj
++++ b/pujjo_rt5682_probe.vcxproj
+@@ -21,5 +21,7 @@
+   <ClInclude Include="src\driver\experimental\PujjoRt5682sCodec.h" />
+   <ClInclude Include="src\driver\experimental\PujjoHeadsetClock.h" />
+   <ClInclude Include="src\driver\peripheral\PujjoRt5682sSpbWindows.h" /><ClInclude Include="src\driver\PujjoBoardGuard.h" /><ClInclude Include="src\driver\PujjoBoardId.h" /></ItemGroup>
++ <!-- Compile-only prototypes: no signing certificate or installable package. -->
++ <PropertyGroup><SignMode>Off</SignMode></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+ </Project>
+diff --git a/sof_dsp.vcxproj b/sof_dsp.vcxproj
+index 44a0173..efd1771 100644
+--- a/sof_dsp.vcxproj
++++ b/sof_dsp.vcxproj
+@@ -145,6 +145,8 @@
+       <Project>{B869DD57-F1CB-4C88-B495-B4317F45E6F5}</Project>
+     </ProjectReference>
+   </ItemGroup>
++  <!-- Compile-only prototypes: no signing certificate or installable package. -->
++  <PropertyGroup><SignMode>Off</SignMode></PropertyGroup>
+   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+   <ImportGroup Label="ExtensionTargets" />
+ </Project>
+diff --git a/tests/test_windows_ci_v017.py b/tests/test_windows_ci_v017.py
+index 7b1fa81..0898b8a 100644
+--- a/tests/test_windows_ci_v017.py
++++ b/tests/test_windows_ci_v017.py
+@@ -16,6 +16,9 @@ for name in projects:
+     configs = tree.findall('.//m:PlatformToolset', ns)
+     assert len(configs) == 2 and all(x.text == 'WindowsKernelModeDriver10.0'
+                                       for x in configs), name
++    # CI run #4 linked all drivers, then failed in default test signing.
++    sign_modes = tree.findall('.//m:SignMode', ns)
++    assert sign_modes and all(x.text == 'Off' for x in sign_modes), name
+     compiles = tree.findall('.//m:ClCompile', ns)
+     for compile_item in compiles:
+         flags = compile_item.find('m:AdditionalOptions', ns)
+@@ -31,6 +34,7 @@ for f in ('src/driver/peripheral/PujjoRt1019pGpioWindows.c',
+           'src/driver/peripheral/PujjoRt5682sSpbWindows.c'):
+     text = (root / f).read_text()
+     assert '#include <reshub.h>' in text
++    assert text.index('#define RESHUB_USE_HELPER_ROUTINES') < text.index('#include <reshub.h>')
+     assert 'RESOURCE_HUB_CREATE_PATH_FROM_ID(&path, idLow, idHigh)' in text
+     assert 'DECLARE_UNICODE_STRING_SIZE(path, RESOURCE_HUB_PATH_SIZE)' in text
+     # Reshub.h exposes a FORCEINLINE FUNCTION, not a preprocessor symbol.
+@@ -55,4 +59,4 @@ assert 'typedef uint16_t PJ_WORD;' in fixed
+ codec = (root / 'src/driver/experimental/PujjoRt5682sCodec.c').read_text()
+ assert '#error PJ5682S_TEST_ONLY_WRITES is forbidden in a Windows kernel build' in codec
+ assert not list(root.rglob('*.inf')) and not list(root.rglob('*.cat'))
+-print('PASS: CI #1/#2 regression contracts, correct WDK /kernel and Resource Hub usage')
++print('PASS: CI #1-#4 regression contracts, correct WDK /kernel and Resource Hub usage')

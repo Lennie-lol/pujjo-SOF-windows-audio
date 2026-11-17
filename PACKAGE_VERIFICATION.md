@@ -1,5 +1,7 @@
-# Package verification — v0.0.16
+# Build-debug package integrity
 
-SHA256SUMS.txt covers every packaged regular file except itself and SOURCE_SHA256_MANIFEST.json. SOURCE_SHA256_MANIFEST.json records the same set. Verify hashes after extraction. The ZIP includes complete source, updated reports and current/historical logs; it contains no new Windows binary or downloaded firmware. Temporary compiler products and Python caches are excluded.
+This is v0.0.17 with a focused, Windows-unverified signing fix; no new release version. Read BUILD_DEBUG_REPORT.md for actual status.
 
-validation-v0.0.16/input-comparison.json lists changed/added/removed paths relative to the attached v0.0.15 source ZIP. validation-v0.0.16/source-inventory.json inventories source/document files. Upstream integrity verification remains part of the offline suite.
+SHA256SUMS.txt and SOURCE_SHA256_MANIFEST.json describe the complete current archive contents except those two hash manifests themselves. Historical logs were preserved where provided. Current results live under validation-build-debug/. The included patch applies to commit 6013d5da201bc10fc0167f885a180320492853bf and contains only the focused project/workflow/test/document changes; regenerated package manifests and collected evidence are packaging additions.
+
+No Windows driver binary, firmware image, installation INF, or signing certificate is included.

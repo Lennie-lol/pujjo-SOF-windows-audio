@@ -16,5 +16,7 @@
  </ItemDefinitionGroup>
  <ItemGroup><ClCompile Include="src\driver\peripheral\PujjoResourcePolicy.c" /><ClCompile Include="src\driver\peripheral\PujjoPeripheralKmdf.c" /><ClCompile Include="src\driver\peripheral\PujjoRt1019pGpioWindows.c" /><ClCompile Include="src\driver\PujjoBoardGuard.c" /><ClCompile Include="src\driver\PujjoBoardId.c" /></ItemGroup>
  <ItemGroup><ClInclude Include="src\driver\peripheral\PujjoResourcePolicy.h" /><ClInclude Include="src\driver\peripheral\PujjoRt1019pGpioWindows.h" /><ClInclude Include="src\driver\PujjoBoardGuard.h" /><ClInclude Include="src\driver\PujjoBoardId.h" /></ItemGroup>
+ <!-- Compile-only prototypes: no signing certificate or installable package. -->
+ <PropertyGroup><SignMode>Off</SignMode></PropertyGroup>
  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

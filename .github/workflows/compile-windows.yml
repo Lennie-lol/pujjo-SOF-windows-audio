@@ -1,6 +1,8 @@
 name: Pujjo source-only Windows compile
 on:
   workflow_dispatch:
+  push:
+    branches: [codex/wdk-build-fix]
 permissions:
   contents: read
 jobs:
@@ -92,6 +94,20 @@ jobs:
         run: |
           msbuild sof_windows_driver.sln /m /t:Rebuild /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:normal /bl:build-logs/msbuild.binlog /fl '/flp:LogFile=build-logs/msbuild.log;Verbosity=normal'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify all expected unsigned development products
+        shell: pwsh
+        run: |
+          $output = 'bin/x64/${{ matrix.configuration }}'
+          foreach ($name in @('sof_core.lib', 'sof_dsp.sys', 'pujjo_rt5682_probe.sys', 'pujjo_rt1019_probe.sys')) {
+            $file = Join-Path $output $name
+            if (!(Test-Path $file) -or (Get-Item $file).Length -eq 0) { throw "Missing build product: $file" }
+            Get-FileHash $file -Algorithm SHA256 | Format-List | Out-File build-logs/products.txt -Append
+            if ($file.EndsWith('.sys')) {
+              $signature = Get-AuthenticodeSignature $file
+              if ($signature.Status -ne 'NotSigned') { throw "Expected unsigned development binary: $file" }
+            }
+          }
+          'NOT INSTALLABLE - NOT HARDWARE VERIFIED. Unsigned compile-only development products.' | Set-Content "$output/NOT-INSTALLABLE.txt"
       - name: Preserve logs even when checks or compilation fail
         if: always()
         uses: actions/upload-artifact@v4
@@ -105,6 +121,7 @@ jobs:
         with:
           name: Pujjo-${{ matrix.configuration }}-NOT-INSTALLABLE-NOT-HARDWARE-VERIFIED
           path: |
+            bin/x64/${{ matrix.configuration }}/NOT-INSTALLABLE.txt
             bin/x64/${{ matrix.configuration }}/**/*.sys
             bin/x64/${{ matrix.configuration }}/**/*.lib
             bin/x64/${{ matrix.configuration }}/**/*.pdb

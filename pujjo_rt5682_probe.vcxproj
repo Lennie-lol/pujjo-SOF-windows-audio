@@ -21,5 +21,7 @@
   <ClInclude Include="src\driver\experimental\PujjoRt5682sCodec.h" />
   <ClInclude Include="src\driver\experimental\PujjoHeadsetClock.h" />
   <ClInclude Include="src\driver\peripheral\PujjoRt5682sSpbWindows.h" /><ClInclude Include="src\driver\PujjoBoardGuard.h" /><ClInclude Include="src\driver\PujjoBoardId.h" /></ItemGroup>
+ <!-- Compile-only prototypes: no signing certificate or installable package. -->
+ <PropertyGroup><SignMode>Off</SignMode></PropertyGroup>
  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

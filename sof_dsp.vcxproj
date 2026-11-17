@@ -145,6 +145,8 @@
       <Project>{B869DD57-F1CB-4C88-B495-B4317F45E6F5}</Project>
     </ProjectReference>
   </ItemGroup>
+  <!-- Compile-only prototypes: no signing certificate or installable package. -->
+  <PropertyGroup><SignMode>Off</SignMode></PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>

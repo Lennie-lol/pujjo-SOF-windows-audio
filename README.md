@@ -1,10 +1,12 @@
 # Pujjo SOF Windows Audio Driver
 
 **Experimental open-source Windows 11 audio driver development for Google Pujjo / Pujjo1e Chromebooks**  
+**Current build investigation:** see [BUILD_DEBUG_REPORT.md](BUILD_DEBUG_REPORT.md) for run #4, the signing fix, test logs and the GitHub write-access blocker. No version bump.
+
 **Current source version:** `v0.0.17` · **Status:** source-only / development · **License:** see [`LICENSE`](LICENSE)
 
 > [!CAUTION]
-> **This project does not yet provide working Windows audio.** It has **not** successfully compiled with the Windows Driver Kit (WDK), installed on the target device, booted Intel SOF firmware, or played audio through the internal speakers. There is **no validated installable driver package**. Live DSP boot, codec writes, and amplifier activation remain disabled by default. **Do not install or force-load the prototype, bypass its guards, or use the preserved upstream installation instructions.**
+> **This project does not yet provide working Windows audio.** The latest WDK run compiled and linked all projects but failed during signing; the revised unsigned build is **not yet verified**. It has not been installed on the target device, booted Intel SOF firmware, or played audio through the internal speakers. There is **no validated installable driver package**. Live DSP boot, codec writes, and amplifier activation remain disabled by default. **Do not install or force-load the prototype, bypass its guards, or use the preserved upstream installation instructions.**
 
 This README consolidates the important Pujjo-specific information from the previous 14 `README*.md` files. Older release notes are historical, not proof of what v0.0.17 can do. The inherited SOF Windows source also contains generic HDA, SoundWire, USB, HDMI, AMD and other-platform code; **those upstream features and support claims are not verified for this Pujjo fork**.
 
@@ -36,7 +38,7 @@ The goal is an independently developed Windows 11 x64 audio solution for an Inte
 | Intel SOF firmware | ADL-N selection and manifest metadata parser improved; no authenticated, working DSP boot |
 | DMA / concurrency | Safer common-buffer policy and serialized transport lifecycle source; mock/host-tested only |
 | SSP topology and Windows endpoint | Candidate Linux graph inspected; **no working Windows WaveRT render/capture pipeline** |
-| Windows WDK build | Two real CI attempts reached the compiler but failed; fixes prepared in v0.0.17, **not yet WDK-verified** |
+| Windows WDK build | Run #4 compiled/linked all projects; failed in TestSign. Unsigned fix prepared; **new Windows run blocked by integration write access** |
 | Speaker / headset / microphone audio | **Not working and not hardware-tested** |
 
 A successful host test or a future `.sys` compilation is **not** proof that hardware sound works.

@@ -16,6 +16,9 @@ for name in projects:
     configs = tree.findall('.//m:PlatformToolset', ns)
     assert len(configs) == 2 and all(x.text == 'WindowsKernelModeDriver10.0'
                                       for x in configs), name
+    # CI run #4 linked all drivers, then failed in default test signing.
+    sign_modes = tree.findall('.//m:SignMode', ns)
+    assert sign_modes and all(x.text == 'Off' for x in sign_modes), name
     compiles = tree.findall('.//m:ClCompile', ns)
     for compile_item in compiles:
         flags = compile_item.find('m:AdditionalOptions', ns)
@@ -31,6 +34,7 @@ for f in ('src/driver/peripheral/PujjoRt1019pGpioWindows.c',
           'src/driver/peripheral/PujjoRt5682sSpbWindows.c'):
     text = (root / f).read_text()
     assert '#include <reshub.h>' in text
+    assert text.index('#define RESHUB_USE_HELPER_ROUTINES') < text.index('#include <reshub.h>')
     assert 'RESOURCE_HUB_CREATE_PATH_FROM_ID(&path, idLow, idHigh)' in text
     assert 'DECLARE_UNICODE_STRING_SIZE(path, RESOURCE_HUB_PATH_SIZE)' in text
     # Reshub.h exposes a FORCEINLINE FUNCTION, not a preprocessor symbol.
@@ -55,4 +59,4 @@ assert 'typedef uint16_t PJ_WORD;' in fixed
 codec = (root / 'src/driver/experimental/PujjoRt5682sCodec.c').read_text()
 assert '#error PJ5682S_TEST_ONLY_WRITES is forbidden in a Windows kernel build' in codec
 assert not list(root.rglob('*.inf')) and not list(root.rglob('*.cat'))
-print('PASS: CI #1/#2 regression contracts, correct WDK /kernel and Resource Hub usage')
+print('PASS: CI #1-#4 regression contracts, correct WDK /kernel and Resource Hub usage')
