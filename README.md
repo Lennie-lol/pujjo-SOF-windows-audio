@@ -1,12 +1,15 @@
 # Pujjo SOF Windows Audio Driver
 
 **Experimental open-source Windows 11 audio driver development for Google Pujjo / Pujjo1e Chromebooks**  
-**Current build investigation:** see [BUILD_DEBUG_REPORT.md](BUILD_DEBUG_REPORT.md) for run #4, the signing fix, test logs and the GitHub write-access blocker. No version bump.
+**Build milestone (2026-11-17):** GitHub Actions #10 on `main` passed the WDK
+Debug and Release builds plus portable regressions. Windows 11 VM Debug and
+Release builds also passed. See [PREINSTALL_READINESS.md](PREINSTALL_READINESS.md)
+for the remaining blockers. No version bump.
 
 **Current source version:** `v0.0.17` · **Status:** source-only / development · **License:** see [`LICENSE`](LICENSE)
 
 > [!CAUTION]
-> **This project does not yet provide working Windows audio.** The latest WDK run compiled and linked all projects but failed during signing; the revised unsigned build is **not yet verified**. It has not been installed on the target device, booted Intel SOF firmware, or played audio through the internal speakers. There is **no validated installable driver package**. Live DSP boot, codec writes, and amplifier activation remain disabled by default. **Do not install or force-load the prototype, bypass its guards, or use the preserved upstream installation instructions.**
+> **This project does not yet provide working Windows audio.** The WDK Debug/Release source-only builds now pass, but the unsigned output is **not an installable driver**. It has not been installed on the target device, booted Intel SOF firmware, or played audio through the internal speakers. There is **no validated installable driver package**. Live DSP boot, codec writes, and amplifier activation remain disabled by default. **Do not install or force-load the prototype, bypass its guards, or use the preserved upstream installation instructions.**
 
 This README consolidates the important Pujjo-specific information from the previous 14 `README*.md` files. Older release notes are historical, not proof of what v0.0.17 can do. The inherited SOF Windows source also contains generic HDA, SoundWire, USB, HDMI, AMD and other-platform code; **those upstream features and support claims are not verified for this Pujjo fork**.
 
@@ -38,7 +41,7 @@ The goal is an independently developed Windows 11 x64 audio solution for an Inte
 | Intel SOF firmware | ADL-N selection and manifest metadata parser improved; no authenticated, working DSP boot |
 | DMA / concurrency | Safer common-buffer policy and serialized transport lifecycle source; mock/host-tested only |
 | SSP topology and Windows endpoint | Candidate Linux graph inspected; **no working Windows WaveRT render/capture pipeline** |
-| Windows WDK build | Run #4 compiled/linked all projects; failed in TestSign. Unsigned fix prepared; **new Windows run blocked by integration write access** |
+| Windows WDK build | GitHub Actions #10 on `main` passed both Debug and Release unsigned builds; Windows 11 VM independently passed both |
 | Speaker / headset / microphone audio | **Not working and not hardware-tested** |
 
 A successful host test or a future `.sys` compilation is **not** proof that hardware sound works.
@@ -305,7 +308,7 @@ For tracked blockers and evidence see [`REMAINING_BLOCKERS.md`](REMAINING_BLOCKE
 - Optional public Windows codec reference: [coolstar/rt5682s](https://github.com/coolstar/rt5682s), subject to its own Apache-2.0/MS-PL attribution requirements and separate device validation. No such source has been imported here.
 - Microsoft driver docs: [WDK build](https://learn.microsoft.com/en-us/windows-hardware/drivers/develop/building-a-driver), [WDF hardware resources](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/finding-and-mapping-hardware-resources), [SPB Resource Hub connection IDs](https://learn.microsoft.com/en-us/windows-hardware/drivers/spb/connection-ids-for-spb-connected-peripheral-devices), [SPB transfer lists](https://learn.microsoft.com/en-us/windows-hardware/drivers/spb/using-the-spb-transfer-list-structure), [GPIO resources](https://learn.microsoft.com/en-us/windows-hardware/drivers/gpio/gpio-based-hardware-resources), [common buffers](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/using-common-buffers).
 
-**In short:** v0.0.17 is a source-and-test milestone, not an installable or working Windows audio driver. The next concrete milestone is a **successful Windows WDK compile**, followed by implementation of the real firmware/audio pipeline and eventually carefully controlled hardware validation.
+**In short:** v0.0.17 now compiles on Windows WDK in Debug and Release. It is still **not an installable or working audio driver**. See [PREINSTALL_READINESS.md](PREINSTALL_READINESS.md) for hardware-free validation and the missing real firmware/audio pipeline.
 
 
 ### Windows CI compile-fix iteration (after Actions run #1, 2026-11-17)
