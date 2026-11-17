@@ -3,6 +3,8 @@
  * No address, GPIO pin, or bus speed is hard-coded. Caller must validate
  * Pujjo SMBIOS + RTL5682 PnP ID + translated I2C resource BEFORE opening.
  * All entry points require PASSIVE_LEVEL. Windows WDK build NOT verified. */
+/* Enable the inline Resource Hub path helpers before any WDK headers. */
+#define RESHUB_USE_HELPER_ROUTINES
 #include <ntddk.h>
 #include <wdf.h>
 #include <reshub.h>

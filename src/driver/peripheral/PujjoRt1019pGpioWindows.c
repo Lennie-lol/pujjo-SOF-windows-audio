@@ -3,6 +3,8 @@
  * Does NOT use ACPI physical GPIO number 75, nor access controller registers.
  * The amp may need a platform-specific logical polarity check before use.
  * WDK compilation and real-hardware behavior are NOT yet verified. */
+/* Enable the inline Resource Hub path helpers before any WDK headers. */
+#define RESHUB_USE_HELPER_ROUTINES
 #include <ntddk.h>
 #include <wdf.h>
 #include <reshub.h>

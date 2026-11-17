@@ -1,5 +1,5 @@
 {
-  "description": "v0.0.17 source-only with validated offline checks; hash manifests excluded from sha256 map",
+  "description": "v0.0.17 source-only Resource Hub CI hotfix; Windows WDK rebuild not yet verified",
   "sha256": {
     ".gitattributes": "75672732c9908d8b2a6eac0f2b45f188d561346d53080bfba9dd23b40bde97ab",
     ".github/workflows/compile-windows.yml": "4ecea47b87910665c60f47ecfdb7798dae7efd8f6189bec63fd9b28417761f0e",
@@ -318,9 +318,9 @@
     "src/driver/peripheral/PujjoPeripheralKmdf.c": "3fdfe40264b9d010f3bf4b55f8fd4dc8b29892c78af5fb73b5e2ccfc71983334",
     "src/driver/peripheral/PujjoResourcePolicy.c": "20e29a2599430415fdbadb9b5daa1d5d44cb6ab4ee7ff2db3d0d38146b2a0550",
     "src/driver/peripheral/PujjoResourcePolicy.h": "55cb0e556a3849a3ecdfbd170fad676af59cace75cad236ade94d65ac46f1b10",
-    "src/driver/peripheral/PujjoRt1019pGpioWindows.c": "ca98289cd16bebff31619e3d585acbf6e8d64e993e658c4ad485569e7151b955",
+    "src/driver/peripheral/PujjoRt1019pGpioWindows.c": "50d087f50c8d563b43bc3a65783f0a4156705be30841a8ce3972a93d8c560db7",
     "src/driver/peripheral/PujjoRt1019pGpioWindows.h": "7260b100ab912414c7bfcd1c41e88c30b95eaceb3e487341af0629b49e561000",
-    "src/driver/peripheral/PujjoRt5682sSpbWindows.c": "cd6fbf603d1a6e4f5a94371294b4233a004dc01579cb84e89951a78b5f20a3b0",
+    "src/driver/peripheral/PujjoRt5682sSpbWindows.c": "78ae715b5369fbeb1df1257a95323280da35c4c5cd2f9487fe294363411b2fe4",
     "src/driver/peripheral/PujjoRt5682sSpbWindows.h": "55522735bd8d354a399bebf25b9fdda710ff1d032fdbfbedde2286cb49702b94",
     "src/driver/sof_dsp.inx": "e98a6fab053a4a44f1f27ec8328ea01dd63fe9566b7e30a64695fbcb354cfc86",
     "src/driver/sof_sdca_ext.inx": "3ca5d9ee69edc570fe50832a07b81ee52b5e6d11ea2c4bcc299e50fd296385d6",
