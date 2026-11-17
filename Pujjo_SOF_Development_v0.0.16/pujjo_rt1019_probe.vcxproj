@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+ <ItemGroup Label="ProjectConfigurations">
+  <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+ </ItemGroup>
+ <PropertyGroup Label="Globals"><ProjectGuid>{975DA0DA-85F0-416B-BA0B-5A5E59C9E21A}</ProjectGuid><Keyword>Win32Proj</Keyword><RootNamespace>pujjo_rt1019_probe</RootNamespace><WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion></PropertyGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+ <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration"><ConfigurationType>Driver</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset><DriverType>KMDF</DriverType><DriverTargetPlatform>Desktop</DriverTargetPlatform></PropertyGroup>
+ <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration"><ConfigurationType>Driver</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset><DriverType>KMDF</DriverType><DriverTargetPlatform>Desktop</DriverTargetPlatform></PropertyGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+ <PropertyGroup><OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir><IntDir>$(ProjectDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir><TargetName>pujjo_rt1019_probe</TargetName><TargetExt>.sys</TargetExt></PropertyGroup>
+ <ItemDefinitionGroup>
+  <ClCompile><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><SDLCheck>true</SDLCheck><BufferSecurityCheck>true</BufferSecurityCheck><PreprocessorDefinitions>_AMD64_;AMD64;PJ_TARGET_AMP=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)src\driver;$(ProjectDir)src\driver\peripheral;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+  <Link><AdditionalDependencies>Aux_Klib.lib;%(AdditionalDependencies)</AdditionalDependencies><GenerateDebugInformation>true</GenerateDebugInformation></Link>
+ </ItemDefinitionGroup>
+ <ItemGroup><ClCompile Include="src\driver\peripheral\PujjoResourcePolicy.c" /><ClCompile Include="src\driver\peripheral\PujjoPeripheralKmdf.c" /><ClCompile Include="src\driver\peripheral\PujjoRt1019pGpioWindows.c" /><ClCompile Include="src\driver\PujjoBoardGuard.c" /><ClCompile Include="src\driver\PujjoBoardId.c" /></ItemGroup>
+ <ItemGroup><ClInclude Include="src\driver\peripheral\PujjoResourcePolicy.h" /><ClInclude Include="src\driver\peripheral\PujjoRt1019pGpioWindows.h" /><ClInclude Include="src\driver\PujjoBoardGuard.h" /><ClInclude Include="src\driver\PujjoBoardId.h" /></ItemGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

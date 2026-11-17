@@ -1,0 +1,74 @@
+[
+  {
+    "command": "python scripts/verify_upstream_integrity.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/run_acpi_resource_tests.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/run_codec_init_tests.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/run_device_map_tests.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/run_headset_clock_tests.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/run_pujjo_sof_fw_tests.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/run_pujjo_tests.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/run_rt1019p_amp_tests.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/run_rt5682s_codec_tests.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/run_topology_evidence_tests.py",
+    "exit_code": 1
+  },
+  {
+    "command": "python tests/test_acpi_parser.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/test_kmdf_security.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/test_pujjo_sof_fw_static.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/test_rt1019p_static.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/test_rt5682s_static.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/test_s0idle_and_d3.py",
+    "exit_code": 1
+  },
+  {
+    "command": "python tests/test_sof_zephyr_log.py",
+    "exit_code": 0
+  },
+  {
+    "command": "python tests/verify_linux_topology.py",
+    "exit_code": 0
+  }
+]

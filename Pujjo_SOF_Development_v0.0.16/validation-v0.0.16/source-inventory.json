@@ -1,0 +1,902 @@
+[
+  {
+    "path": "Build_Pujjo.pyw",
+    "bytes": 7044
+  },
+  {
+    "path": "CHANGELOG_PUJJO.md",
+    "bytes": 7616
+  },
+  {
+    "path": "CHANGES.md",
+    "bytes": 2383
+  },
+  {
+    "path": "CODEX_INSTRUCTIONS_PUJJO_SOF_v0.0.13.md",
+    "bytes": 10090
+  },
+  {
+    "path": "CODEX_RESULTS.md",
+    "bytes": 4496
+  },
+  {
+    "path": "PACKAGE_VERIFICATION.md",
+    "bytes": 676
+  },
+  {
+    "path": "README.md",
+    "bytes": 41162
+  },
+  {
+    "path": "README_ACPI_DEVICE_MAP.md",
+    "bytes": 2107
+  },
+  {
+    "path": "README_ACPI_RESOURCES.md",
+    "bytes": 2572
+  },
+  {
+    "path": "README_BRINGUP_v0.0.15.md",
+    "bytes": 5946
+  },
+  {
+    "path": "README_BUILD_FIRST.md",
+    "bytes": 5315
+  },
+  {
+    "path": "README_CODEC_INITIALIZATION.md",
+    "bytes": 1530
+  },
+  {
+    "path": "README_INTEL_SOF_FIRMWARE_DEVELOPMENT.md",
+    "bytes": 4903
+  },
+  {
+    "path": "README_KERNEL_PORTING.md",
+    "bytes": 4500
+  },
+  {
+    "path": "README_LINUX_TOPOLOGY.md",
+    "bytes": 3515
+  },
+  {
+    "path": "README_PUJJO.md",
+    "bytes": 7211
+  },
+  {
+    "path": "README_RT1019P_DEVELOPMENT.md",
+    "bytes": 5678
+  },
+  {
+    "path": "README_RT5682S_DEVELOPMENT.md",
+    "bytes": 6739
+  },
+  {
+    "path": "README_SPEAKER_HEADSET_SEPARATION.md",
+    "bytes": 3818
+  },
+  {
+    "path": "README_TOPOLOGY_VALIDATION.md",
+    "bytes": 3396
+  },
+  {
+    "path": "REMAINING_BLOCKERS.md",
+    "bytes": 3415
+  },
+  {
+    "path": "RESEARCH_v0.0.16.md",
+    "bytes": 3165
+  },
+  {
+    "path": "REVIEW_DISTILLED.md",
+    "bytes": 3345
+  },
+  {
+    "path": "START_HERE.md",
+    "bytes": 974
+  },
+  {
+    "path": "TEST_RESULTS.md",
+    "bytes": 2698
+  },
+  {
+    "path": "TEST_RESULTS_v0.0.15.md",
+    "bytes": 1251
+  },
+  {
+    "path": "UPSTREAM_LINUX.md",
+    "bytes": 9213
+  },
+  {
+    "path": "historical-v0.0.15-reports/CHANGES.md",
+    "bytes": 4060
+  },
+  {
+    "path": "historical-v0.0.15-reports/CODEX_RESULTS.md",
+    "bytes": 8965
+  },
+  {
+    "path": "historical-v0.0.15-reports/PACKAGE_VERIFICATION.md",
+    "bytes": 560
+  },
+  {
+    "path": "historical-v0.0.15-reports/REMAINING_BLOCKERS.md",
+    "bytes": 3883
+  },
+  {
+    "path": "historical-v0.0.15-reports/TEST_RESULTS.md",
+    "bytes": 605
+  },
+  {
+    "path": "include/compat/linux/bitfield.h",
+    "bytes": 256
+  },
+  {
+    "path": "include/compat/linux/bits.h",
+    "bytes": 248
+  },
+  {
+    "path": "include/compat/linux/compiler.h",
+    "bytes": 256
+  },
+  {
+    "path": "include/compat/linux/completion.h",
+    "bytes": 260
+  },
+  {
+    "path": "include/compat/linux/device.h",
+    "bytes": 252
+  },
+  {
+    "path": "include/compat/linux/errno.h",
+    "bytes": 250
+  },
+  {
+    "path": "include/compat/linux/io.h",
+    "bytes": 244
+  },
+  {
+    "path": "include/compat/linux/kernel.h",
+    "bytes": 252
+  },
+  {
+    "path": "include/compat/linux/types.h",
+    "bytes": 250
+  },
+  {
+    "path": "include/compat/linux/uuid.h",
+    "bytes": 338
+  },
+  {
+    "path": "include/compat/sound/sof/channel_map.h",
+    "bytes": 116
+  },
+  {
+    "path": "include/compat/sound/sof/control.h",
+    "bytes": 112
+  },
+  {
+    "path": "include/compat/sound/sof/dai-amd.h",
+    "bytes": 112
+  },
+  {
+    "path": "include/compat/sound/sof/dai-imx.h",
+    "bytes": 112
+  },
+  {
+    "path": "include/compat/sound/sof/dai-intel.h",
+    "bytes": 114
+  },
+  {
+    "path": "include/compat/sound/sof/dai-mediatek.h",
+    "bytes": 117
+  },
+  {
+    "path": "include/compat/sound/sof/dai.h",
+    "bytes": 108
+  },
+  {
+    "path": "include/compat/sound/sof/debug.h",
+    "bytes": 110
+  },
+  {
+    "path": "include/compat/sound/sof/ext_manifest.h",
+    "bytes": 117
+  },
+  {
+    "path": "include/compat/sound/sof/ext_manifest4.h",
+    "bytes": 118
+  },
+  {
+    "path": "include/compat/sound/sof/header.h",
+    "bytes": 111
+  },
+  {
+    "path": "include/compat/sound/sof/info.h",
+    "bytes": 109
+  },
+  {
+    "path": "include/compat/sound/sof/ipc4/header.h",
+    "bytes": 116
+  },
+  {
+    "path": "include/compat/sound/sof/pm.h",
+    "bytes": 107
+  },
+  {
+    "path": "include/compat/sound/sof/sof_osal.h",
+    "bytes": 113
+  },
+  {
+    "path": "include/compat/sound/sof/stream.h",
+    "bytes": 111
+  },
+  {
+    "path": "include/compat/sound/sof/topology.h",
+    "bytes": 113
+  },
+  {
+    "path": "include/compat/sound/sof/trace.h",
+    "bytes": 110
+  },
+  {
+    "path": "include/compat/sound/sof/xtensa.h",
+    "bytes": 111
+  },
+  {
+    "path": "include/compat/uapi/sound/sof/abi.h",
+    "bytes": 113
+  },
+  {
+    "path": "include/compat/uapi/sound/sof/fw.h",
+    "bytes": 112
+  },
+  {
+    "path": "include/compat/uapi/sound/sof/header.h",
+    "bytes": 116
+  },
+  {
+    "path": "include/compat/uapi/sound/sof/tokens.h",
+    "bytes": 116
+  },
+  {
+    "path": "include/intel/atom.h",
+    "bytes": 1956
+  },
+  {
+    "path": "include/intel/ext_manifest.h",
+    "bytes": 1073
+  },
+  {
+    "path": "include/intel/hda-ipc.h",
+    "bytes": 1746
+  },
+  {
+    "path": "include/intel/hda.h",
+    "bytes": 38866
+  },
+  {
+    "path": "include/intel/lnl.h",
+    "bytes": 702
+  },
+  {
+    "path": "include/intel/mtl.h",
+    "bytes": 5204
+  },
+  {
+    "path": "include/intel/nvl.h",
+    "bytes": 414
+  },
+  {
+    "path": "include/intel/ptl.h",
+    "bytes": 618
+  },
+  {
+    "path": "include/intel/shim.h",
+    "bytes": 6714
+  },
+  {
+    "path": "include/intel/telemetry.h",
+    "bytes": 789
+  },
+  {
+    "path": "include/sof/channel_map.h",
+    "bytes": 1989
+  },
+  {
+    "path": "include/sof/control.h",
+    "bytes": 5015
+  },
+  {
+    "path": "include/sof/dai-amd.h",
+    "bytes": 953
+  },
+  {
+    "path": "include/sof/dai-imx.h",
+    "bytes": 1393
+  },
+  {
+    "path": "include/sof/dai-intel.h",
+    "bytes": 7354
+  },
+  {
+    "path": "include/sof/dai-mediatek.h",
+    "bytes": 479
+  },
+  {
+    "path": "include/sof/dai.h",
+    "bytes": 5069
+  },
+  {
+    "path": "include/sof/debug.h",
+    "bytes": 1444
+  },
+  {
+    "path": "include/sof/ext_manifest.h",
+    "bytes": 3817
+  },
+  {
+    "path": "include/sof/ext_manifest4.h",
+    "bytes": 3571
+  },
+  {
+    "path": "include/sof/header.h",
+    "bytes": 6920
+  },
+  {
+    "path": "include/sof/info.h",
+    "bytes": 3614
+  },
+  {
+    "path": "include/sof/ipc4/header.h",
+    "bytes": 28300
+  },
+  {
+    "path": "include/sof/pm.h",
+    "bytes": 1151
+  },
+  {
+    "path": "include/sof/sof_osal.h",
+    "bytes": 12432
+  },
+  {
+    "path": "include/sof/stream.h",
+    "bytes": 4679
+  },
+  {
+    "path": "include/sof/topology.h",
+    "bytes": 9130
+  },
+  {
+    "path": "include/sof/trace.h",
+    "bytes": 3528
+  },
+  {
+    "path": "include/sof/uapi/abi.h",
+    "bytes": 2118
+  },
+  {
+    "path": "include/sof/uapi/fw.h",
+    "bytes": 2200
+  },
+  {
+    "path": "include/sof/uapi/header.h",
+    "bytes": 1923
+  },
+  {
+    "path": "include/sof/uapi/tokens.h",
+    "bytes": 7438
+  },
+  {
+    "path": "include/sof/xtensa.h",
+    "bytes": 1010
+  },
+  {
+    "path": "pujjo_rt1019_probe.vcxproj",
+    "bytes": 3082
+  },
+  {
+    "path": "pujjo_rt5682_probe.vcxproj",
+    "bytes": 3402
+  },
+  {
+    "path": "scripts/sof_zephyr_log.py",
+    "bytes": 41775
+  },
+  {
+    "path": "scripts/sync_upstream_linux.py",
+    "bytes": 22757
+  },
+  {
+    "path": "scripts/verify_upstream_integrity.py",
+    "bytes": 718
+  },
+  {
+    "path": "sof_core.vcxproj",
+    "bytes": 5646
+  },
+  {
+    "path": "sof_dsp.vcxproj",
+    "bytes": 7750
+  },
+  {
+    "path": "src/core/fw-file-profile.c",
+    "bytes": 9895
+  },
+  {
+    "path": "src/core/intel/hda-dsp.c",
+    "bytes": 47254
+  },
+  {
+    "path": "src/core/intel/mtl.c",
+    "bytes": 24822
+  },
+  {
+    "path": "src/core/intel/ptl.c",
+    "bytes": 4620
+  },
+  {
+    "path": "src/core/intel/tgl.c",
+    "bytes": 7858
+  },
+  {
+    "path": "src/core/ipc4-control.c",
+    "bytes": 29112
+  },
+  {
+    "path": "src/core/ipc4-fw-reg.h",
+    "bytes": 5121
+  },
+  {
+    "path": "src/core/ipc4-loader.c",
+    "bytes": 19249
+  },
+  {
+    "path": "src/core/ipc4-priv.h",
+    "bytes": 6742
+  },
+  {
+    "path": "src/core/ipc4-topology.c",
+    "bytes": 139341
+  },
+  {
+    "path": "src/core/ipc4-topology.h",
+    "bytes": 17386
+  },
+  {
+    "path": "src/core/ipc4.c",
+    "bytes": 31785
+  },
+  {
+    "path": "src/core/loader.c",
+    "bytes": 5245
+  },
+  {
+    "path": "src/core/ops.h",
+    "bytes": 19323
+  },
+  {
+    "path": "src/core/sof-audio.h",
+    "bytes": 26732
+  },
+  {
+    "path": "src/core/sof-priv.h",
+    "bytes": 31662
+  },
+  {
+    "path": "src/core/sof_core_init.c",
+    "bytes": 1207
+  },
+  {
+    "path": "src/driver/Device.c",
+    "bytes": 42060
+  },
+  {
+    "path": "src/driver/Device.h",
+    "bytes": 18995
+  },
+  {
+    "path": "src/driver/Driver.c",
+    "bytes": 35303
+  },
+  {
+    "path": "src/driver/Driver.h",
+    "bytes": 3928
+  },
+  {
+    "path": "src/driver/HdaBusInterface.c",
+    "bytes": 26148
+  },
+  {
+    "path": "src/driver/HdaBusInterface.h",
+    "bytes": 1805
+  },
+  {
+    "path": "src/driver/HdaVerb.c",
+    "bytes": 40058
+  },
+  {
+    "path": "src/driver/HdaVerb.h",
+    "bytes": 13209
+  },
+  {
+    "path": "src/driver/Hw.c",
+    "bytes": 13332
+  },
+  {
+    "path": "src/driver/Hw.h",
+    "bytes": 29391
+  },
+  {
+    "path": "src/driver/Ipc.c",
+    "bytes": 46341
+  },
+  {
+    "path": "src/driver/Ipc.h",
+    "bytes": 8343
+  },
+  {
+    "path": "src/driver/Loader.c",
+    "bytes": 47527
+  },
+  {
+    "path": "src/driver/Loader.h",
+    "bytes": 9513
+  },
+  {
+    "path": "src/driver/Nhlt.c",
+    "bytes": 9776
+  },
+  {
+    "path": "src/driver/Nhlt.h",
+    "bytes": 9068
+  },
+  {
+    "path": "src/driver/PciIds.h",
+    "bytes": 7977
+  },
+  {
+    "path": "src/driver/PortClsAdapter.cpp",
+    "bytes": 101616
+  },
+  {
+    "path": "src/driver/PortClsAdapter.h",
+    "bytes": 2177
+  },
+  {
+    "path": "src/driver/PujjoBoardGuard.c",
+    "bytes": 1065
+  },
+  {
+    "path": "src/driver/PujjoBoardGuard.h",
+    "bytes": 244
+  },
+  {
+    "path": "src/driver/PujjoBoardId.c",
+    "bytes": 3010
+  },
+  {
+    "path": "src/driver/PujjoBoardId.h",
+    "bytes": 394
+  },
+  {
+    "path": "src/driver/PujjoLinuxTopology.h",
+    "bytes": 1369
+  },
+  {
+    "path": "src/driver/SdwController.c",
+    "bytes": 134268
+  },
+  {
+    "path": "src/driver/SdwController.h",
+    "bytes": 11842
+  },
+  {
+    "path": "src/driver/Topo.c",
+    "bytes": 49677
+  },
+  {
+    "path": "src/driver/Topo.h",
+    "bytes": 25706
+  },
+  {
+    "path": "src/driver/UaolGateway.c",
+    "bytes": 12885
+  },
+  {
+    "path": "src/driver/UaolGateway.h",
+    "bytes": 5708
+  },
+  {
+    "path": "src/driver/UsbOffload.c",
+    "bytes": 17254
+  },
+  {
+    "path": "src/driver/UsbOffload.h",
+    "bytes": 11266
+  },
+  {
+    "path": "src/driver/WaveRt.c",
+    "bytes": 50630
+  },
+  {
+    "path": "src/driver/WaveRt.h",
+    "bytes": 14882
+  },
+  {
+    "path": "src/driver/experimental/PujjoAcpiResources.c",
+    "bytes": 822
+  },
+  {
+    "path": "src/driver/experimental/PujjoAcpiResources.h",
+    "bytes": 954
+  },
+  {
+    "path": "src/driver/experimental/PujjoAudioInit.c",
+    "bytes": 4062
+  },
+  {
+    "path": "src/driver/experimental/PujjoAudioInit.h",
+    "bytes": 2699
+  },
+  {
+    "path": "src/driver/experimental/PujjoBringupCoordinator.c",
+    "bytes": 7322
+  },
+  {
+    "path": "src/driver/experimental/PujjoBringupCoordinator.h",
+    "bytes": 3108
+  },
+  {
+    "path": "src/driver/experimental/PujjoDeviceMap.c",
+    "bytes": 3025
+  },
+  {
+    "path": "src/driver/experimental/PujjoDeviceMap.h",
+    "bytes": 1163
+  },
+  {
+    "path": "src/driver/experimental/PujjoHeadsetClock.c",
+    "bytes": 3005
+  },
+  {
+    "path": "src/driver/experimental/PujjoHeadsetClock.h",
+    "bytes": 1631
+  },
+  {
+    "path": "src/driver/experimental/PujjoRt1019pAmp.c",
+    "bytes": 4735
+  },
+  {
+    "path": "src/driver/experimental/PujjoRt1019pAmp.h",
+    "bytes": 2351
+  },
+  {
+    "path": "src/driver/experimental/PujjoRt5682sCodec.c",
+    "bytes": 5630
+  },
+  {
+    "path": "src/driver/experimental/PujjoRt5682sCodec.h",
+    "bytes": 3268
+  },
+  {
+    "path": "src/driver/experimental/PujjoSofFirmwarePolicy.c",
+    "bytes": 1367
+  },
+  {
+    "path": "src/driver/experimental/PujjoSofFirmwarePolicy.h",
+    "bytes": 1492
+  },
+  {
+    "path": "src/driver/experimental/PujjoTopologyEvidence.c",
+    "bytes": 3659
+  },
+  {
+    "path": "src/driver/experimental/PujjoTopologyEvidence.h",
+    "bytes": 1063
+  },
+  {
+    "path": "src/driver/peripheral/PujjoPeripheralKmdf.c",
+    "bytes": 9566
+  },
+  {
+    "path": "src/driver/peripheral/PujjoResourcePolicy.c",
+    "bytes": 2286
+  },
+  {
+    "path": "src/driver/peripheral/PujjoResourcePolicy.h",
+    "bytes": 1333
+  },
+  {
+    "path": "src/driver/peripheral/PujjoRt1019pGpioWindows.c",
+    "bytes": 4006
+  },
+  {
+    "path": "src/driver/peripheral/PujjoRt1019pGpioWindows.h",
+    "bytes": 1581
+  },
+  {
+    "path": "src/driver/peripheral/PujjoRt5682sSpbWindows.c",
+    "bytes": 6496
+  },
+  {
+    "path": "src/driver/peripheral/PujjoRt5682sSpbWindows.h",
+    "bytes": 1303
+  },
+  {
+    "path": "src/tests/main.c",
+    "bytes": 32527
+  },
+  {
+    "path": "tests/run_acpi_resource_tests.py",
+    "bytes": 687
+  },
+  {
+    "path": "tests/run_bringup_tests.py",
+    "bytes": 2049
+  },
+  {
+    "path": "tests/run_codec_init_tests.py",
+    "bytes": 802
+  },
+  {
+    "path": "tests/run_compiler_matrix.py",
+    "bytes": 4609
+  },
+  {
+    "path": "tests/run_device_map_tests.py",
+    "bytes": 667
+  },
+  {
+    "path": "tests/run_dma_tests.py",
+    "bytes": 2978
+  },
+  {
+    "path": "tests/run_headset_clock_tests.py",
+    "bytes": 583
+  },
+  {
+    "path": "tests/run_loader_transport_tests.py",
+    "bytes": 10134
+  },
+  {
+    "path": "tests/run_offline_suite.py",
+    "bytes": 2978
+  },
+  {
+    "path": "tests/run_pujjo_sof_fw_tests.py",
+    "bytes": 934
+  },
+  {
+    "path": "tests/run_pujjo_tests.py",
+    "bytes": 1366
+  },
+  {
+    "path": "tests/run_regression_suite.py",
+    "bytes": 4901
+  },
+  {
+    "path": "tests/run_resource_policy_tests.py",
+    "bytes": 674
+  },
+  {
+    "path": "tests/run_rt1019p_amp_tests.py",
+    "bytes": 1116
+  },
+  {
+    "path": "tests/run_rt5682s_codec_tests.py",
+    "bytes": 1228
+  },
+  {
+    "path": "tests/run_topology_evidence_tests.py",
+    "bytes": 1441
+  },
+  {
+    "path": "tests/run_windows_transport_tests.py",
+    "bytes": 1083
+  },
+  {
+    "path": "tests/test_acpi_parser.py",
+    "bytes": 1267
+  },
+  {
+    "path": "tests/test_audit_regressions.py",
+    "bytes": 1644
+  },
+  {
+    "path": "tests/test_bringup_static.py",
+    "bytes": 1430
+  },
+  {
+    "path": "tests/test_kmdf_security.py",
+    "bytes": 1703
+  },
+  {
+    "path": "tests/test_pujjo_acpi_resources.c",
+    "bytes": 1333
+  },
+  {
+    "path": "tests/test_pujjo_audio_init.c",
+    "bytes": 2910
+  },
+  {
+    "path": "tests/test_pujjo_boardid.c",
+    "bytes": 3024
+  },
+  {
+    "path": "tests/test_pujjo_bringup.c",
+    "bytes": 7515
+  },
+  {
+    "path": "tests/test_pujjo_device_map.c",
+    "bytes": 1828
+  },
+  {
+    "path": "tests/test_pujjo_headset_clock.c",
+    "bytes": 2208
+  },
+  {
+    "path": "tests/test_pujjo_resource_policy.c",
+    "bytes": 2518
+  },
+  {
+    "path": "tests/test_pujjo_sof_fw_policy.c",
+    "bytes": 2151
+  },
+  {
+    "path": "tests/test_pujjo_sof_fw_static.py",
+    "bytes": 1457
+  },
+  {
+    "path": "tests/test_pujjo_topology_evidence.c",
+    "bytes": 2141
+  },
+  {
+    "path": "tests/test_rt1019p_amp.c",
+    "bytes": 5230
+  },
+  {
+    "path": "tests/test_rt1019p_static.py",
+    "bytes": 1464
+  },
+  {
+    "path": "tests/test_rt5682s_codec.c",
+    "bytes": 6139
+  },
+  {
+    "path": "tests/test_rt5682s_static.py",
+    "bytes": 1488
+  },
+  {
+    "path": "tests/test_s0idle_and_d3.py",
+    "bytes": 6206
+  },
+  {
+    "path": "tests/test_sof_zephyr_log.py",
+    "bytes": 12510
+  },
+  {
+    "path": "tests/test_v16_static.py",
+    "bytes": 1312
+  },
+  {
+    "path": "tests/test_windows_transports.c",
+    "bytes": 3511
+  },
+  {
+    "path": "tests/verify_kernel_reference.py",
+    "bytes": 2165
+  },
+  {
+    "path": "tests/verify_linux_topology.py",
+    "bytes": 2406
+  },
+  {
+    "path": "tests/wdk_host_mock.h",
+    "bytes": 5403
+  },
+  {
+    "path": "tools/analyze_acpi_audio.py",
+    "bytes": 6214
+  }
+]

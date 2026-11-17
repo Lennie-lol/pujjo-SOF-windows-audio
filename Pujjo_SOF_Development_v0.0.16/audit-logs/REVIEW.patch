@@ -1,0 +1,542 @@
+--- v0.0.13/.github/workflows/compile-windows.yml
++++ v0.0.14/.github/workflows/compile-windows.yml
+@@ -6,53 +6,100 @@
+ jobs:
+   build:
+     runs-on: windows-2022
+-    timeout-minutes: 50
++    timeout-minutes: 60
++    strategy:
++      fail-fast: false
++      matrix:
++        configuration: [Release, Debug]
++    env:
++      CC: clang
++      PYTHONUTF8: '1'
+     steps:
+       - uses: actions/checkout@v4
+-      - name: Python static safety checks
++      - name: Prepare log directory
++        shell: pwsh
++        run: New-Item -ItemType Directory -Force build-logs | Out-Null
++      - name: Hardware-free checks with explicit failure propagation
+         shell: pwsh
+         run: |
+-          python tests/test_kmdf_security.py
+-          python tests/test_pujjo_sof_fw_static.py
+-          python tests/run_pujjo_sof_fw_tests.py
+-          python tests/test_rt1019p_static.py
+-          python tests/run_rt1019p_amp_tests.py
+-          python tests/test_rt5682s_static.py
+-          python tests/run_rt5682s_codec_tests.py
+-          python tests/test_acpi_parser.py
+-          python tests/verify_linux_topology.py
+-          python scripts/verify_upstream_integrity.py
++          if (!(Get-Command clang -ErrorAction SilentlyContinue)) { throw 'Host clang required for portable C checks' }
++          python tests/run_offline_suite.py --logs build-logs/offline
++          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+       - name: Setup Visual Studio 2022 MSBuild
+         uses: microsoft/setup-msbuild@v2
+         with:
+           vs-version: '[17.0,18.0)'
+-      - name: Download WDK 26100 from Microsoft and install in disposable runner
++      - name: Provision Visual Studio 2022 WDK integration on disposable runner
+         shell: pwsh
+         run: |
+           $ErrorActionPreference = 'Stop'
+-          # Official WDK 26100 link from Microsoft's "Other WDK Downloads" page.
+-          $url = 'https://go.microsoft.com/fwlink/?linkid=2335869'
+-          $wdk = Join-Path $env:RUNNER_TEMP 'wdksetup.exe'
+-          Invoke-WebRequest -Uri $url -OutFile $wdk
+-          $proc = Start-Process $wdk -ArgumentList '/quiet /norestart /features +' -Wait -PassThru
+-          if ($proc.ExitCode -ne 0) { throw "WDK installer exit code $($proc.ExitCode)" }
+-          $header = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Include\10.0.26100.0\km\ntddk.h'
+-          if (!(Test-Path $header)) { throw 'WDK kernel header is missing' }
+-      - name: Build source-only prototypes (NOT drivers for installation)
++          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
++          $vs = & $vswhere -latest -products '*' -version '[17.0,18.0)' -property installationPath
++          if ($LASTEXITCODE -ne 0 -or !$vs) { throw 'VS 2022 not found' }
++          $component = 'Component.Microsoft.Windows.DriverKit'
++          if ($vs -match 'BuildTools') { $component += '.BuildTools' }
++          $installed = & $vswhere -latest -products '*' -version '[17.0,18.0)' -requires $component -property installationPath
++          if (!$installed) {
++            $setup = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\setup.exe'
++            $arguments = "modify --installPath `"$vs`" --add $component --quiet --norestart"
++            $proc = Start-Process $setup -ArgumentList $arguments -Wait -PassThru
++            "VS installer exit: $($proc.ExitCode)" | Out-File build-logs/vs-install.log
++            if ($proc.ExitCode -notin @(0,3010)) { throw "VS WDK component setup failed: $($proc.ExitCode)" }
++          }
++      - name: Install matching Microsoft SDK and WDK on disposable runner
+         shell: pwsh
+         run: |
+-          msbuild sof_windows_driver.sln /m /t:Build /p:Configuration=Release /p:Platform=x64 /p:TargetPlatformVersion=10.0.26100.0 /v:minimal
++          $ErrorActionPreference = 'Stop'
++          Start-Transcript -Path build-logs/kit-install.log
++          try {
++            # Microsoft Other WDK Downloads, VS2022 / 26100.6584 row.
++            $kits = @(
++              @{ Name='sdk'; Url='https://go.microsoft.com/fwlink/?linkid=2338977' },
++              @{ Name='wdk'; Url='https://go.microsoft.com/fwlink/?linkid=2335869' }
++            )
++            foreach ($kit in $kits) {
++              $installer = Join-Path $env:RUNNER_TEMP ($kit.Name + 'setup.exe')
++              Invoke-WebRequest -Uri $kit.Url -OutFile $installer
++              $sig = Get-AuthenticodeSignature $installer
++              if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
++                throw 'Kit installer Microsoft signature validation failed'
++              }
++              $proc = Start-Process $installer -ArgumentList '/quiet /norestart /features +' -Wait -PassThru
++              if ($proc.ExitCode -notin @(0,3010)) { throw "Kit installer exit code $($proc.ExitCode)" }
++            }
++            $kitRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
++            foreach ($relative in @('Include\10.0.26100.0\km\ntddk.h', 'Include\10.0.26100.0\um\Windows.h', 'Lib\10.0.26100.0\km\x64\ntoskrnl.lib')) {
++              if (!(Test-Path (Join-Path $kitRoot $relative))) { throw "Missing SDK/WDK file: $relative" }
++            }
++          } finally { Stop-Transcript }
++      - name: Verify driver toolset after kit installation
++        shell: pwsh
++        run: |
++          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
++          $vs = & $vswhere -latest -products '*' -version '[17.0,18.0)' -property installationPath
++          $toolsets = Get-ChildItem "$vs\MSBuild\Microsoft\VC" -Recurse -Filter Toolset.props |
++            Where-Object { $_.FullName -match 'WindowsKernelModeDriver10.0' }
++          $toolsets.FullName | Out-File build-logs/wdk-toolsets.txt
++          if (!$toolsets) { throw 'WindowsKernelModeDriver10.0 integration missing after setup' }
++      - name: Compile source prototypes only
++        shell: pwsh
++        run: |
++          msbuild sof_windows_driver.sln /m /t:Rebuild /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:normal /bl:build-logs/msbuild.binlog /fl '/flp:LogFile=build-logs/msbuild.log;Verbosity=normal'
+           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+-      - name: Upload compilation products if successful; NEVER install
++      - name: Preserve logs even when checks or compilation fail
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: Pujjo-${{ matrix.configuration }}-logs
++          path: build-logs/
++          if-no-files-found: warn
++      - name: Upload successful intermediate products; NEVER install
+         if: success()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: Pujjo-prototype-NOT-INSTALLABLE
++          name: Pujjo-${{ matrix.configuration }}-NOT-INSTALLABLE-NOT-HARDWARE-VERIFIED
+           path: |
+-            bin/x64/Release/**/*.sys
+-            bin/x64/Release/**/*.lib
+-            bin/x64/Release/**/*.pdb
+-            bin/x64/Release/*.sys
+-            bin/x64/Release/*.lib
+-            bin/x64/Release/*.pdb
+-          if-no-files-found: warn
++            bin/x64/${{ matrix.configuration }}/**/*.sys
++            bin/x64/${{ matrix.configuration }}/**/*.lib
++            bin/x64/${{ matrix.configuration }}/**/*.pdb
++          if-no-files-found: error
+--- v0.0.13/Build_Pujjo.pyw
++++ v0.0.14/Build_Pujjo.pyw
+@@ -13,19 +13,8 @@
+ ROOT = Path(__file__).resolve().parent
+ KIT = Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Windows Kits' / '10'
+ LOG_DIR = ROOT / 'build-logs'
+-TESTS = [
+-    'tests/test_pujjo_sof_fw_static.py',
+-    'tests/run_pujjo_sof_fw_tests.py',
+-    'tests/test_kmdf_security.py',
+-    'tests/test_rt1019p_static.py',
+-    'tests/run_rt1019p_amp_tests.py',
+-    'tests/test_rt5682s_static.py',
+-    'tests/run_rt5682s_codec_tests.py',
+-    'tests/test_acpi_parser.py',
+-    'tests/test_sof_zephyr_log.py',
+-    'tests/verify_linux_topology.py',
+-    'scripts/verify_upstream_integrity.py',
+-]
++# Explicit offline allowlist includes test_kmdf_security.py and all portable suites.
++TESTS = ['tests/run_offline_suite.py']
+ 
+ def python_console():
+     exe = Path(sys.executable)
+--- v0.0.13/src/driver/Loader.c
++++ v0.0.14/src/driver/Loader.c
+@@ -55,6 +55,7 @@
+  *  - Buffer length against minimum extended manifest header size.
+  *  - Magic number equality with SOF_EXT_MAN4_MAGIC_NUMBER ($AE1 / 0x31454124).
+  *  - Manifest length boundary within the binary image size.
++ *  - cAVS2.5 binary-header bounds at offset 0x2000 within the payload.
+  * Extracts the payload offset, payload length, module count, version numbers,
+  * and ASCII binary name from the embedded base firmware header.
+  *
+@@ -74,14 +75,13 @@
+     const struct sof_ext_manifest4_hdr *extMan;
+     const struct sof_man4_fw_binary_header *fwHeader;
+     size_t minSize = sizeof(struct sof_ext_manifest4_hdr);
+-
+-    if (!Buffer || !Info || Size < minSize) {
+-        return STATUS_INVALID_PARAMETER;
+-    }
+-
++    size_t payloadSize;
++
++    if (!Info) return STATUS_INVALID_PARAMETER;
+     RtlZeroMemory(Info, sizeof(SOF_FW_IMAGE_INFO));
+-    Info->RawData = (PVOID)Buffer;
+-    Info->RawSize = (ULONG)Size;
++    if (!Buffer || Size < minSize) return STATUS_INVALID_PARAMETER;
++    /* The public result and DMA lengths are 32-bit. Never silently truncate. */
++    if (Size > (size_t)UINT32_MAX) return STATUS_INVALID_BUFFER_SIZE;
+ 
+     extMan = (const struct sof_ext_manifest4_hdr *)Buffer;
+ 
+@@ -96,50 +96,40 @@
+     }
+ 
+     /* Verify declared manifest length does not exceed overall binary size */
+-    if (extMan->len >= Size) {
++    if (extMan->len < minSize || extMan->len >= Size) {
+         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
+                    "[SOF] Manifest length (0x%x) exceeds binary size (0x%zx)\n",
+                    extMan->len, Size);
+         return STATUS_INVALID_BUFFER_SIZE;
+     }
+ 
+-    /*
+-     * Payload Boundary:
+-     * The actual signed DSP executable payload begins immediately after
+-     * the host extended manifest header (extMan->len).
+-     */
++    /* Pujjo ADL-N/cAVS2.5 IPC4 layout: the binary header is at a
++     * 0x2000 offset inside the signed payload, not at its first byte.
++     * This function is a bounded metadata parser, NOT signature validation.
++     * Older cAVS1.5 layouts need an explicit separate policy, not guessing. */
++    payloadSize = Size - extMan->len;
++    if (payloadSize < SOF_MAN4_FW_HDR_OFFSET ||
++        payloadSize - SOF_MAN4_FW_HDR_OFFSET < sizeof(*fwHeader))
++        return STATUS_INVALID_BUFFER_SIZE;
++    fwHeader = (const struct sof_man4_fw_binary_header *)
++        ((const UCHAR *)Buffer + extMan->len + SOF_MAN4_FW_HDR_OFFSET);
++    if (fwHeader->len < sizeof(*fwHeader) ||
++        fwHeader->len > payloadSize - SOF_MAN4_FW_HDR_OFFSET)
++        return STATUS_INVALID_IMAGE_FORMAT;
++
++    Info->RawData = (PVOID)Buffer;
++    Info->RawSize = (ULONG)Size;
+     Info->PayloadOffset = extMan->len;
+-    Info->PayloadSize = (ULONG)(Size - extMan->len);
+-    Info->NumModules = extMan->num_module_entries;
+-
+-    /*
+-     * Inspect Base Firmware Binary Header (if present at the start of payload):
+-     * Contains version numbers, build counters, and human-readable binary name.
+-     */
+-    if (Size >= (size_t)extMan->len + sizeof(struct sof_man4_fw_binary_header)) {
+-        fwHeader = (const struct sof_man4_fw_binary_header *)((const UCHAR *)Buffer + extMan->len);
+-        Info->MajorVersion = fwHeader->major_version;
+-        Info->MinorVersion = fwHeader->minor_version;
+-        Info->HotfixVersion = fwHeader->hotfix_version;
+-        Info->BuildVersion = fwHeader->build_version;
+-        Info->PreloadPageCount = fwHeader->preload_page_count;
+-
+-        RtlCopyMemory(Info->BinaryName, fwHeader->name, min(sizeof(Info->BinaryName) - 1, sizeof(fwHeader->name)));
+-        Info->BinaryName[sizeof(Info->BinaryName) - 1] = '\0';
+-
+-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
+-                   "[SOF] Firmware Image: %s, Version %u.%u.%u.%u, Payload Size 0x%x\n",
+-                   Info->BinaryName,
+-                   Info->MajorVersion,
+-                   Info->MinorVersion,
+-                   Info->HotfixVersion,
+-                   Info->BuildVersion,
+-                   Info->PayloadSize);
+-    } else {
+-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
+-                   "[SOF] Extended manifest verified, payload size: 0x%x bytes\n",
+-                   Info->PayloadSize);
+-    }
++    Info->PayloadSize = (ULONG)payloadSize;
++    Info->NumModules = fwHeader->num_module_entries;
++    Info->MajorVersion = fwHeader->major_version;
++    Info->MinorVersion = fwHeader->minor_version;
++    Info->HotfixVersion = fwHeader->hotfix_version;
++    Info->BuildVersion = fwHeader->build_version;
++    Info->PreloadPageCount = fwHeader->preload_page_count;
++    RtlCopyMemory(Info->BinaryName, fwHeader->name,
++        min(sizeof(Info->BinaryName) - 1, sizeof(fwHeader->name)));
++    Info->BinaryName[sizeof(Info->BinaryName) - 1] = '\0';
+ 
+     return STATUS_SUCCESS;
+ }
+@@ -235,9 +225,9 @@
+ 
+     ZwClose(fileHandle);
+ 
+-    if (!NT_SUCCESS(status)) {
++    if (!NT_SUCCESS(status) || ioStatus.Information != fileSize) {
+         ExFreePoolWithTag(rawBuffer, SOF_POOL_TAG);
+-        return status;
++        return NT_SUCCESS(status) ? STATUS_END_OF_FILE : status;
+     }
+ 
+     *Buffer = rawBuffer;
+@@ -1174,8 +1164,10 @@
+             "[12g] FW_READY notification not received within timeout, but FW_ENTERED verified (ROM_STS=0x%08x)\n",
+             statusReg);
+         SofLogBreadcrumb(bmsg);
+-        Ctx->FwState = SOF_FW_BOOT_COMPLETE;
+-        return STATUS_SUCCESS;
++        /* ROM entry is not IPC4 readiness. Never manufacture boot success. */
++        Ctx->FwState = SOF_FW_BOOT_FAILED;
++        SofPowerDownDsp(Ctx);
++        return STATUS_IO_TIMEOUT;
+     }
+ #endif /* PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT */
+ }
+--- v0.0.13/src/driver/Loader.h
++++ v0.0.14/src/driver/Loader.h
+@@ -143,7 +143,9 @@
+  * @brief Validates and parses an SOF firmware binary with Extended Manifest v4.
+  *
+  * Inspects the magic number ($AE1 / 0x31454124), verifies manifest length boundaries,
+- * calculates the stripped payload offset, and extracts version details from the base FW header.
++ * calculates the stripped payload offset, and extracts version details from the cAVS2.5
++ * base FW header at payload + SOF_MAN4_FW_HDR_OFFSET. This is metadata parsing
++ * only: it does not validate signatures, all module tables, or DSP compatibility.
+  *
+  * @param[in]  Buffer Pointer to raw firmware binary bytes in memory.
+  * @param[in]  Size   Size of the buffer in bytes.
+--- v0.0.13/src/driver/experimental/PujjoRt1019pAmp.c
++++ v0.0.14/src/driver/experimental/PujjoRt1019pAmp.c
+@@ -97,6 +97,8 @@
+     mute_ok = io->mute(io->context, 1);
+     gpio_ok = io->set_sdb(io->context, 0);
+     if (mute_ok || gpio_ok) return fault(a, io);
++    /* A successful emergency shutdown does not clear a latched fault. */
++    if (a->state == PJ1019_FAULT) return PJ1019_IO_FAILURE;
+     a->state = PJ1019_OFF_MUTED;
+     return PJ1019_OK;
+ #endif
+--- v0.0.13/src/driver/experimental/PujjoRt5682sCodec.c
++++ v0.0.14/src/driver/experimental/PujjoRt5682sCodec.c
+@@ -140,6 +140,7 @@
+     pj5682s_encode_write(reg,new_value,tx);
+     if (c->bus.write_only(c->bus.context,tx,sizeof(tx))!=0) {
+         c->state=PJ5682S_FAILED;
++        c->verified_id=0;
+         return PJ5682S_BUS_ERROR;
+     }
+     ++c->successful_test_write_count;
+@@ -149,6 +150,7 @@
+     if (status!=PJ5682S_OK) return status;
+     if ((observed & mask)!=(new_value & mask)) {
+         c->state=PJ5682S_FAILED;
++        c->verified_id=0;
+         return PJ5682S_VERIFY_FAILED;
+     }
+     return PJ5682S_OK;
+--- v0.0.13/src/driver/peripheral/PujjoResourcePolicy.c
++++ v0.0.14/src/driver/peripheral/PujjoResourcePolicy.c
+@@ -7,9 +7,10 @@
+ {
+     size_t i, j;
+     pj_summary s = {0};
+-    if (!summary || (device != PJ_PROBE_CODEC && device != PJ_PROBE_AMP) ||
++    if (!summary) return PJ_POLICY_BAD_INPUT;
++    memset(summary, 0, sizeof(*summary));
++    if ((device != PJ_PROBE_CODEC && device != PJ_PROBE_AMP) ||
+         (!resources && count)) return PJ_POLICY_BAD_INPUT;
+-    memset(summary, 0, sizeof(*summary));
+     if (count == 0 || count > PJ_MAX_RESOURCES)
+         return PJ_POLICY_EXCESSIVE_RESOURCES;
+     for (i = 0; i < count; ++i) {
+--- v0.0.13/src/driver/peripheral/PujjoRt5682sSpbWindows.c
++++ v0.0.14/src/driver/peripheral/PujjoRt5682sSpbWindows.c
+@@ -53,6 +53,7 @@
+                          uint8_t *rx, size_t rxLen)
+ {
+     PJ5682S_SPB_WINDOWS *state=(PJ5682S_SPB_WINDOWS *)user;
++    ULONG_PTR transferred = 0;
+     SPB_TRANSFER_LIST_AND_ENTRIES(2) sequence;
+     WDF_MEMORY_DESCRIPTOR descriptor;
+     WDF_REQUEST_SEND_OPTIONS options;
+@@ -71,8 +72,9 @@
+     options.Timeout = WDF_REL_TIMEOUT_IN_MS(PJ5682S_SPB_TIMEOUT_MS);
+     status = WdfIoTargetSendIoctlSynchronously(
+         state->Target, WDF_NO_HANDLE, IOCTL_SPB_EXECUTE_SEQUENCE,
+-        &descriptor, NULL, &options, NULL);
+-    return NT_SUCCESS(status) ? 0 : -1;
++        &descriptor, NULL, &options, &transferred);
++    /* SPB may return STATUS_SUCCESS after a partial/NACK transfer. */
++    return (NT_SUCCESS(status) && transferred == txLen + rxLen) ? 0 : -1;
+ }
+ 
+ /* This callback is included only for isolated test plumbing; release builds
+--- v0.0.13/src/tests/main.c
++++ v0.0.14/src/tests/main.c
+@@ -202,7 +202,7 @@
+     size_t extManSize = sizeof(struct sof_ext_manifest4_hdr);
+     size_t fwHdrSize = sizeof(struct sof_man4_fw_binary_header);
+     size_t payloadSize = 4096;
+-    size_t totalSize = extManSize + fwHdrSize + payloadSize;
++    size_t totalSize = extManSize + SOF_MAN4_FW_HDR_OFFSET + fwHdrSize + payloadSize;
+ 
+     UCHAR *mockFw = (UCHAR *)calloc(1, totalSize);
+     assert(mockFw != NULL);
+@@ -216,7 +216,9 @@
+     extMan->num_module_entries = 5;
+ 
+     /* Populate fw binary header */
+-    struct sof_man4_fw_binary_header *fwHdr = (struct sof_man4_fw_binary_header *)(mockFw + extManSize);
++    struct sof_man4_fw_binary_header *fwHdr = (struct sof_man4_fw_binary_header *)(mockFw + extManSize + SOF_MAN4_FW_HDR_OFFSET);
++    fwHdr->len = (uint32_t)fwHdrSize;
++    fwHdr->num_module_entries = 5;
+     fwHdr->major_version = 2;
+     fwHdr->minor_version = 12;
+     fwHdr->hotfix_version = 1;
+@@ -228,7 +230,7 @@
+     NTSTATUS status = SofParseFirmwareImage(mockFw, totalSize, &info);
+     assert(status == 0); /* STATUS_SUCCESS */
+     assert(info.PayloadOffset == (ULONG)extManSize);
+-    assert(info.PayloadSize == (ULONG)(fwHdrSize + payloadSize));
++    assert(info.PayloadSize == (ULONG)(SOF_MAN4_FW_HDR_OFFSET + fwHdrSize + payloadSize));
+     assert(info.MajorVersion == 2);
+     assert(info.MinorVersion == 12);
+     assert(info.HotfixVersion == 1);
+--- v0.0.13/tests/run_headset_clock_tests.py
++++ v0.0.14/tests/run_headset_clock_tests.py
+@@ -4,6 +4,6 @@
+ ROOT=Path(__file__).resolve().parents[1]
+ with tempfile.TemporaryDirectory() as d:
+     output=Path(d)/('headsetclock.exe' if os.name=='nt' else 'headsetclock')
+-    cmd=['cc','-std=c11','-Wall','-Wextra','-Werror',str(ROOT/'tests/test_pujjo_headset_clock.c'),str(ROOT/'src/driver/experimental/PujjoHeadsetClock.c'),'-o',str(output)]
++    cmd=[os.environ.get('CC', 'cc'),'-std=c11','-Wall','-Wextra','-Werror',str(ROOT/'tests/test_pujjo_headset_clock.c'),str(ROOT/'src/driver/experimental/PujjoHeadsetClock.c'),'-o',str(output)]
+     print(' '.join(cmd));subprocess.run(cmd,check=True)
+     subprocess.run([str(output)],check=True)
+--- v0.0.13/tests/run_regression_suite.py
++++ v0.0.14/tests/run_regression_suite.py
+@@ -10,19 +10,15 @@
+ import time
+ import json
+ 
+-# Ensure host aphid library is in Python path
+-sys.path.insert(0, r'C:\Users\lgird')
+-try:
+-    import aphid
+-except ImportError:
+-    print("[ERROR] Failed to import aphid automation library from C:\\Users\\lgird")
+-    sys.exit(1)
++# Disabled inherited hardware runner; safe to import during discovery.
++aphid = None
+ 
+ DUT_SCRIPT_LOCAL = os.path.join(os.path.dirname(__file__), "dut_regression_suite.ps1")
+ DUT_SCRIPT_REMOTE = r"C:\dut_regression_suite.ps1"
+ DUT_RESULTS_REMOTE = r"C:\sof_regression_results.json"
+ 
+ def main():
++    raise SystemExit("NOT RUN: hardware/DUT regression tests disabled in source-only package")
+     print("=" * 78)
+     print(" SOF WINDOWS DRIVER - AUTOMATED REGRESSION RUNNER")
+     print(" Target DUT: Aphid (192.168.129.22)")
+--- v0.0.13/tests/test_pujjo_resource_policy.c
++++ v0.0.14/tests/test_pujjo_resource_policy.c
+@@ -33,6 +33,11 @@
+     assert(pj_validate_resources((enum pj_probe_kind)42, good_codec, 2, &s) == PJ_POLICY_BAD_INPUT);
+     assert(pj_validate_resources(PJ_PROBE_CODEC, good_codec, 2, &s) == PJ_POLICY_OK);
+     assert(s.i2c_count == 1 && s.gpio_count == 0 && s.interrupt_count == 1);
+-    puts("PASS: resource policy test cases");
++    assert(pj_validate_resources((enum pj_probe_kind)42, good_codec, 2, &s) == PJ_POLICY_BAD_INPUT);
++    assert(s.connection_low == 0 && s.i2c_count == 0 && s.interrupt_count == 0);
++    assert(pj_validate_resources(PJ_PROBE_CODEC, good_codec, 2, &s) == PJ_POLICY_OK);
++    assert(pj_validate_resources(PJ_PROBE_CODEC, NULL, 1, &s) == PJ_POLICY_BAD_INPUT);
++    assert(s.connection_low == 0 && s.i2c_count == 0 && s.interrupt_count == 0);
++    puts("PASS: resource policy test cases including stale-output rejection");
+     return 0;
+ }
+--- v0.0.13/tests/test_rt1019p_amp.c
++++ v0.0.14/tests/test_rt1019p_amp.c
+@@ -120,6 +120,14 @@
+     /* Even when mute is broken, GPIO disable MUST be attempted. */
+     assert(f.events[f.count-1]=='D');
+     assert(pj1019_resume(&a)==PJ1019_BAD_STATE);
++    f.fail_mute=0;
++    /* Retrying shutdown must still mute/disable, but never clear FAULT. */
++    assert(pj1019_stop(&a,&io)==PJ1019_IO_FAILURE);
++    assert(a.state==PJ1019_FAULT && f.events[f.count-1]=='D');
++    assert(pj1019_suspend(&a,&io)==PJ1019_IO_FAILURE);
++    assert(a.state==PJ1019_FAULT);
++    assert(pj1019_resume(&a)==PJ1019_BAD_STATE);
++    assert(pj1019_power_on_muted(&a,&io)==PJ1019_BAD_STATE);
+ }
+ #endif
+ int main(void) {
+--- v0.0.13/tests/test_rt5682s_codec.c
++++ v0.0.14/tests/test_rt5682s_codec.c
+@@ -115,14 +115,14 @@
+     assert(pj5682s_test_update_bits(&c,0xff,0xff,1)==PJ5682S_BAD_ARGUMENT);
+     m.fail_write=1;
+     assert(pj5682s_test_update_bits(&c,0x0200,0x00f0,0x0050)==PJ5682S_BUS_ERROR);
+-    assert(c.state==PJ5682S_FAILED);
++    assert(c.state==PJ5682S_FAILED && c.verified_id==0);
+     m.fail_write=0;
+     pj5682s_unbind(&c);
+     assert(pj5682s_bind(&c,&b)==PJ5682S_OK);
+     assert(pj5682s_identify(&c)==PJ5682S_OK);
+     m.drop_write=1;
+     assert(pj5682s_test_update_bits(&c,0x0200,0x00f0,0x0000)==PJ5682S_VERIFY_FAILED);
+-    assert(c.state==PJ5682S_FAILED);
++    assert(c.state==PJ5682S_FAILED && c.verified_id==0);
+     m.drop_write=0;
+ #endif
+     pj5682s_unbind(&c);
+@@ -131,24 +131,30 @@
+     assert(pj5682s_bind(&c,&b)==PJ5682S_OK);
+     m.swap_identity=1;
+     assert(pj5682s_identify(&c)==PJ5682S_WRONG_CHIP);
+-    assert(c.state==PJ5682S_FAILED);
++    assert(c.state==PJ5682S_FAILED && c.verified_id==0);
+     assert(pj5682s_identify(&c)==PJ5682S_INCORRECT_STATE);
+     pj5682s_unbind(&c);
+     m.swap_identity=0;m.fail_read=1;
+     assert(pj5682s_bind(&c,&b)==PJ5682S_OK);
+     assert(pj5682s_identify(&c)==PJ5682S_BUS_ERROR);
+-    assert(c.state==PJ5682S_FAILED);
++    assert(c.state==PJ5682S_FAILED && c.verified_id==0);
+     m.fail_read=0;
+     pj5682s_unbind(&c);
+     assert(pj5682s_bind(&c,&b)==PJ5682S_OK);
+     assert(pj5682s_identify(&c)==PJ5682S_OK);
+     m.swap_identity=1;
+     assert(pj5682s_read_identity(&c,0xff,&value)==PJ5682S_WRONG_CHIP);
+-    assert(c.state==PJ5682S_FAILED);
++    assert(c.state==PJ5682S_FAILED && c.verified_id==0);
+     pj5682s_unbind(&c);
+     m.swap_identity=0;
+     assert(pj5682s_bind(&empty,&b)==PJ5682S_OK);
+     assert(pj5682s_identify(&empty)==PJ5682S_OK);
++    for (unsigned cycle=0;cycle<1000;++cycle) {
++        assert(pj5682s_suspend(&empty)==PJ5682S_OK);
++        assert(empty.verified_id==0);
++        assert(pj5682s_resume(&empty)==PJ5682S_OK);
++        assert(pj5682s_identify(&empty)==PJ5682S_OK);
++    }
+     assert(m.bad_wire==0);
+     puts("PASS: RT5682S codec ID, I2C protocol, read guard, suspend, bus failures and mock-only write tests");
+     return 0;
+--- v0.0.13/tests/test_s0idle_and_d3.py
++++ v0.0.14/tests/test_s0idle_and_d3.py
+@@ -9,11 +9,13 @@
+ import os
+ import time
+ 
+-sys.path.insert(0, r'C:\Users\lgird')
+-import aphid
+-import power_control
++# This inherited utility changes a remote DUT and is not an offline test.
++# Keep it disabled in this source-only release, including test discovery.
++aphid = None
++power_control = None
+ 
+ def main():
++    raise SystemExit('NOT RUN: hardware/DUT power tests are disabled in this source-only package')
+     print("=" * 78)
+     print(" SOF WINDOWS DRIVER - S0-IDLE (D0i3) & D3 POWER MANAGEMENT VERIFIER")
+     print(" Target DUT: Aphid (192.168.129.142)")

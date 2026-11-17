@@ -1,0 +1,37 @@
+Pujjo SOF source-only development v0.0.12
+Verification: Saturday, 2026-11-14, on Linux host (NOT Windows).
+
+PASSED (performed directly against sources in this archive):
+  Python / static:
+  - tests/test_kmdf_security.py
+  - tests/test_rt1019p_static.py
+  - tests/test_rt5682s_static.py
+  - tests/test_acpi_parser.py (9 checks)
+  - tests/test_sof_zephyr_log.py (7 passed, 1 skipped: external ELF absent)
+  - tests/verify_linux_topology.py (local mapping only; Linux ZIP absent)
+  - scripts/verify_upstream_integrity.py (48 hashes match)
+  Portable C and mock tests:
+  - tests/run_rt1019p_amp_tests.py (locked default and mock callback builds)
+  - tests/run_rt5682s_codec_tests.py (locked default and mock write tests)
+  - tests/run_pujjo_tests.py (15 board identity cases + source checks)
+  - tests/run_codec_init_tests.py (speaker-only SSP1 locked/mock)
+  - tests/run_headset_clock_tests.py
+  - tests/run_device_map_tests.py (10 cases)
+  - tests/run_acpi_resource_tests.py (9 cases)
+  Sanitizer checks:
+  - RT1019P amplifier test-double build with Clang AddressSanitizer/UBSan: passed
+  - RT1019P amplifier test-double with Clang UBSan: passed
+  Structural checks:
+  - amp vcxproj is well-formed XML
+  - archive contains no .inf, .sys, .exe, .cat or .bat build/install launchers
+
+NOT PERFORMED / UNVERIFIED:
+  - WDK 26100 MSBuild compilation or actual .sys driver load
+  - Windows GPIO Resource Hub I/O / electrical SDB polarity
+  - Windows Realtek RT5682S I2C operation
+  - SOF firmware initialization, DSP SSP1 route or actual speaker playback
+  - Windows Driver Verifier / CodeQL / HLK
+  - User Chromebook hardware verification, driver installation and speaker safety
+
+Correct reading of the results: passing host tests validates only our modeled
+logic and guards. It does not imply Windows hardware compatibility.
