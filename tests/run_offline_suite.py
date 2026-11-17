@@ -17,9 +17,10 @@ SUITES=[
  'tests/run_resource_policy_tests.py','tests/run_loader_transport_tests.py',
  'tests/test_audit_regressions.py','tests/run_windows_transport_tests.py',
  'tests/test_v16_static.py','tests/run_dma_tests.py',
+ 'tests/test_windows_ci_v017.py','tests/run_kernel_mock_abi_tests.py',
 ]
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--logs',default='validation-v0.0.16/final')
+    p=argparse.ArgumentParser();p.add_argument('--logs',default='validation-v0.0.17/final')
     args=p.parse_args();logs=Path(args.logs).resolve();logs.mkdir(parents=True,exist_ok=True)
     results=[]
     for script in SUITES:
@@ -38,8 +39,8 @@ def main():
                             skipped_cases=int(skipped.group(1)) if skipped else 0))
         print(status,script,flush=True)
     results += [
-      dict(command=['python','tests/run_topology_evidence_tests.py'],status='SKIP',reason='External user topology ZIP absent'),
-      dict(command=['python','tests/verify_kernel_reference.py'],status='SKIP',reason='External Linux source ZIP absent'),
+      dict(command=['python','tests/run_topology_evidence_tests.py'],status='SKIP',reason='External topology archive not bundled; test separately when available'),
+      dict(command=['python','tests/verify_kernel_reference.py'],status='SKIP',reason='External Linux kernel archive not bundled; test separately when available'),
       dict(command=['python','tests/test_s0idle_and_d3.py'],status='NOT RUN',reason='Physical DUT test forbidden'),
       dict(command=['python','tests/run_regression_suite.py'],status='NOT RUN',reason='Physical DUT test forbidden'),
     ]

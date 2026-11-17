@@ -11,7 +11,7 @@
  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
  <PropertyGroup><OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir><IntDir>$(ProjectDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir><TargetName>pujjo_rt5682_probe</TargetName><TargetExt>.sys</TargetExt></PropertyGroup>
  <ItemDefinitionGroup>
-  <ClCompile><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><SDLCheck>true</SDLCheck><BufferSecurityCheck>true</BufferSecurityCheck><PreprocessorDefinitions>_KERNEL_MODE;_AMD64_;AMD64;PJ_TARGET_CODEC=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)src\driver;$(ProjectDir)src\driver\peripheral;$(ProjectDir)src\driver\experimental;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+  <ClCompile><AdditionalOptions>/kernel %(AdditionalOptions)</AdditionalOptions><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><SDLCheck>true</SDLCheck><BufferSecurityCheck>true</BufferSecurityCheck><PreprocessorDefinitions>_AMD64_;AMD64;PJ_TARGET_CODEC=1;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)src\driver;$(ProjectDir)src\driver\peripheral;$(ProjectDir)src\driver\experimental;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
   <Link><AdditionalDependencies>Aux_Klib.lib;%(AdditionalDependencies)</AdditionalDependencies><GenerateDebugInformation>true</GenerateDebugInformation></Link>
  </ItemDefinitionGroup>
  <ItemGroup><ClCompile Include="src\driver\peripheral\PujjoResourcePolicy.c" /><ClCompile Include="src\driver\experimental\PujjoRt5682sCodec.c" />

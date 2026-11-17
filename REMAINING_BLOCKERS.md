@@ -1,8 +1,8 @@
-# Remaining blockers — v0.0.16
+# Remaining blockers — v0.0.17
 
 Not ready to install or conduct audible hardware validation. Ready for offline review and a compile-only Windows CI attempt. The following work is required before controlled Chromebook testing; further issues may emerge during WDK compilation or measurements.
 
-1. Obtain successful VS2022/MSVC Debug and Release x64 builds with SDK/WDK 10.0.26100. Resolve real WDK ABI, SAL, warning and PortCls/KMDF lifecycle issues. Run Microsoft driver analysis and review the resulting imports/entry point. The host WDF doubles cannot establish any of these.
+1. Obtain successful VS2022/MSVC Debug and Release x64 builds with SDK/WDK 10.0.26100. Runs #1 and #2 failed during compilation; v0.0.17 includes unverified targeted fixes. Resolve real WDK ABI, SAL, warning and PortCls/KMDF lifecycle issues. Run Microsoft driver analysis and review the resulting imports/entry point. The host WDF doubles cannot establish any of these.
 2. Establish board-specific Windows PnP resources, MCLK/BCLK/FSYNC measurements, SSP0/SSP1 pinmux, polarity, amplifier rails and reset behavior. Linux SSP routes are candidates only. No hard-coded GPIO or bus addresses may substitute for assigned resources.
 3. Complete the ADL-N signed firmware trust/compatibility policy, manifest extensions and segment validation, ROM authentication/error handling, DSP power/reset sequencing, code-loader DMA descriptor/stream programming, interrupts and bounded boot recovery. The metadata parser does not authenticate firmware or authorize boot. A valid filename/hash alone is insufficient.
 4. Implement and verify the firmware's IPC4 mailbox/notification protocol, READY capabilities, module UUID discovery, pipeline creation, payload layouts and shutdown/recovery. Existing IPC/topology prototypes are not demonstrated compatible with this firmware. Linux topology blobs cannot be loaded as Windows endpoints without an explicit translation/design.

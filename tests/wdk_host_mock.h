@@ -41,7 +41,7 @@ typedef struct {int direction;void *buffer;ULONG length;} SPB_TRANSFER_LIST_ENTR
 #define NT_SUCCESS(x) ((x)>=0)
 #define WDF_NO_HANDLE NULL
 #define WDF_NO_OBJECT_ATTRIBUTES NULL
-#define RESOURCE_HUB_PATH_CHARS 64
+#define RESOURCE_HUB_PATH_SIZE 128
 #define DECLARE_UNICODE_STRING_SIZE(name,n) int name=0
 #define GENERIC_READ 1
 #define GENERIC_WRITE 2

@@ -4,8 +4,7 @@
  * The chipset is RT5682S (RTL5682 ACPI HID), not the older RT5682. */
 #ifndef PUJJO_RT5682S_CODEC_H
 #define PUJJO_RT5682S_CODEC_H
-#include <stddef.h>
-#include <stdint.h>
+#include "../PujjoFixedTypes.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -35,17 +34,17 @@ typedef enum pj5682s_state {
  * bus speed must be provided by Windows Resource Hub, NOT this structure. */
 typedef struct pj5682s_bus {
     void *context;
-    int (*write_then_read)(void *context, const uint8_t *tx, size_t tx_size,
-                           uint8_t *rx, size_t rx_size);
-    int (*write_only)(void *context, const uint8_t *tx, size_t tx_size);
+    int (*write_then_read)(void *context, const PJ_BYTE *tx, PJ_SIZE tx_size,
+                           PJ_BYTE *rx, PJ_SIZE rx_size);
+    int (*write_only)(void *context, const PJ_BYTE *tx, PJ_SIZE tx_size);
 } pj5682s_bus;
 
 typedef struct pj5682s_codec {
     pj5682s_bus bus;
     pj5682s_state state;
-    uint16_t verified_id;
-    uint32_t successful_read_count;
-    uint32_t successful_test_write_count;
+    PJ_WORD verified_id;
+    PJ_DWORD successful_read_count;
+    PJ_DWORD successful_test_write_count;
 } pj5682s_codec;
 
 /* No bus I/O until pj5682s_identify(). Bind must come only after independent
@@ -55,23 +54,23 @@ pj5682s_status pj5682s_identify(pj5682s_codec *c);
 /* Public diagnostics intentionally permit ONLY identity registers, to avoid
  * side-effectful reads of arbitrary codec control/status registers. */
 pj5682s_status pj5682s_read_identity(pj5682s_codec *c,
-                                      uint16_t register_address,
-                                      uint16_t *value);
+                                      PJ_WORD register_address,
+                                      PJ_WORD *value);
 pj5682s_status pj5682s_suspend(pj5682s_codec *c);
 pj5682s_status pj5682s_resume(pj5682s_codec *c);
 void pj5682s_unbind(pj5682s_codec *c);
 
 /* Exact wire encoding of 16-bit register and 16-bit value. These are not
  * implicitly executed; they can be validated without any I2C device. */
-void pj5682s_encode_address(uint16_t reg, uint8_t out[2]);
-void pj5682s_encode_write(uint16_t reg, uint16_t value, uint8_t out[4]);
-uint16_t pj5682s_decode_value(const uint8_t bytes[2]);
+void pj5682s_encode_address(PJ_WORD reg, PJ_BYTE out[2]);
+void pj5682s_encode_write(PJ_WORD reg, PJ_WORD value, PJ_BYTE out[4]);
+PJ_WORD pj5682s_decode_value(const PJ_BYTE bytes[2]);
 
 /* This exists for unit tests of register-update semantics only. It is
  * physically impossible to compile into a production WDK build without the
  * explicit PJ5682S_TEST_ONLY_WRITES macro. Never define that macro on device. */
 pj5682s_status pj5682s_test_update_bits(pj5682s_codec *c,
-        uint16_t reg, uint16_t mask, uint16_t value);
+        PJ_WORD reg, PJ_WORD mask, PJ_WORD value);
 
 #ifdef __cplusplus
 }

@@ -1,3 +1,14 @@
+# v0.0.17 — 2026-11-17 — Windows CI build corrections and kernel-type hardening
+
+- Fixed the two demonstrated GitHub Actions compile-failure groups from runs #1 and #2: removed duplicate manual definitions of MSVC's reserved `_KERNEL_MODE` macro while retaining `/kernel`, and removed a false `#if defined` check on the `RESOURCE_HUB_CREATE_PATH_FROM_ID` **inline function**.
+- Corrected both SPB and GPIO Resource Hub `DECLARE_UNICODE_STRING_SIZE` allocations to use the WDK `RESOURCE_HUB_PATH_SIZE` byte-count constant, not the character-count macro.
+- Removed desktop C runtime integer and string header dependencies from the kernel-mode RT5682S codec and headset clock planner by using narrowly scoped, WDK-compatible fixed-width Pujjo types and kernel memory intrinsics. Preserved portable GCC/Clang behavior and binary callback types.
+- Added an explicit compile-time barrier forbidding mock RT5682S register writes in kernel builds.
+- Updated the existing host transport/loader test harness for the fixed-width types. Added a CI-regression contract test and an isolated fake-WDK header/Windows-targeting-Clang syntax test covering board ID, resource policy, codec and clock planner, including a negative compilation test of the write barrier.
+- Preserved the original firmware boot, hardware-activation safety gates, board allowlist, PnP-resource checks, and source-only packaging. No new hardware access or installable package was enabled.
+- **All available local checks passed**: 26 offline commands, 80 strict/sanitizer/analyzer compiler matrix cases, two optional user-supplied Linux reference checks, and ZIP/checksum verification. See `TEST_RESULTS_v0.0.17.md`.
+- **Critical limit:** These are code fixes based on the Windows compiler's actual logs, but the changed revision has **not** yet passed a new Microsoft WDK CI build. Windows Debug/Release, DSP boot and actual audio remain unverified.
+
 # Changes in v0.0.16 — 2026-11-17
 
 - Hardened the production IPC4 metadata parser: $AM1/$AME identifiers, nonempty bounded module tables, overflow-resistant sizes and configuration ranges. Added malformed-image cases and 20,000 deterministic fuzz inputs. Parsed a real official ADL-N 2.12 image; parsing is not signature authentication.

@@ -35,6 +35,10 @@ typedef void *PVOID;
 typedef uint32_t ULONG;
 typedef uintptr_t ULONG_PTR;
 typedef unsigned char UCHAR;
+/* Source prototypes now use portable Pujjo types rather than CRT stdint
+ * in WDK builds. Keep host doubles ABI-identical to the production callbacks. */
+typedef uint8_t PJ_BYTE;
+typedef size_t PJ_SIZE;
 typedef char CHAR;
 #define MAXULONG UINT32_MAX
 #define SOF_MAN4_FW_HDR_OFFSET 0x2000

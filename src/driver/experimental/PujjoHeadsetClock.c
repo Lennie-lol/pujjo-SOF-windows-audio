@@ -1,12 +1,18 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "PujjoHeadsetClock.h"
+#ifndef _KERNEL_MODE
 #include <string.h>
+#endif
 pj_clk_status pj_headset_clock_plan(unsigned sample_rate_hz, unsigned channels,
                                     unsigned valid_bits, unsigned slot_bits,
                                     pj_clk_input input_kind, unsigned known_input_hz,
                                     pj_headset_clock *out) {
     if (!out) return PJ_CLK_BAD_FORMAT;
-    memset(out,0,sizeof(*out));
+#ifdef _KERNEL_MODE
+    RtlZeroMemory(out, sizeof(*out));
+#else
+    memset(out, 0, sizeof(*out));
+#endif
     /* Constrained prototype: expand only after platform clock evidence. */
     if (sample_rate_hz!=48000 || channels!=2 || valid_bits!=24 ||
         (slot_bits!=24 && slot_bits!=32) || slot_bits<valid_bits ||
@@ -45,7 +51,11 @@ pj_clk_status pj_rt5682s_plan_pll2(unsigned measured_mclk_hz,
         {0x009e,0x0001,0x0001}  /* direct input */
     };
     if (!out) return PJ_CLK_BAD_FORMAT;
+#ifdef _KERNEL_MODE
+    RtlZeroMemory(out, sizeof(*out));
+#else
     memset(out, 0, sizeof(*out));
+#endif
     if (!measured_mclk_hz) return PJ_CLK_NEED_MEASUREMENT;
     if (output_hz != 24576000u) return PJ_CLK_BAD_FORMAT;
     switch (measured_mclk_hz) {
@@ -57,8 +67,12 @@ pj_clk_status pj_rt5682s_plan_pll2(unsigned measured_mclk_hz,
     out->input_hz=measured_mclk_hz;out->output_hz=output_hz;
     /* Masked updates preserve unrelated register bits. These coefficients
      * require separate reviewed rail/reset/bias/PLL-lock and sysclk steps. */
+#ifdef _KERNEL_MODE
+    RtlCopyMemory(out->writes, coefficients, sizeof(coefficients));
+#else
     memcpy(out->writes, coefficients, sizeof(coefficients));
-    out->writes[2].value |= (uint16_t)(m << 8);
+#endif
+    out->writes[2].value |= (PJ_WORD)(m << 8);
     out->count=5;
     return PJ_CLK_OK;
 }

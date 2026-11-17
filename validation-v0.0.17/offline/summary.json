@@ -1,0 +1,268 @@
+[
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/test_kmdf_security.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/test_bringup_static.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_bringup_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/test_pujjo_sof_fw_static.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_pujjo_sof_fw_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/test_rt1019p_static.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_rt1019p_amp_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/test_rt5682s_static.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_rt5682s_codec_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/test_acpi_parser.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_acpi_resource_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_device_map_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_pujjo_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_codec_init_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_headset_clock_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/verify_linux_topology.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "scripts/verify_upstream_integrity.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/test_sof_zephyr_log.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 1
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_resource_policy_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_loader_transport_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/test_audit_regressions.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_windows_transport_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/test_v16_static.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_dma_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/test_windows_ci_v017.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "/opt/pyvenv/bin/python3",
+      "tests/run_kernel_mock_abi_tests.py"
+    ],
+    "status": "PASS",
+    "exit_code": 0,
+    "skipped_cases": 0
+  },
+  {
+    "command": [
+      "python",
+      "tests/run_topology_evidence_tests.py"
+    ],
+    "status": "SKIP",
+    "reason": "External topology archive not bundled; test separately when available"
+  },
+  {
+    "command": [
+      "python",
+      "tests/verify_kernel_reference.py"
+    ],
+    "status": "SKIP",
+    "reason": "External Linux kernel archive not bundled; test separately when available"
+  },
+  {
+    "command": [
+      "python",
+      "tests/test_s0idle_and_d3.py"
+    ],
+    "status": "NOT RUN",
+    "reason": "Physical DUT test forbidden"
+  },
+  {
+    "command": [
+      "python",
+      "tests/run_regression_suite.py"
+    ],
+    "status": "NOT RUN",
+    "reason": "Physical DUT test forbidden"
+  }
+]

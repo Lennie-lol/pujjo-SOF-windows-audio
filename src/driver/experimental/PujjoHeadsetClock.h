@@ -3,7 +3,7 @@
  * It performs NO register writes or I2C transfers. */
 #ifndef PUJJO_HEADSET_CLOCK_H
 #define PUJJO_HEADSET_CLOCK_H
-#include <stdint.h>
+#include "../PujjoFixedTypes.h"
 typedef enum pj_clk_input { PJ_CLK_UNKNOWN=0, PJ_CLK_MCLK=1, PJ_CLK_BCLK=2 } pj_clk_input;
 typedef enum pj_clk_status { PJ_CLK_OK=0, PJ_CLK_BAD_FORMAT=-1, PJ_CLK_NEED_MEASUREMENT=-2 } pj_clk_status;
 typedef struct pj_headset_clock {
@@ -26,7 +26,7 @@ pj_clk_status pj_headset_clock_plan(unsigned sample_rate_hz, unsigned channels,
  * Measured MCLK is mandatory; only three documented direct PLLB conversions
  * to 24.576 MHz are represented. This is NOT a full codec startup recipe. */
 typedef struct pj_clock_register_update {
-    uint16_t reg, mask, value;
+    PJ_WORD reg, mask, value;
 } pj_clock_register_update;
 typedef struct pj_rt5682s_pll2_plan {
     unsigned input_hz, output_hz, count;

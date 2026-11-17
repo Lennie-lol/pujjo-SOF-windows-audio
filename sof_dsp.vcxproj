@@ -66,10 +66,10 @@
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>false</SDLCheck>
       <BufferSecurityCheck>true</BufferSecurityCheck>
-      <PreprocessorDefinitions>_DEBUG;_KERNEL_MODE;_AMD64_;AMD64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_AMD64_;AMD64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>false</ConformanceMode>
       <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\sof;$(ProjectDir)include\compat;$(ProjectDir)src\driver;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <DisableSpecificWarnings>4200;4201;4214;4116;4820;4324;4117;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <DisableSpecificWarnings>4200;4201;4214;4116;4820;4324;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <AdditionalOptions>/kernel %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -87,10 +87,10 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>false</SDLCheck>
       <BufferSecurityCheck>true</BufferSecurityCheck>
-      <PreprocessorDefinitions>NDEBUG;_KERNEL_MODE;_AMD64_;AMD64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_AMD64_;AMD64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>false</ConformanceMode>
       <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\sof;$(ProjectDir)include\compat;$(ProjectDir)src\driver;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <DisableSpecificWarnings>4200;4201;4214;4116;4820;4324;4117;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <DisableSpecificWarnings>4200;4201;4214;4116;4820;4324;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <AdditionalOptions>/kernel %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>

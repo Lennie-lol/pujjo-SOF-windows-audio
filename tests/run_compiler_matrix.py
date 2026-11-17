@@ -21,7 +21,7 @@ CASES=[
  ('init-mock','src/driver/experimental/PujjoAudioInit.c','tests/test_pujjo_audio_init.c',['-DPJ_AUDIO_ENABLE_EXPERIMENTAL_IO=1']),
 ]
 def main():
-    logs=ROOT/'validation-v0.0.16/matrix';logs.mkdir(parents=True,exist_ok=True)
+    logs=ROOT/'validation-v0.0.17/matrix';logs.mkdir(parents=True,exist_ok=True)
     results=[]
     (logs/'environment.log').write_text('ASAN_OPTIONS='+os.environ.get('ASAN_OPTIONS','')+'\n')
     for compiler in ('gcc','clang'):

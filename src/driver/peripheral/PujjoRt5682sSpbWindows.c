@@ -6,9 +6,6 @@
 #include <ntddk.h>
 #include <wdf.h>
 #include <reshub.h>
-#if defined(_MSC_VER) && !defined(RESOURCE_HUB_CREATE_PATH_FROM_ID)
-#error Missing Resource Hub path API: use Windows WDK reshub.h and _KERNEL_MODE.
-#endif
 #include <spb.h>
 #include "PujjoRt5682sSpbWindows.h"
 #define PJ5682S_SPB_TIMEOUT_MS 1000
@@ -45,7 +42,7 @@ NTSTATUS Pj5682sSpbSetPower(PJ5682S_SPB_WINDOWS *state, BOOLEAN powered)
 NTSTATUS Pj5682sSpbOpen(WDFDEVICE device, ULONG idLow, ULONG idHigh,
                         PJ5682S_SPB_WINDOWS *state)
 {
-    DECLARE_UNICODE_STRING_SIZE(path, RESOURCE_HUB_PATH_CHARS);
+    DECLARE_UNICODE_STRING_SIZE(path, RESOURCE_HUB_PATH_SIZE);
     WDF_IO_TARGET_OPEN_PARAMS params;
     WDFIOTARGET target = WDF_NO_HANDLE;
     NTSTATUS status;
@@ -93,8 +90,8 @@ void Pj5682sSpbClose(PJ5682S_SPB_WINDOWS *state)
 }
 
 /* reg16 then 2-byte repeated-start read (single atomic SPB sequence). */
-static int Pj5682sSpbRead(void *user, const uint8_t *tx, size_t txLen,
-                         uint8_t *rx, size_t rxLen)
+static int Pj5682sSpbRead(void *user, const PJ_BYTE *tx, PJ_SIZE txLen,
+                         PJ_BYTE *rx, PJ_SIZE rxLen)
 {
     PJ5682S_SPB_WINDOWS *state=(PJ5682S_SPB_WINDOWS *)user;
     ULONG_PTR transferred = 0;
@@ -128,7 +125,7 @@ static int Pj5682sSpbRead(void *user, const uint8_t *tx, size_t txLen,
 
 /* This callback is included only for isolated test plumbing; release builds
  * of the codec core ALWAYS return WRITE_LOCKED and never call it. */
-static int Pj5682sSpbWrite(void *user, const uint8_t *data, size_t length)
+static int Pj5682sSpbWrite(void *user, const PJ_BYTE *data, PJ_SIZE length)
 {
     PJ5682S_SPB_WINDOWS *state=(PJ5682S_SPB_WINDOWS *)user;
     WDF_MEMORY_DESCRIPTOR descriptor;

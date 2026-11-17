@@ -1,12 +1,12 @@
 # Pujjo SOF Windows Audio Driver
 
 **Experimental open-source Windows 11 audio driver development for Google Pujjo / Pujjo1e Chromebooks**  
-**Current source version:** `v0.0.16` · **Status:** source-only / development · **License:** see [`LICENSE`](LICENSE)
+**Current source version:** `v0.0.17` · **Status:** source-only / development · **License:** see [`LICENSE`](LICENSE)
 
 > [!CAUTION]
 > **This project does not yet provide working Windows audio.** It has **not** successfully compiled with the Windows Driver Kit (WDK), installed on the target device, booted Intel SOF firmware, or played audio through the internal speakers. There is **no validated installable driver package**. Live DSP boot, codec writes, and amplifier activation remain disabled by default. **Do not install or force-load the prototype, bypass its guards, or use the preserved upstream installation instructions.**
 
-This README consolidates the important Pujjo-specific information from the previous 14 `README*.md` files. Older release notes are historical, not proof of what v0.0.16 can do. The inherited SOF Windows source also contains generic HDA, SoundWire, USB, HDMI, AMD and other-platform code; **those upstream features and support claims are not verified for this Pujjo fork**.
+This README consolidates the important Pujjo-specific information from the previous 14 `README*.md` files. Older release notes are historical, not proof of what v0.0.17 can do. The inherited SOF Windows source also contains generic HDA, SoundWire, USB, HDMI, AMD and other-platform code; **those upstream features and support claims are not verified for this Pujjo fork**.
 
 ## Contents
 
@@ -14,19 +14,20 @@ This README consolidates the important Pujjo-specific information from the previ
 2. [Target hardware and actual ACPI evidence](#target-hardware-and-actual-acpi-evidence)
 3. [How the audio paths fit together](#how-the-audio-paths-fit-together)
 4. [Implementation by subsystem](#implementation-by-subsystem)
-5. [What changed in v0.0.16](#what-changed-in-v0016)
-6. [Source layout](#source-layout)
-7. [Offline tests and current results](#offline-tests-and-current-results)
-8. [Compiling on Windows or GitHub Actions](#compiling-on-windows-or-github-actions)
-9. [Read-only hardware diagnostics](#read-only-hardware-diagnostics)
-10. [Remaining work and safe development order](#remaining-work-and-safe-development-order)
-11. [Licensing and upstream references](#licensing-and-upstream-references)
+5. [What changed in v0.0.17](#what-changed-in-v0017)
+6. [What changed in v0.0.16](#what-changed-in-v0016)
+7. [Source layout](#source-layout)
+8. [Offline tests and current results](#offline-tests-and-current-results)
+9. [Compiling on Windows or GitHub Actions](#compiling-on-windows-or-github-actions)
+10. [Read-only hardware diagnostics](#read-only-hardware-diagnostics)
+11. [Remaining work and safe development order](#remaining-work-and-safe-development-order)
+12. [Licensing and upstream references](#licensing-and-upstream-references)
 
 ## Goal and current status
 
 The goal is an independently developed Windows 11 x64 audio solution for an Intel Alder Lake-N Chromebook with its onboard Realtek codec and amplifier. It is **not** a CoolStar activation bypass and contains no proprietary CoolStar driver binaries or license modifications.
 
-| Area | v0.0.16 status |
+| Area | v0.0.17 status |
 | --- | --- |
 | Board/PCI identification | Defensive Pujjo/Pujjo1e checks implemented; offline-tested |
 | Raw ACPI / Linux mapping | Read-only evidence inspected; Windows runtime resource validation still needed |
@@ -35,7 +36,7 @@ The goal is an independently developed Windows 11 x64 audio solution for an Inte
 | Intel SOF firmware | ADL-N selection and manifest metadata parser improved; no authenticated, working DSP boot |
 | DMA / concurrency | Safer common-buffer policy and serialized transport lifecycle source; mock/host-tested only |
 | SSP topology and Windows endpoint | Candidate Linux graph inspected; **no working Windows WaveRT render/capture pipeline** |
-| Windows WDK build | **Not yet completed or verified** in v0.0.16 |
+| Windows WDK build | Two real CI attempts reached the compiler but failed; fixes prepared in v0.0.17, **not yet WDK-verified** |
 | Speaker / headset / microphone audio | **Not working and not hardware-tested** |
 
 A successful host test or a future `.sys` compilation is **not** proof that hardware sound works.
@@ -141,6 +142,12 @@ A PnP node or a successful mock resource validator is not proof a real Windows `
 ### 5. Power management and concurrency
 
 The intended Windows implementation must serialize PnP ownership, D0/D3 entry/exit, I²C and GPIO requests, stream stop, surprise removal, timeouts and firmware state. v0.0.16 adds device-parented WDF wait locks and powered-state checks to both Resource Hub transports, with host-side simulated concurrency tests. **True Windows IRQL, WDF lock ordering, ISR/DPC and DMA quiescence remain unverified.** The mock coordinator is deliberately not linked into the production kernel driver.
+
+## What changed in v0.0.17
+
+After inspecting the actual GitHub Actions Debug and Release failure logs for runs #1 and #2, v0.0.17 fixes the proven `/kernel` and WDK Resource Hub mistakes, uses the documented Resource Hub path **byte-size**, and removes imported desktop CRT headers from the relevant KMDF codec/clock code. A kernel-build compile-time guard now rejects test-only RT5682S writes. Focused mock WDK type and Windows-targeted Clang syntax checks were added, alongside the original portable tests.
+
+**Current locally verified results:** 26/26 offline commands passed; 80/80 GCC/Clang strict, sanitizer and GCC analyzer test variants passed; the separately supplied Linux topology and kernel-reference checks passed. See [`TEST_RESULTS_v0.0.17.md`](TEST_RESULTS_v0.0.17.md) for exact limitations and evidence. These test counts do not include any successful MSVC/WDK compilation. A fresh GitHub Actions run is still required.
 
 ## What changed in v0.0.16
 
@@ -296,7 +303,7 @@ For tracked blockers and evidence see [`REMAINING_BLOCKERS.md`](REMAINING_BLOCKE
 - Optional public Windows codec reference: [coolstar/rt5682s](https://github.com/coolstar/rt5682s), subject to its own Apache-2.0/MS-PL attribution requirements and separate device validation. No such source has been imported here.
 - Microsoft driver docs: [WDK build](https://learn.microsoft.com/en-us/windows-hardware/drivers/develop/building-a-driver), [WDF hardware resources](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/finding-and-mapping-hardware-resources), [SPB Resource Hub connection IDs](https://learn.microsoft.com/en-us/windows-hardware/drivers/spb/connection-ids-for-spb-connected-peripheral-devices), [SPB transfer lists](https://learn.microsoft.com/en-us/windows-hardware/drivers/spb/using-the-spb-transfer-list-structure), [GPIO resources](https://learn.microsoft.com/en-us/windows-hardware/drivers/gpio/gpio-based-hardware-resources), [common buffers](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/using-common-buffers).
 
-**In short:** v0.0.16 is a source-and-test milestone, not an installable or working Windows audio driver. The next concrete milestone is a **successful Windows WDK compile**, followed by implementation of the real firmware/audio pipeline and eventually carefully controlled hardware validation.
+**In short:** v0.0.17 is a source-and-test milestone, not an installable or working Windows audio driver. The next concrete milestone is a **successful Windows WDK compile**, followed by implementation of the real firmware/audio pipeline and eventually carefully controlled hardware validation.
 
 
 ### Windows CI compile-fix iteration (after Actions run #1, 2026-11-17)

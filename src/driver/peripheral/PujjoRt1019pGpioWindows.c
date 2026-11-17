@@ -6,9 +6,6 @@
 #include <ntddk.h>
 #include <wdf.h>
 #include <reshub.h>
-#if defined(_MSC_VER) && !defined(RESOURCE_HUB_CREATE_PATH_FROM_ID)
-#error Missing Resource Hub path API: use Windows WDK reshub.h and _KERNEL_MODE.
-#endif
 #include <gpio.h>
 #include "PujjoRt1019pGpioWindows.h"
 #define PJ1019_GPIO_TIMEOUT_MS 1000
@@ -45,7 +42,7 @@ NTSTATUS Pj1019GpioSetPower(PJ1019_GPIO_WINDOWS *gpio, BOOLEAN powered)
 NTSTATUS Pj1019GpioOpen(WDFDEVICE device, ULONG idLow, ULONG idHigh,
                         PJ1019_GPIO_WINDOWS *gpio)
 {
-    DECLARE_UNICODE_STRING_SIZE(path, RESOURCE_HUB_PATH_CHARS);
+    DECLARE_UNICODE_STRING_SIZE(path, RESOURCE_HUB_PATH_SIZE);
     WDF_IO_TARGET_OPEN_PARAMS params;
     WDFIOTARGET target = WDF_NO_HANDLE;
     NTSTATUS status;

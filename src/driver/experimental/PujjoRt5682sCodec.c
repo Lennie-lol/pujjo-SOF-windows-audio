@@ -1,26 +1,31 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /* New independent RT5682S codec-bus code: no GPL Linux code copied. */
 #include "PujjoRt5682sCodec.h"
+#if defined(PJ5682S_TEST_ONLY_WRITES) && defined(_KERNEL_MODE)
+#error PJ5682S_TEST_ONLY_WRITES is forbidden in a Windows kernel build
+#endif
+#ifndef _KERNEL_MODE
 #include <string.h>
+#endif
 
-void pj5682s_encode_address(uint16_t reg, uint8_t out[2])
+void pj5682s_encode_address(PJ_WORD reg, PJ_BYTE out[2])
 {
     if (!out) return;
-    out[0]=(uint8_t)(reg>>8);
-    out[1]=(uint8_t)reg;
+    out[0]=(PJ_BYTE)(reg>>8);
+    out[1]=(PJ_BYTE)reg;
 }
-void pj5682s_encode_write(uint16_t reg, uint16_t value, uint8_t out[4])
+void pj5682s_encode_write(PJ_WORD reg, PJ_WORD value, PJ_BYTE out[4])
 {
     if (!out) return;
-    out[0]=(uint8_t)(reg>>8);
-    out[1]=(uint8_t)reg;
-    out[2]=(uint8_t)(value>>8);
-    out[3]=(uint8_t)value;
+    out[0]=(PJ_BYTE)(reg>>8);
+    out[1]=(PJ_BYTE)reg;
+    out[2]=(PJ_BYTE)(value>>8);
+    out[3]=(PJ_BYTE)value;
 }
-uint16_t pj5682s_decode_value(const uint8_t bytes[2])
+PJ_WORD pj5682s_decode_value(const PJ_BYTE bytes[2])
 {
     if (!bytes) return 0;
-    return (uint16_t)(((uint16_t)bytes[0]<<8)|bytes[1]);
+    return (PJ_WORD)(((PJ_WORD)bytes[0]<<8)|bytes[1]);
 }
 
 pj5682s_status pj5682s_bind(pj5682s_codec *c, const pj5682s_bus *bus)
@@ -37,9 +42,9 @@ pj5682s_status pj5682s_bind(pj5682s_codec *c, const pj5682s_bus *bus)
     return PJ5682S_OK;
 }
 
-static pj5682s_status read_raw(pj5682s_codec *c, uint16_t reg, uint16_t *out)
+static pj5682s_status read_raw(pj5682s_codec *c, PJ_WORD reg, PJ_WORD *out)
 {
-    uint8_t addr[2], response[2]={0};
+    PJ_BYTE addr[2], response[2]={0};
     if (!c || !out) return PJ5682S_BAD_ARGUMENT;
     if (!c->bus.write_then_read) return PJ5682S_NO_BUS;
     if (c->state==PJ5682S_ASLEEP) return PJ5682S_SUSPENDED;
@@ -60,7 +65,7 @@ static pj5682s_status read_raw(pj5682s_codec *c, uint16_t reg, uint16_t *out)
 
 pj5682s_status pj5682s_identify(pj5682s_codec *c)
 {
-    uint16_t value=0;
+    PJ_WORD value=0;
     pj5682s_status s;
     if (!c) return PJ5682S_BAD_ARGUMENT;
     if (c->state==PJ5682S_IDENTIFIED) return PJ5682S_OK;
@@ -77,7 +82,7 @@ pj5682s_status pj5682s_identify(pj5682s_codec *c)
 }
 
 pj5682s_status pj5682s_read_identity(pj5682s_codec *c,
-                                      uint16_t reg, uint16_t *out)
+                                      PJ_WORD reg, PJ_WORD *out)
 {
     pj5682s_status s;
     if (!c || !out) return PJ5682S_BAD_ARGUMENT;
@@ -118,24 +123,28 @@ pj5682s_status pj5682s_resume(pj5682s_codec *c)
 }
 void pj5682s_unbind(pj5682s_codec *c)
 {
-    if (c) memset(c,0,sizeof(*c));
+#ifdef _KERNEL_MODE
+    if (c) RtlZeroMemory(c, sizeof(*c));
+#else
+    if (c) memset(c, 0, sizeof(*c));
+#endif
 }
 
 pj5682s_status pj5682s_test_update_bits(pj5682s_codec *c,
-        uint16_t reg, uint16_t mask, uint16_t value)
+        PJ_WORD reg, PJ_WORD mask, PJ_WORD value)
 {
 #ifdef PJ5682S_TEST_ONLY_WRITES
-    uint16_t old_value=0, new_value=0, observed=0;
-    uint8_t tx[4];
+    PJ_WORD old_value=0, new_value=0, observed=0;
+    PJ_BYTE tx[4];
     pj5682s_status status;
-    if (!c || !mask || (value & (uint16_t)~mask)) return PJ5682S_BAD_ARGUMENT;
+    if (!c || !mask || (value & (PJ_WORD)~mask)) return PJ5682S_BAD_ARGUMENT;
     if (c->state!=PJ5682S_IDENTIFIED) return PJ5682S_NOT_IDENTIFIED;
     if (!c->bus.write_only) return PJ5682S_NO_BUS;
     if (reg==PJ5682S_DEVICE_ID_REGISTER || reg==PJ5682S_VENDOR_ID_REGISTER ||
         reg==PJ5682S_VERSION_REGISTER) return PJ5682S_BAD_ARGUMENT;
     status=read_raw(c,reg,&old_value);
     if (status!=PJ5682S_OK) return status;
-    new_value=(uint16_t)((old_value & (uint16_t)~mask)|value);
+    new_value=(PJ_WORD)((old_value & (PJ_WORD)~mask)|value);
     if (new_value==old_value) return PJ5682S_OK;
     pj5682s_encode_write(reg,new_value,tx);
     if (c->bus.write_only(c->bus.context,tx,sizeof(tx))!=0) {
