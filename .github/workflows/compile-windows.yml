@@ -2,7 +2,7 @@ name: Pujjo source-only Windows compile
 on:
   workflow_dispatch:
   push:
-    branches: [codex/wdk-build-fix]
+    branches: [main]
 permissions:
   contents: read
 jobs:
