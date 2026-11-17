@@ -11,6 +11,16 @@ root = Path(__file__).resolve().parents[1]
 ns = {'m': 'http://schemas.microsoft.com/developer/msbuild/2003'}
 projects = ('sof_dsp.vcxproj', 'pujjo_rt1019_probe.vcxproj',
             'pujjo_rt5682_probe.vcxproj')
+# Run #5: the WDK parent driver queries this target from its static library
+# project reference. Since sof_core is an ordinary v143 library, it must
+# explicitly supply a no-op metadata target without switching toolsets.
+core_project = ET.parse(root / 'sof_core.vcxproj')
+core_toolsets = core_project.findall('.//m:PlatformToolset', ns)
+assert len(core_toolsets) == 2 and all(x.text == 'v143' for x in core_toolsets)
+core_targets = core_project.findall('.//m:Target[@Name="GetDriverProjectAttributes"]', ns)
+assert len(core_targets) == 1
+assert core_targets[0].get('Returns') == '@(DriverProjectAttributes)'
+
 for name in projects:
     tree = ET.parse(root / name)
     configs = tree.findall('.//m:PlatformToolset', ns)
@@ -59,4 +69,4 @@ assert 'typedef uint16_t PJ_WORD;' in fixed
 codec = (root / 'src/driver/experimental/PujjoRt5682sCodec.c').read_text()
 assert '#error PJ5682S_TEST_ONLY_WRITES is forbidden in a Windows kernel build' in codec
 assert not list(root.rglob('*.inf')) and not list(root.rglob('*.cat'))
-print('PASS: CI #1-#4 regression contracts, correct WDK /kernel and Resource Hub usage')
+print('PASS: CI #1-#5 regression contracts, correct WDK /kernel and Resource Hub usage')

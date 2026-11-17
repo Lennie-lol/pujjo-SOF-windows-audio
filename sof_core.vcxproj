@@ -100,5 +100,9 @@
     <ClCompile Include="src\core\sof_core_init.c" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <!-- The WDK parent driver queries this metadata target on project references.
+       sof_core is a v143 static library, not a WDK driver; it has no driver
+       attributes to return. Keep its build toolset unchanged. -->
+  <Target Name="GetDriverProjectAttributes" Returns="@(DriverProjectAttributes)" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>
