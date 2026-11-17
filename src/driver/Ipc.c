@@ -33,6 +33,7 @@
 
 #include "Device.h"
 #include "Ipc.h"
+#include "PujjoIpc4Protocol.h"
 #include <ntstrsafe.h>
 
 void SofLogBreadcrumb(const char* text);
@@ -684,7 +685,7 @@ SofIpcDpcHandler(
                        "[SOF] IPC Notification: Type %u (0x%08x|0x%08x)\n",
                        notifyType, primary, extension);
 
-            if (notifyType == SOF_IPC4_NOTIFY_FW_READY) {
+            if (pj_ipc4_is_fw_ready(primary)) {
                 /* Firmware initialization complete and scheduler running */
                 char bmsg[128];
                 RtlStringCbPrintfA(bmsg, sizeof(bmsg),
@@ -694,7 +695,8 @@ SofIpcDpcHandler(
                 DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "%s", bmsg);
                 Ctx->FwState = SOF_FW_BOOT_COMPLETE;
                 KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
-            } else if (notifyType == SOF_IPC4_NOTIFY_EXCEPTION_CAUGHT) {
+            } else if (pj_ipc4_is_notification(primary) &&
+                       notifyType == SOF_IPC4_NOTIFY_EXCEPTION_CAUGHT) {
                 /* Firmware panic/exception caught by base FW */
                 char bmsg[128];
                 RtlStringCbPrintfA(bmsg, sizeof(bmsg),
@@ -703,7 +705,8 @@ SofIpcDpcHandler(
                 SofLogBreadcrumb(bmsg);
                 DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "%s", bmsg);
                 SofDspDumpCore(Ctx, "IPC4_NOTIFY_EXCEPTION_CAUGHT");
-            } else if (notifyType == SOF_IPC4_NOTIFY_LOG_BUFFER_STATUS) {
+            } else if (pj_ipc4_is_notification(primary) &&
+                       notifyType == SOF_IPC4_NOTIFY_LOG_BUFFER_STATUS) {
                 /*
                  * Firmware Log Buffer Status: DSP has generated new log data
                  * in its SRAM debug slot (CONFIG_LOG_BACKEND_ADSP_MTRACE).
@@ -783,8 +786,17 @@ SofIpcSendMessage(
     NTSTATUS status = STATUS_IO_TIMEOUT;
     ULONG elapsedMs = 0;
 
+    if (!Ctx || !Msg || TimeoutMs == 0 || TimeoutMs > 60000)
+        return STATUS_INVALID_PARAMETER;
     if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
         return STATUS_DEVICE_NOT_READY;
+    /* Do not silently truncate mailbox payloads or read past their source.
+     * Round up only when the mapped mailbox can hold the padded DWORD. */
+    if ((Msg->PayloadSize != 0 && !Msg->Payload) ||
+        Msg->PayloadSize > SOF_IPC_MAX_PAYLOAD ||
+        Msg->PayloadSize > Ctx->HwDesc->MailboxDownlinkSize ||
+        ((Msg->PayloadSize + 3u) & ~3u) > Ctx->HwDesc->MailboxDownlinkSize)
+        return STATUS_INVALID_BUFFER_SIZE;
 
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
 
@@ -801,12 +813,17 @@ SofIpcSendMessage(
      * Host writes must align to DWORD boundaries for DSP SRAM controller consistency.
      */
     if (Msg->Payload && Msg->PayloadSize > 0) {
-        ULONG writeSize = min(Msg->PayloadSize, Ctx->HwDesc->MailboxDownlinkSize);
-        volatile ULONG *dst = (volatile ULONG *)((PUCHAR)Ctx->Bar4VirtualAddress + Ctx->HwDesc->MailboxDownlinkOffset);
-        const ULONG *src = (const ULONG *)Msg->Payload;
-        ULONG dwordCount = (writeSize + 3) / sizeof(ULONG);
-        for (ULONG i = 0; i < dwordCount; i++) {
-            dst[i] = src[i];
+        ULONG offset;
+        const UCHAR *src = (const UCHAR *)Msg->Payload;
+        PUCHAR mailbox = (PUCHAR)Ctx->Bar4VirtualAddress +
+                         Ctx->HwDesc->MailboxDownlinkOffset;
+        for (offset = 0; offset < Msg->PayloadSize; offset += sizeof(ULONG)) {
+            ULONG word = 0;
+            ULONG byteIndex;
+            for (byteIndex = 0; byteIndex < sizeof(ULONG) &&
+                 offset + byteIndex < Msg->PayloadSize; ++byteIndex)
+                word |= ((ULONG)src[offset + byteIndex]) << (byteIndex * 8u);
+            WRITE_REGISTER_ULONG((PULONG)(mailbox + offset), word);
         }
     }
 
@@ -831,21 +848,8 @@ SofIpcSendMessage(
             Msg->Primary, Msg->Extension, Msg->PayloadSize);
         SofLogBreadcrumb(bmsg);
     }
-    if (Msg->Payload && Msg->PayloadSize >= 16) {
-        PULONG p = (PULONG)Msg->Payload;
-        char dmsg[160];
-        RtlStringCbPrintfA(dmsg, sizeof(dmsg),
-            "[IPC-D] [0..5]=0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
-            p[0], p[1], p[2], p[3], p[4], p[5]);
-        SofLogBreadcrumb(dmsg);
-
-        /* Read back from hardware mailbox to confirm MMIO write completion */
-        volatile ULONG *rb = (volatile ULONG *)((PUCHAR)Ctx->Bar4VirtualAddress + Ctx->HwDesc->MailboxDownlinkOffset);
-        RtlStringCbPrintfA(dmsg, sizeof(dmsg),
-            "[IPC-RB] [0..5]=0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
-            rb[0], rb[1], rb[2], rb[3], rb[4], rb[5]);
-        SofLogBreadcrumb(dmsg);
-    }
+    /* Do not log unbounded payload DWORDs or read back beyond the mailbox.
+     * The preceding IPC-TX breadcrumb already records length and headers. */
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] IPC TX Sent: Primary 0x%08x, Ext 0x%08x\n",

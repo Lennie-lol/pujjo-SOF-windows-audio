@@ -107,6 +107,8 @@
     <ClInclude Include="src\driver\PciIds.h" />
     <ClInclude Include="src\driver\Hw.h" />
     <ClInclude Include="src\driver\Ipc.h" />
+    <ClInclude Include="src\driver\PujjoIpc4Protocol.h" />
+    <ClInclude Include="src\driver\PujjoIpc4Transaction.h" />
     <ClInclude Include="src\driver\Loader.h" />
     <ClInclude Include="src\driver\Topo.h" />
     <ClInclude Include="src\driver\WaveRt.h" />
@@ -125,6 +127,8 @@
     <ClCompile Include="src\driver\PujjoBoardGuard.c" />
     <ClCompile Include="src\driver\Hw.c" />
     <ClCompile Include="src\driver\Ipc.c" />
+    <ClCompile Include="src\driver\PujjoIpc4Protocol.c" />
+    <ClCompile Include="src\driver\PujjoIpc4Transaction.c" />
     <ClCompile Include="src\driver\Loader.c" />
     <ClCompile Include="src\driver\Topo.c" />
     <ClCompile Include="src\driver\WaveRt.c" />

@@ -20,6 +20,7 @@ SUITES=[
  'tests/test_windows_ci_v017.py','tests/run_kernel_mock_abi_tests.py',
  'tests/test_preinstall_guards.py','tests/run_ipc4_boot_model_tests.py',
  'tests/run_boot_speaker_integration_tests.py',
+ 'tests/run_ipc4_protocol_tests.py','tests/test_ipc4_protocol_static.py',
 ]
 def main():
     p=argparse.ArgumentParser();p.add_argument('--logs',default='validation-v0.0.17/final')
