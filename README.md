@@ -297,3 +297,28 @@ For tracked blockers and evidence see [`REMAINING_BLOCKERS.md`](REMAINING_BLOCKE
 - Microsoft driver docs: [WDK build](https://learn.microsoft.com/en-us/windows-hardware/drivers/develop/building-a-driver), [WDF hardware resources](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/finding-and-mapping-hardware-resources), [SPB Resource Hub connection IDs](https://learn.microsoft.com/en-us/windows-hardware/drivers/spb/connection-ids-for-spb-connected-peripheral-devices), [SPB transfer lists](https://learn.microsoft.com/en-us/windows-hardware/drivers/spb/using-the-spb-transfer-list-structure), [GPIO resources](https://learn.microsoft.com/en-us/windows-hardware/drivers/gpio/gpio-based-hardware-resources), [common buffers](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/using-common-buffers).
 
 **In short:** v0.0.16 is a source-and-test milestone, not an installable or working Windows audio driver. The next concrete milestone is a **successful Windows WDK compile**, followed by implementation of the real firmware/audio pipeline and eventually carefully controlled hardware validation.
+
+
+### Windows CI compile-fix iteration (after Actions run #1, 2026-11-17)
+
+The first Windows Server 2022 GitHub Actions run completed Visual Studio/SDK/WDK
+installation and passed its portable test job, but both MSVC builds failed.
+Specific compiler diagnostics included `C4083`/`C4005` desktop runtime/kernel
+header conflicts, `C2220` warnings-as-errors, and `C4013` for
+`RESOURCE_HUB_CREATE_PATH_FROM_ID`.
+
+This iteration:
+- Introduces `src/driver/PujjoFixedTypes.h` for fixed-width types, using WDK
+  `UCHAR`, `ULONG`, `SIZE_T` in kernel builds and standard C types in portable
+  builds. This avoids importing desktop `stdint.h` from the two PnP/resource
+  policy modules into KMDF builds.
+- Removes `string.h` from the resource-validation code while preserving its
+  failure-path zeroing behavior.
+- Explicitly defines `_KERNEL_MODE` for the two KMDF peripheral probe projects.
+- Emits a clear compile-time diagnostic if the WDK Resource Hub path interface
+  is still missing instead of silently guessing a connection path.
+
+**Not verified on MSVC/WDK yet.** Push this revision and rerun both Windows
+jobs. Additional genuine source errors and link errors may become visible
+once the first header problems are resolved. These changes do not activate
+DSP firmware or write GPIO/I2C registers, and the source remains non-installable.

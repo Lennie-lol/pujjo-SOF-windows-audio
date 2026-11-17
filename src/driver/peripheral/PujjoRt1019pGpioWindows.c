@@ -6,6 +6,9 @@
 #include <ntddk.h>
 #include <wdf.h>
 #include <reshub.h>
+#if defined(_MSC_VER) && !defined(RESOURCE_HUB_CREATE_PATH_FROM_ID)
+#error Missing Resource Hub path API: use Windows WDK reshub.h and _KERNEL_MODE.
+#endif
 #include <gpio.h>
 #include "PujjoRt1019pGpioWindows.h"
 #define PJ1019_GPIO_TIMEOUT_MS 1000

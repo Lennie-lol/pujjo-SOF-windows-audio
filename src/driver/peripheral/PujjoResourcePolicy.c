@@ -1,14 +1,13 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "PujjoResourcePolicy.h"
-#include <string.h>
 
 enum pj_policy_result pj_validate_resources(enum pj_probe_kind device,
-    const pj_resource *resources, size_t count, pj_summary *summary)
+    const pj_resource *resources, PJ_SIZE count, pj_summary *summary)
 {
-    size_t i, j;
+    PJ_SIZE i, j;
     pj_summary s = {0};
     if (!summary) return PJ_POLICY_BAD_INPUT;
-    memset(summary, 0, sizeof(*summary));
+    *summary = s; /* zeroed even when validation subsequently fails */
     if ((device != PJ_PROBE_CODEC && device != PJ_PROBE_AMP) ||
         (!resources && count)) return PJ_POLICY_BAD_INPUT;
     if (count == 0 || count > PJ_MAX_RESOURCES)

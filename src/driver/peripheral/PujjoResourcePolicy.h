@@ -2,8 +2,7 @@
 /* Pure-C policy. No platform dependencies and absolutely no hardware writes. */
 #ifndef PUJJO_RESOURCE_POLICY_H
 #define PUJJO_RESOURCE_POLICY_H
-#include <stddef.h>
-#include <stdint.h>
+#include "../PujjoFixedTypes.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -22,19 +21,19 @@ enum pj_policy_result {
 /* The connection IDs are opaque Windows Resource Hub identifiers, NOT physical
  * GPIO pin numbers or I2C addresses. Never use them for register writes. */
 typedef struct pj_resource {
-    uint32_t kind;
-    uint32_t id_low;
-    uint32_t id_high;
+    PJ_DWORD kind;
+    PJ_DWORD id_low;
+    PJ_DWORD id_high;
 } pj_resource;
 typedef struct pj_summary {
-    uint32_t i2c_count;
-    uint32_t gpio_count;
-    uint32_t interrupt_count;
-    uint32_t connection_low;
-    uint32_t connection_high;
+    PJ_DWORD i2c_count;
+    PJ_DWORD gpio_count;
+    PJ_DWORD interrupt_count;
+    PJ_DWORD connection_low;
+    PJ_DWORD connection_high;
 } pj_summary;
 enum pj_policy_result pj_validate_resources(enum pj_probe_kind device,
-    const pj_resource *resources, size_t count, pj_summary *summary);
+    const pj_resource *resources, PJ_SIZE count, pj_summary *summary);
 #ifdef __cplusplus
 }
 #endif

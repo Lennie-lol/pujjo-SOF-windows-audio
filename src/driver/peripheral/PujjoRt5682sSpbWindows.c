@@ -6,6 +6,9 @@
 #include <ntddk.h>
 #include <wdf.h>
 #include <reshub.h>
+#if defined(_MSC_VER) && !defined(RESOURCE_HUB_CREATE_PATH_FROM_ID)
+#error Missing Resource Hub path API: use Windows WDK reshub.h and _KERNEL_MODE.
+#endif
 #include <spb.h>
 #include "PujjoRt5682sSpbWindows.h"
 #define PJ5682S_SPB_TIMEOUT_MS 1000
