@@ -240,8 +240,163 @@
     "exit_code": 0
   },
   {
-    "compiler": "clang",
-    "status": "SKIP",
-    "reason": "Compiler not installed"
+    "test": "clang-strict-board",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-resources",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-acpi",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-map",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-clock",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-firmware",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-codec-locked",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-codec-mock",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-amp-locked",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-amp-mock",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-init-locked",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-init-mock",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-run_loader_transport_tests",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-run_windows_transport_tests",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-run_bringup_tests",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-strict-run_dma_tests",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-board",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-resources",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-acpi",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-map",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-clock",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-firmware",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-codec-locked",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-codec-mock",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-amp-locked",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-amp-mock",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-init-locked",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-init-mock",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-run_loader_transport_tests",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-run_windows_transport_tests",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-run_bringup_tests",
+    "status": "PASS",
+    "exit_code": 0
+  },
+  {
+    "test": "clang-sanitizers-run_dma_tests",
+    "status": "PASS",
+    "exit_code": 0
   }
 ]
