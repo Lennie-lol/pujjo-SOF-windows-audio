@@ -25,6 +25,17 @@
 - Two extra offline regression suites, compiled with native C compilers on CI,
   plus static enforcement of the WDK source inclusion and runtime gates.
 
+## Read-only Pujjo hardware evidence (no driver installation)
+
+`./scripts/ReadOnly-PujjoIpc4Evidence.ps1` is an optional PowerShell
+report for the **actual Pujjo/Pujjo1e Chromebook running Windows**, not the
+ZimaOS development VM. It collects only board make/model, Windows build,
+audio-controller/codec/amp PnP IDs, Intel I2C controller identity, PnP parent,
+location paths, service and problem status. It does not change driver state,
+read or write hardware registers, call installers, or send network traffic.
+Review its output before sharing. A PnP location path is not the translated
+ACPI _CRS resource ID required for live GPIO/SPB transfers.
+
 ## Limits and unfinished non-speaker layers
 
 This is *not* a full Windows SOF IPC4 transport implementation. The existing
