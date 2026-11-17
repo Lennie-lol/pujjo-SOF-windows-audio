@@ -104,5 +104,8 @@
        sof_core is a v143 static library, not a WDK driver; it has no driver
        attributes to return. Keep its build toolset unchanged. -->
   <Target Name="GetDriverProjectAttributes" Returns="@(DriverProjectAttributes)" />
+  <!-- Packaging is disabled for the compile-only development driver. This
+       non-driver v143 library contributes no driver package files. -->
+  <Target Name="GetPackageFiles" Returns="@(PackageFiles)" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>
