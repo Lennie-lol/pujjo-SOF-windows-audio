@@ -50,3 +50,12 @@ assert "else if (bootFault)" in publish
 assert "KeSetEvent(&Ctx->FwReadyEvent" in publish.split("else if (bootFault)",1)[1]
 assert "Restore DONE even for a BUSY-only IRQ" in dpc
 print("PASS: single DPC consumer, acknowledged readiness, fault wakeup and bounded boot wait")
+
+device=(root/"src/driver/Device.c").read_text()
+d0=device.split("NTSTATUS\nSofEvtDeviceD0Entry(",1)[1].split("\n/**",1)[0]
+assert d0.index("if (ipcFaulted ||") < d0.index("SofIpcEnableInterrupts(ctx)")
+assert d0.index("return bootStatus;") < d0.index("WdfTimerStart(")
+assert d0.count("ipcFaulted = ctx->IpcFaulted || ctx->FwState != SOF_FW_BOOT_COMPLETE;") == 2
+assert d0.index("return STATUS_DEVICE_NOT_READY;",d0.index("bootStatus =")) < d0.index("WdfTimerStart(")
+assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)" in d0
+print("PASS: D0 entry fails before starting timers when firmware is not ready")
