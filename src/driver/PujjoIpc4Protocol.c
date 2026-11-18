@@ -155,3 +155,16 @@ pj_ipc4_status pj_ipc4_module_link(PJ_DWORD bind, PJ_DWORD src_module,
         (src_instance<<16)|src_module,
         (src_queue<<27)|(dst_queue<<24)|(dst_instance<<16)|dst_module,0,0u,out);
 }
+
+pj_ipc4_status pj_ipc4_large_config_set(PJ_DWORD module, PJ_DWORD instance,
+    PJ_DWORD parameter, const PJ_BYTE *payload, PJ_SIZE bytes, pj_ipc4_packet *out)
+{
+    if (!out || module > 65535u || instance > 255u ||
+        parameter > 255u || !payload || bytes == 0u)
+        return PJ_IPC4_BAD_PARAMETER;
+    if (bytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD) return PJ_IPC4_TOO_LARGE;
+    return graph_packet(PJ_IPC4_TARGET_MASK | (4u << 24) |
+                        (instance << 16) | module,
+                        (3u << 28) | (parameter << 20) | (PJ_DWORD)bytes,
+                        payload, bytes, out);
+}

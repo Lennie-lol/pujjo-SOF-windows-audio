@@ -57,6 +57,11 @@ pj_ipc4_status pj_ipc4_module_link(PJ_DWORD bind, PJ_DWORD src_module,
     PJ_DWORD src_instance, PJ_DWORD src_queue, PJ_DWORD dst_module,
     PJ_DWORD dst_instance, PJ_DWORD dst_queue, pj_ipc4_packet *out);
 
+/* Single-block LARGE_CONFIG_SET. Byte length (not DWORD count), first
+ * and last flags. Multi-block transactions and config reads are separate. */
+pj_ipc4_status pj_ipc4_large_config_set(PJ_DWORD module, PJ_DWORD instance,
+    PJ_DWORD parameter, const PJ_BYTE *payload, PJ_SIZE bytes, pj_ipc4_packet *out);
+
 /* DWORD-aligned span inside an already mapped MMIO window; no I/O. */
 int pj_ipc4_mmio_span_valid(PJ_DWORD mapped_bytes, PJ_DWORD offset, PJ_DWORD bytes);
 #ifdef __cplusplus

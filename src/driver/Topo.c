@@ -588,8 +588,15 @@ NTSTATUS SofIpc4SetVolumeCurve(
     _In_ ULONG DurationFrames
 )
 {
-    SOF_IPC_MESSAGE msg = {0};
+    pj_ipc4_packet packet = {0};
+    pj_ipc4_status result;
     struct sof_ipc4_gain_params params = {0};
+
+    if (GainInstanceId >= 256u ||
+        (Channel >= 8u && Channel != SOF_IPC4_GAIN_ALL_CHANNELS_MASK) ||
+        CurveType > SOF_IPC4_GAIN_CURVE_TYPE_LOG ||
+        VolumeLinear > SOF_IPC4_VOLUME_ZERO_DB)
+        return STATUS_INVALID_PARAMETER;
 
     params.channels = Channel;
     params.init_val = VolumeLinear;
@@ -597,27 +604,14 @@ NTSTATUS SofIpc4SetVolumeCurve(
     params.curve_duration_l = DurationFrames;
     params.curve_duration_h = 0;
 
-    msg.Primary = SOF_IPC4_MSG_TYPE_SET(SOF_IPC4_MOD_LARGE_CONFIG_SET) |
-                  SOF_IPC4_MSG_TARGET(SOF_IPC4_MODULE_MSG) |
-                  SOF_IPC4_MOD_INSTANCE(GainInstanceId) |
-                  SOF_IPC4_MOD_ID(SOF_IPC4_MOD_ID_GAIN);
-
-    msg.Extension = SOF_IPC4_MOD_EXT_MSG_SIZE(sizeof(params)) |
-                    SOF_IPC4_MOD_EXT_MSG_PARAM_ID(SOF_IPC4_GAIN_PARAM_ID) |
-                    SOF_IPC4_MOD_EXT_MSG_FIRST_BLOCK(1) |
-                    SOF_IPC4_MOD_EXT_MSG_LAST_BLOCK(1);
-
-    msg.Payload = &params;
-    msg.PayloadSize = sizeof(params);
-
+    result = pj_ipc4_large_config_set(SOF_IPC4_MOD_ID_GAIN, GainInstanceId,
+        SOF_IPC4_GAIN_PARAM_ID, (const PJ_BYTE *)&params, sizeof(params), &packet);
 #ifdef _KERNEL_MODE
-    if (Ctx != NULL) {
-        return SofIpcSendMessage(Ctx, &msg, NULL, 500);
-    }
+    return SofIpc4SendGraphPacket(Ctx, result, &packet);
 #else
     UNREFERENCED_PARAMETER(Ctx);
+    return result == PJ_IPC4_VALID ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 #endif
-    return STATUS_SUCCESS;
 }
 
 NTSTATUS SofIpc4SetVolumeLevel(

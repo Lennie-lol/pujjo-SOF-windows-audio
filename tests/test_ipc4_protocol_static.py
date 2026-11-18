@@ -83,3 +83,11 @@ for name in ('Playback','Capture','Hdmi','Ssp','Dmic','Alh'):
     assert cleanup.index('if (NT_SUCCESS(SofIpc4DeletePipeline') < cleanup.index('SofIpc4FreeInstanceId')
     assert cleanup.count('SofIpc4FreeInstanceId(')==3
 print('PASS: module ID allocation failures and pipeline deletion ownership checks')
+
+# Gain commands share the tested single-block large config encoder.
+volume=topo.split('NTSTATUS SofIpc4SetVolumeCurve(',1)[1].split('\n}',1)[0]
+assert 'pj_ipc4_large_config_set(SOF_IPC4_MOD_ID_GAIN' in volume
+assert 'return SofIpc4SendGraphPacket(Ctx, result, &packet);' in volume
+assert 'GainInstanceId >= 256u' in volume
+assert 'VolumeLinear > SOF_IPC4_VOLUME_ZERO_DB' in volume
+print('PASS: gain configuration uses checked IPC4 single-block command')
