@@ -59,6 +59,7 @@ static pj_bringup_evidence valid(void)
     e.amplifier.logical_sdb_polarity_verified=1;
     e.amplifier.speaker_ssp_and_firmware_verified=1;
     e.amplifier.dsp_muting_verified=1;
+    e.amplifier.calibration_procedure_verified=1;
     e.amplifier.safe_gain_limit_verified=1;
     e.amplifier.recovery_verified=1;
     e.compatible_ipc4_image_and_windows_loader_verified=1;

@@ -210,10 +210,12 @@ NTSTATUS PjEvtD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
     PJ_DEV_CONTEXT *ctx=PjGetDeviceContext(Device);
     UNREFERENCED_PARAMETER(TargetState);
     PAGED_CODE();
-    (void)Pj5682sSpbSetPower(&ctx->Spb, FALSE);
-    if (ctx->Codec.state==PJ5682S_IDENTIFIED ||
-        ctx->Codec.state==PJ5682S_BOUND)
-        (void)pj5682s_suspend(&ctx->Codec);
+    NTSTATUS status = Pj5682sSpbSetPower(&ctx->Spb, FALSE);
+    if (!NT_SUCCESS(status)) return status;
+    if (ctx->Codec.state == PJ5682S_FAILED) return STATUS_DEVICE_CONFIGURATION_ERROR;
+    if (ctx->Codec.state != PJ5682S_ASLEEP &&
+        pj5682s_suspend(&ctx->Codec) != PJ5682S_OK)
+        return STATUS_INVALID_DEVICE_STATE;
     return STATUS_SUCCESS;
 }
 #endif
