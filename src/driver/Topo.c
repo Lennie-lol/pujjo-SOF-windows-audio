@@ -19,6 +19,7 @@
 #include "Topo.h"
 #ifdef _KERNEL_MODE
 #include "Device.h"
+#include "PujjoIpc4Protocol.h"
 #include <ntstrsafe.h>
 void SofLogBreadcrumb(const char* text);
 #else
@@ -188,6 +189,25 @@ NTSTATUS SofIpc4BuildGainConfig(
     return STATUS_SUCCESS;
 }
 
+#ifdef _KERNEL_MODE
+/* Shared command encoders are exercised by the portable IPC4 suite.
+ * The real transport is still responsible for firmware readiness, reply
+ * matching, serialization and timeout handling. No success on null Ctx. */
+static NTSTATUS SofIpc4SendGraphPacket(PSOF_DEVICE_CONTEXT Ctx,
+    pj_ipc4_status Result, const pj_ipc4_packet *Packet)
+{
+    SOF_IPC_MESSAGE msg = {0};
+    if (!Ctx) return STATUS_INVALID_PARAMETER;
+    if (Result == PJ_IPC4_TOO_LARGE) return STATUS_INVALID_BUFFER_SIZE;
+    if (Result != PJ_IPC4_VALID || !Packet) return STATUS_INVALID_PARAMETER;
+    msg.Primary = Packet->primary;
+    msg.Extension = Packet->extension;
+    msg.Payload = (PVOID)Packet->payload;
+    msg.PayloadSize = (ULONG)Packet->payload_bytes;
+    return SofIpcSendMessage(Ctx, &msg, NULL, 500);
+}
+#endif
+
 NTSTATUS SofIpc4CreatePipeline(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ ULONG PipelineId,
@@ -197,6 +217,11 @@ NTSTATUS SofIpc4CreatePipeline(
     _In_ ULONG LpMode
 )
 {
+#ifdef _KERNEL_MODE
+    pj_ipc4_packet packet = {0};
+    pj_ipc4_status result = pj_ipc4_pipeline_create(PipelineId, Priority, MemUsagePages, CoreId, LpMode, &packet);
+    return SofIpc4SendGraphPacket(Ctx, result, &packet);
+#else
     SOF_IPC_MESSAGE msg = {0};
 
     msg.Primary = SOF_IPC4_MSG_TYPE_SET(SOF_IPC4_GLB_CREATE_PIPELINE) |
@@ -207,14 +232,9 @@ NTSTATUS SofIpc4CreatePipeline(
     msg.Extension = SOF_IPC4_GLB_PIPE_EXT_LP(LpMode) |
                     SOF_IPC4_GLB_PIPE_EXT_CORE_ID(CoreId);
 
-#ifdef _KERNEL_MODE
-    if (Ctx != NULL) {
-        return SofIpcSendMessage(Ctx, &msg, NULL, 500);
-    }
-#else
     UNREFERENCED_PARAMETER(Ctx);
-#endif
     return STATUS_SUCCESS;
+#endif
 }
 
 NTSTATUS SofIpc4DeletePipeline(
@@ -222,19 +242,19 @@ NTSTATUS SofIpc4DeletePipeline(
     _In_ ULONG PipelineId
 )
 {
+#ifdef _KERNEL_MODE
+    pj_ipc4_packet packet = {0};
+    pj_ipc4_status result = pj_ipc4_pipeline_delete(PipelineId, &packet);
+    return SofIpc4SendGraphPacket(Ctx, result, &packet);
+#else
     SOF_IPC_MESSAGE msg = {0};
 
     msg.Primary = SOF_IPC4_MSG_TYPE_SET(SOF_IPC4_GLB_DELETE_PIPELINE) |
                   SOF_IPC4_GLB_PIPE_INSTANCE_ID(PipelineId);
 
-#ifdef _KERNEL_MODE
-    if (Ctx != NULL) {
-        return SofIpcSendMessage(Ctx, &msg, NULL, 500);
-    }
-#else
     UNREFERENCED_PARAMETER(Ctx);
-#endif
     return STATUS_SUCCESS;
+#endif
 }
 
 NTSTATUS SofIpc4SetPipelineState(
@@ -243,20 +263,20 @@ NTSTATUS SofIpc4SetPipelineState(
     _In_ ULONG State
 )
 {
+#ifdef _KERNEL_MODE
+    pj_ipc4_packet packet = {0};
+    pj_ipc4_status result = pj_ipc4_pipeline_state(PipelineId, State, &packet);
+    return SofIpc4SendGraphPacket(Ctx, result, &packet);
+#else
     SOF_IPC_MESSAGE msg = {0};
 
     msg.Primary = SOF_IPC4_MSG_TYPE_SET(SOF_IPC4_GLB_SET_PIPELINE_STATE) |
                   SOF_IPC4_GLB_PIPE_STATE_ID(PipelineId) |
                   SOF_IPC4_GLB_PIPE_STATE(State);
 
-#ifdef _KERNEL_MODE
-    if (Ctx != NULL) {
-        return SofIpcSendMessage(Ctx, &msg, NULL, 500);
-    }
-#else
     UNREFERENCED_PARAMETER(Ctx);
-#endif
     return STATUS_SUCCESS;
+#endif
 }
 
 #ifndef _KERNEL_MODE
@@ -348,6 +368,11 @@ NTSTATUS SofIpc4InitModuleInstance(
     _In_ ULONG PayloadSize
 )
 {
+#ifdef _KERNEL_MODE
+    pj_ipc4_packet packet = {0};
+    pj_ipc4_status result = pj_ipc4_module_init(ModuleId, InstanceId, PipelineId, CoreId, 0u, (const PJ_BYTE *)Payload, PayloadSize, &packet);
+    return SofIpc4SendGraphPacket(Ctx, result, &packet);
+#else
     SOF_IPC_MESSAGE msg = {0};
 
     ULONG paramDwords = (PayloadSize + 3) / sizeof(uint32_t);
@@ -364,14 +389,9 @@ NTSTATUS SofIpc4InitModuleInstance(
     msg.Payload = (PVOID)Payload;
     msg.PayloadSize = PayloadSize;
 
-#ifdef _KERNEL_MODE
-    if (Ctx != NULL) {
-        return SofIpcSendMessage(Ctx, &msg, NULL, 500);
-    }
-#else
     UNREFERENCED_PARAMETER(Ctx);
-#endif
     return STATUS_SUCCESS;
+#endif
 }
 
 NTSTATUS SofIpc4BindModules(
@@ -384,6 +404,11 @@ NTSTATUS SofIpc4BindModules(
     _In_ ULONG DstQueue
 )
 {
+#ifdef _KERNEL_MODE
+    pj_ipc4_packet packet = {0};
+    pj_ipc4_status result = pj_ipc4_module_link(1u, SrcModuleId, SrcInstanceId, SrcQueue, DstModuleId, DstInstanceId, DstQueue, &packet);
+    return SofIpc4SendGraphPacket(Ctx, result, &packet);
+#else
     SOF_IPC_MESSAGE msg = {0};
 
     msg.Primary = SOF_IPC4_MSG_TYPE_SET(SOF_IPC4_MOD_BIND) |
@@ -396,14 +421,9 @@ NTSTATUS SofIpc4BindModules(
                     SOF_IPC4_MOD_EXT_DST_MOD_QUEUE_ID(DstQueue) |
                     SOF_IPC4_MOD_EXT_SRC_MOD_QUEUE_ID(SrcQueue);
 
-#ifdef _KERNEL_MODE
-    if (Ctx != NULL) {
-        return SofIpcSendMessage(Ctx, &msg, NULL, 500);
-    }
-#else
     UNREFERENCED_PARAMETER(Ctx);
-#endif
     return STATUS_SUCCESS;
+#endif
 }
 
 NTSTATUS SofIpc4UnbindModules(
@@ -416,6 +436,11 @@ NTSTATUS SofIpc4UnbindModules(
     _In_ ULONG DstQueue
 )
 {
+#ifdef _KERNEL_MODE
+    pj_ipc4_packet packet = {0};
+    pj_ipc4_status result = pj_ipc4_module_link(0u, SrcModuleId, SrcInstanceId, SrcQueue, DstModuleId, DstInstanceId, DstQueue, &packet);
+    return SofIpc4SendGraphPacket(Ctx, result, &packet);
+#else
     SOF_IPC_MESSAGE msg = {0};
 
     msg.Primary = SOF_IPC4_MSG_TYPE_SET(SOF_IPC4_MOD_UNBIND) |
@@ -428,14 +453,9 @@ NTSTATUS SofIpc4UnbindModules(
                     SOF_IPC4_MOD_EXT_DST_MOD_QUEUE_ID(DstQueue) |
                     SOF_IPC4_MOD_EXT_SRC_MOD_QUEUE_ID(SrcQueue);
 
-#ifdef _KERNEL_MODE
-    if (Ctx != NULL) {
-        return SofIpcSendMessage(Ctx, &msg, NULL, 500);
-    }
-#else
     UNREFERENCED_PARAMETER(Ctx);
-#endif
     return STATUS_SUCCESS;
+#endif
 }
 
 /*
