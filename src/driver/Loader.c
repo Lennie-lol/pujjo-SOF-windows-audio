@@ -1233,8 +1233,15 @@ stop_dma:
         if (Ctx->SpbCapOffset) {
             PUCHAR spibBar = bar0 + Ctx->SpbCapOffset;
             PUCHAR spibAddr = spibBar + SOF_HDA_SPIB_BASE + (streamIndex * SOF_HDA_SPIB_INTERVAL) + SOF_HDA_SPIB_SPIB;
+            ULONG spbControl = readl(spibBar + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL);
+            /* RUN is confirmed clear, but an inaccessible capability must
+             * not be turned into a control write or a successful boot. */
+            if (spbControl == 0xFFFFFFFFu) {
+                status = STATUS_DEVICE_NOT_READY;
+                goto boot_failed;
+            }
             writel(0, spibAddr);
-            writel(readl(spibBar + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL) & ~(1 << streamIndex),
+            writel(spbControl & ~(1u << streamIndex),
                    spibBar + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL);
         }
     }

@@ -81,3 +81,11 @@ assert "ExWaitForRundownProtectionRelease" in ipc
 entry = ipc.split("NTSTATUS\nSofIpcSendMessage(",1)[1].split("\n}",1)[0]
 assert entry.index("ExAcquireRundownProtection") < entry.index("SofIpcSendWhilePowered") < entry.index("ExReleaseRundownProtection")
 assert "WdfTimerStop(ctx->JackPollTimer, TRUE)" in device
+
+# SPIB teardown follows confirmed RUN clear and rejects inaccessible MMIO.
+spib_stop = stop.split("if (Ctx->SpbCapOffset)",1)[1]
+assert stop.index("if (timeout == 500u)") < stop.index("ULONG spbControl = readl(")
+assert spib_stop.index("if (spbControl == 0xFFFFFFFFu)") < spib_stop.index("goto boot_failed;") < spib_stop.index("writel(0, spibAddr)")
+assert "writel(spbControl & ~(1u << streamIndex)" in spib_stop
+assert "writel(readl(" not in spib_stop
+print("PASS: confirmed DMA stop precedes SPIB teardown; inaccessible SPIB fails closed")
