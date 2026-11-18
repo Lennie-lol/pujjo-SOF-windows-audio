@@ -34,6 +34,15 @@
 
 NTSYSAPI NTSTATUS NTAPI ZwFlushKey(_In_ HANDLE KeyHandle);
 
+static BOOLEAN SofHardwareDevelopmentAllowed(VOID)
+{
+#if defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)
+    return TRUE;
+#else
+    return FALSE;
+#endif
+}
+
 /**
  * @brief Traverses the Intel HDA extended capability linked list in BAR0.
  *
@@ -72,9 +81,7 @@ VOID SofDiscoverHdaCaps(
     Ctx->NumCaptureStreams = (gcap >> 8) & 0x0F;
     Ctx->NumPlaybackStreams = (gcap >> 12) & 0x0F;
 
-    /* Fallback defaults if GCAP reads 0 */
-    if (Ctx->NumCaptureStreams == 0) Ctx->NumCaptureStreams = 7;
-    if (Ctx->NumPlaybackStreams == 0) Ctx->NumPlaybackStreams = 9;
+    /* Zero means no reported streams. Never manufacture hardware counts. */
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] GCAP=0x%08x: NumCapture=%u, NumPlayback=%u\n",
@@ -168,6 +175,7 @@ SofEvtDevicePrepareHardware(
     char msg[256];
 
     UNREFERENCED_PARAMETER(ResourcesRaw);
+    if (!SofHardwareDevelopmentAllowed()) return STATUS_NOT_SUPPORTED;
 
     /* Pujjo-only fork. Fail closed before touching PCI registers. */
     if (!PujjoBoardIdentityMatches()) {
@@ -326,7 +334,8 @@ SofEvtDevicePrepareHardware(
     }
 
     /* Initialize IPC state machine */
-    SofIpcInitialize(ctx);
+    status = SofIpcInitialize(ctx);
+    if (!NT_SUCCESS(status)) return status;
 
     /* Initialize default audio control states (0 dB, unmuted) */
     for (ULONG ep = 0; ep < SOF_ENDPOINT_COUNT; ep++) {
@@ -477,6 +486,7 @@ SofEvtDeviceReleaseHardware(
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
 
     UNREFERENCED_PARAMETER(ResourcesTranslated);
+    if (!SofHardwareDevelopmentAllowed()) return STATUS_SUCCESS;
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] SofEvtDeviceReleaseHardware starting...\n");
@@ -853,6 +863,7 @@ SofEvtDeviceD0Exit(
 )
 {
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
+    if (!SofHardwareDevelopmentAllowed()) return STATUS_SUCCESS;
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] EvtDeviceD0Exit: Transitioning from D0 to Target State %d\n",
@@ -1000,6 +1011,7 @@ SofEvtInterruptIsr(
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(WdfInterruptGetDevice(Interrupt));
 
     UNREFERENCED_PARAMETER(MessageID);
+    if (!SofHardwareDevelopmentAllowed()) return FALSE;
 
     /* Check if this interrupt was asserted by the DSP */
     if (SofIpcIsrCheck(ctx)) {
@@ -1026,6 +1038,7 @@ SofEvtInterruptDpc(
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(WdfInterruptGetDevice(Interrupt));
 
     UNREFERENCED_PARAMETER(AssociatedObject);
+    if (!SofHardwareDevelopmentAllowed()) return;
 
     /* Process DSP IPC Mailbox reply or notification */
     SofIpcDpcHandler(ctx);

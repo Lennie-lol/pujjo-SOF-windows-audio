@@ -29,8 +29,14 @@
 #include "WaveRt.h"
 #include "Device.h"
 #include "HdaVerb.h"
+#include "PujjoDmaPlan.h"
 
 #ifdef _KERNEL_MODE
+/* No runtime registry flag can qualify the inherited WaveRT implementation. */
+static BOOLEAN SofWaveRtHardwareBackendVerified(VOID)
+{
+    return FALSE;
+}
 static KDEFERRED_ROUTINE SofWaveRtTimerDpc;
 
 /**
@@ -99,10 +105,24 @@ NTSTATUS SofWaveRtCreateStream(
     PSOF_WAVERT_STREAM stream;
     NTSTATUS status;
     ULONG bdlSize;
+    ULONG periodBytes;
 
-    if (StreamOut == NULL || Format == NULL || BufferSizeBytes == 0) {
+    if (StreamOut == NULL) return STATUS_INVALID_PARAMETER;
+    *StreamOut = NULL;
+    if (Format == NULL || (ULONG)EndpointType >= SOF_ENDPOINT_COUNT ||
+        StreamTag > 15u || Format->InterleavingStyle != 0u ||
+        !pj_pcm_period(Format->SamplingFrequency, Format->ChannelsCount,
+                       Format->BitDepth, Format->ValidBitDepth,
+                       PeriodMs ? PeriodMs : SOF_WAVERT_DEFAULT_PERIOD_MS,
+                       BufferSizeBytes, &periodBytes))
         return STATUS_INVALID_PARAMETER;
-    }
+#ifdef _KERNEL_MODE
+    /* A separate, reviewed allocation/ownership backend is required.
+     * The inherited physical-address/MDL path is not IOMMU-qualified. */
+    if (Ctx == NULL || Ctx->FwState != SOF_FW_BOOT_COMPLETE ||
+        !SofWaveRtHardwareBackendVerified())
+        return STATUS_NOT_SUPPORTED;
+#endif
 
 #ifdef _KERNEL_MODE
     stream = (PSOF_WAVERT_STREAM)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(SOF_WAVERT_STREAM), SOF_DEVICE_TAG);
@@ -172,10 +192,7 @@ NTSTATUS SofWaveRtCreateStream(
     stream->DaiCopierInstance = 0xFFFFFFFF;
 
     /* Calculate period size in bytes: (Rate * Ch * BytesPerSample * PeriodMs) / 1000 */
-    stream->PeriodSizeBytes = (Format->SamplingFrequency *
-                               Format->ChannelsCount *
-                               (Format->BitDepth / 8) *
-                               stream->PeriodMs) / 1000;
+    stream->PeriodSizeBytes = periodBytes;
 
     /* 1. Allocate circular ring buffer */
 #ifdef _KERNEL_MODE
@@ -294,16 +311,7 @@ NTSTATUS SofWaveRtCreateStream(
     case SOF_ENDPOINT_DMIC_PDM:
         status = SofIpc4CreateDmicPipeline(Ctx, stream->PipelineId, stream->StreamTag, Format,
                                            &stream->HostCopierInstance, &stream->GainInstance, &stream->DaiCopierInstance);
-        if (!NT_SUCCESS(status)) {
-            char bmsg[160];
-            RtlStringCbPrintfA(bmsg, sizeof(bmsg),
-                "[WaveRt] DMIC hardware not connected (0x%08x), operating in silence capture mode\n", status);
-            SofLogBreadcrumb(bmsg);
-            stream->HostCopierInstance = 0xFFFFFFFF;
-            stream->GainInstance = 0xFFFFFFFF;
-            stream->DaiCopierInstance = 0xFFFFFFFF;
-            status = STATUS_SUCCESS;
-        }
+        /* Propagate a failed pipeline; never report silent success. */
         break;
     case SOF_ENDPOINT_I2S_SSP2:
         /* Pujjo safety: RT5682/RT1019 initialization and validated SSP port
@@ -315,17 +323,7 @@ NTSTATUS SofWaveRtCreateStream(
     case SOF_ENDPOINT_SDW_CAPTURE:
         status = SofIpc4CreateAlhPipeline(Ctx, stream->PipelineId, stream->StreamTag, 0 /* Link 0 */, IsCapture, Format,
                                            &stream->HostCopierInstance, &stream->GainInstance, &stream->DaiCopierInstance);
-        if (!NT_SUCCESS(status)) {
-            char bmsg[160];
-            RtlStringCbPrintfA(bmsg, sizeof(bmsg),
-                "[WaveRt] SoundWire hardware not connected (0x%08x), operating in %s mode\n",
-                status, IsCapture ? "silence capture" : "zero data playback");
-            SofLogBreadcrumb(bmsg);
-            stream->HostCopierInstance = 0xFFFFFFFF;
-            stream->GainInstance = 0xFFFFFFFF;
-            stream->DaiCopierInstance = 0xFFFFFFFF;
-            status = STATUS_SUCCESS;
-        }
+        /* Propagate a failed pipeline; never report silent success. */
         break;
     case SOF_ENDPOINT_HDA_ANALOG:
     default:

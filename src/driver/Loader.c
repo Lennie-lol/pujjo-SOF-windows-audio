@@ -47,6 +47,7 @@ void SofLogBreadcrumb(const char* text);
 #include "Loader.h"
 #include "Hw.h"
 #include "Ipc.h"
+#include "PujjoDmaPlan.h"
 
 /**
  * @brief Parses an SOF firmware binary and extracts manifest and version metadata.
@@ -512,14 +513,32 @@ SofConfigureCodeLoaderDma(
     ULONG timeout = 500;
     ULONG ctl;
     ULONG halfSize;
-    ULONG restSize;
+    pj_dma_plan plan;
     ULONG streamIndex;
     ULONG sdOffset;
     ULONG gctl;
     char bmsg[256];
 
-    if (!Ctx->Bar0VirtualAddress || !FwDmaBuf || !BdlDmaBuf)
+    if (OutStreamIndex) *OutStreamIndex = 0;
+    if (!Ctx || !Ctx->Bar0VirtualAddress || !FwDmaBuf || !BdlDmaBuf ||
+        !FwDmaBuf->CommonBuffer || !BdlDmaBuf->CommonBuffer ||
+        !FwDmaBuf->VirtualAddress || !BdlDmaBuf->VirtualAddress ||
+        BdlDmaBuf->Size < 2u * sizeof(SOF_INTEL_DSP_BDL) ||
+        (BdlDmaBuf->PhysicalAddress.LowPart & 127u) != 0u ||
+        StreamTag == 0u || StreamTag > 15u)
         return STATUS_INVALID_PARAMETER;
+    halfSize = (FwDmaBuf->Size / 2u) & ~127u;
+    if (!pj_dma_plan_pair(FwDmaBuf->PhysicalAddress.LowPart,
+                          (ULONG)FwDmaBuf->PhysicalAddress.HighPart,
+                          FwDmaBuf->Size, halfSize, &plan))
+        return STATUS_INVALID_BUFFER_SIZE;
+    if (Ctx->NumPlaybackStreams == 0u || Ctx->NumCaptureStreams >= 30u)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    streamIndex = Ctx->NumCaptureStreams;
+    sdOffset = SOF_HDA_ADSP_LOADER_BASE + (streamIndex * SOF_HDA_ADSP_SD_ENTRY_SIZE);
+    if (Ctx->Bar0Length < SOF_HDA_ADSP_SD_ENTRY_SIZE ||
+        sdOffset > Ctx->Bar0Length - SOF_HDA_ADSP_SD_ENTRY_SIZE)
+        return STATUS_INVALID_BUFFER_SIZE;
 
     bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
 
@@ -540,11 +559,7 @@ SofConfigureCodeLoaderDma(
      * Playback stream descriptor, which immediately follows the capture streams
      * (streamIndex = NumCaptureStreams).
      */
-    streamIndex = Ctx->NumCaptureStreams;
-    if (streamIndex == 0) streamIndex = 7; /* Fallback for typical 7-capture configs */
     if (OutStreamIndex) *OutStreamIndex = streamIndex;
-
-    sdOffset = SOF_HDA_ADSP_LOADER_BASE + (streamIndex * SOF_HDA_ADSP_SD_ENTRY_SIZE);
     streamRegs = bar0 + sdOffset;
 
     /*
@@ -562,20 +577,18 @@ SofConfigureCodeLoaderDma(
      * The Intel HD-A specification strictly requires Last Valid Index (LVI) >= 1.
      * We divide the firmware payload into two equal halves (128-byte aligned).
      */
-    halfSize = (FwDmaBuf->Size / 2) & ~0x7F;
-    restSize = FwDmaBuf->Size - halfSize;
     bdl = (PSOF_INTEL_DSP_BDL)BdlDmaBuf->VirtualAddress;
 
-    /* Entry 0: First half of firmware image */
-    bdl[0].AddrLow = FwDmaBuf->PhysicalAddress.LowPart;
-    bdl[0].AddrHigh = FwDmaBuf->PhysicalAddress.HighPart;
-    bdl[0].Size = halfSize;
+    /* Entry 0: first segment, validated before MMIO. */
+    bdl[0].AddrLow = plan.first.low;
+    bdl[0].AddrHigh = plan.first.high;
+    bdl[0].Size = plan.first.length;
     bdl[0].Ioc = 0;
 
     /* Entry 1: Second half of firmware image, with IOC (Interrupt On Completion) set */
-    bdl[1].AddrLow = FwDmaBuf->PhysicalAddress.LowPart + halfSize;
-    bdl[1].AddrHigh = FwDmaBuf->PhysicalAddress.HighPart;
-    bdl[1].Size = restSize;
+    bdl[1].AddrLow = plan.second.low;
+    bdl[1].AddrHigh = plan.second.high;
+    bdl[1].Size = plan.second.length;
     bdl[1].Ioc = 1;
 
     /*

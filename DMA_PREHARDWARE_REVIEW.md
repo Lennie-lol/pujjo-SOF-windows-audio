@@ -1,0 +1,5 @@
+# DMA and endpoint preflight
+
+Development-only; not an installable driver. This patch adds a tested two-entry DMA address planner with correct carry across 4 GiB boundaries, overflow rejection and alignment checks. The code loader validates geometry before register access. Checked PCM period arithmetic is compiled into WaveRT. Missing GCAP counts and failed DSP pipelines are no longer replaced with invented successful state.
+
+The source-only hardware gate now covers PrepareHardware, ReleaseHardware, D0Exit and interrupt callbacks rather than depending only on D0Entry. Legacy WaveRT and PortCls registration are independently blocked pending replacement of their unverified IOMMU/MDL and private extension/IRP ownership implementation. Direct device-object reference-count biasing is removed. None of these changes establishes that PortCls or live DMA is safe or functional. Real hardware reset, DMA quiescence, interrupts, firmware trust, endpoint routing and codec/amplifier validation remain required. No installer, firmware activation or speaker writes added.
