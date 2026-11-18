@@ -277,9 +277,24 @@ SofDspDumpCore(
     BOOLEAN hasOops = FALSE;
     ULONG exccause = 0, excvaddr = 0, epc1 = 0, ps = 0;
 
-    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc) {
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL || KeAreAllApcsDisabled())
         return;
-    }
+    /* Never read unmapped register or mailbox ranges in a crash handler. */
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomStatusReg, 32u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomErrorReg, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdr, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTda, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdd, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdr, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIda, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdd, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u) ||
+        Ctx->HwDesc->MailboxUplinkSize < 4096u ||
+        Ctx->HwDesc->MailboxDownlinkSize < 4096u ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->MailboxUplinkOffset, 4096u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->MailboxDownlinkOffset, 4096u))
+        return;
 
     KeQuerySystemTime(&sysTime);
 
@@ -303,11 +318,12 @@ SofDspDumpCore(
 
     /* Calculate total dump buffer size: Header + 4KB Uplink Mailbox + 4KB Downlink Mailbox + 64KB Debug Window */
     ULONG debugWinOffset = Ctx->DebugWindowOffset;
-    if (debugWinOffset == 0 && Ctx->HwDesc) {
-        debugWinOffset = Ctx->HwDesc->IsAce ? 0x190000 : 0xC0000;
-        Ctx->DebugWindowOffset = debugWinOffset;
-    }
-    ULONG debugWinSize = 65536; /* 16 pages of 4KB */
+    ULONG debugWinSize = 0;
+    if (debugWinOffset != 0 &&
+        pj_ipc4_mmio_span_valid(Ctx->Bar4Length, debugWinOffset, 65536u))
+        debugWinSize = 65536u;
+    else
+        debugWinOffset = 0;
 
     dumpSize = sizeof(SOF_DSP_COREDUMP_HEADER) + 4096 + 4096 + debugWinSize;
     dumpBuffer = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, dumpSize, SOF_DEVICE_TAG);
@@ -324,8 +340,8 @@ SofDspDumpCore(
     hdr->DumpSize = dumpSize;
     hdr->TimestampLow = sysTime.LowPart;
     hdr->TimestampHigh = sysTime.HighPart;
-    hdr->VendorId = 0x8086;
-    hdr->DeviceId = 0xE428;
+    hdr->VendorId = Ctx->VendorId;
+    hdr->DeviceId = Ctx->DeviceId;
     if (Reason) {
         RtlStringCbCopyA(hdr->ReasonString, sizeof(hdr->ReasonString), Reason);
     }
@@ -380,7 +396,7 @@ SofDspDumpCore(
      * Read 64KB SRAM Debug Window (Page 0 descriptors + Core slots) via 32-bit MMIO reads.
      * Captures Zephyr Mtrace circular buffers for offline post-mortem log reconstruction.
      */
-    if (debugWinOffset > 0 && debugWinOffset + debugWinSize <= Ctx->Bar4Length) {
+    if (debugWinSize != 0u) {
         volatile ULONG *src = (volatile ULONG *)((PUCHAR)Ctx->Bar4VirtualAddress + debugWinOffset);
         ULONG *dst = (ULONG *)debugWinDst;
         for (ULONG i = 0; i < debugWinSize / sizeof(ULONG); i++) {
@@ -486,7 +502,7 @@ SofDspDumpCore(
                 "================================================================================\r\n"
                 "Reason: %s\r\n"
                 "Timestamp: 0x%08X%08X\r\n"
-                "Hardware: Vendor=0x%04X, Device=0x%04X (Panther Lake)\r\n"
+                "Hardware: Vendor=0x%04X, Device=0x%04X\r\n"
                 "\r\n"
                 "DSP Core0 Status (HFDSC @ 0x160200): 0x%08X\r\n"
                 "DSP Core0 Error  (HFDEC @ 0x160204): 0x%08X\r\n"
@@ -1083,45 +1099,41 @@ SofIpc4DrainFwLogs(
 {
     ULONG debugWinOffset;
     ULONG slotOffset;
-    ULONG dspWritePtr, hostReadPtr, avail, logBufSize;
+    ULONG dspWritePtr, hostReadPtr, avail, logBufSize, consumed;
     PUCHAR sramBase;
 
-    if (!Ctx || !Ctx->Bar4VirtualAddress || Core >= 4) {
+    /* Binary trace transport is not yet wired to a worker. Only a passive
+     * caller with a verified firmware-provided debug window may drain it. */
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
+        Core >= 4u || Core >= Ctx->HwDesc->CoresNum ||
+        !Ctx->FwLogInitialized || Ctx->FwState != SOF_FW_BOOT_COMPLETE ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL || KeAreAllApcsDisabled())
         return;
-    }
 
     sramBase = (PUCHAR)Ctx->Bar4VirtualAddress;
     debugWinOffset = Ctx->DebugWindowOffset;
-    if (debugWinOffset == 0) {
-        debugWinOffset = (Ctx->HwDesc && Ctx->HwDesc->IsAce) ? 0x190000 : 0xC0000;
-        Ctx->DebugWindowOffset = debugWinOffset;
-    }
+    if (!debugWinOffset ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, debugWinOffset, 65536u))
+        return;
 
-    /* Locate slot offset for this core if not yet cached */
-    slotOffset = Ctx->FwLogSlotOffset[Core];
-    if (slotOffset == 0) {
-        for (ULONG i = 0; i < 15; i++) {
-            ULONG descTypeOffset = debugWinOffset + i * 12 + 4;
-            ULONG type = SofDspRead32(sramBase, descTypeOffset);
-            if ((type & 0xFFFFFF00) == 0x474F4C00 && (type & 0xFF) == Core) {
-                slotOffset = debugWinOffset + (i + 1) * 4096;
-                Ctx->FwLogSlotOffset[Core] = slotOffset;
-                break;
-            }
-        }
-        if (slotOffset == 0) {
-            slotOffset = debugWinOffset + (Core + 1) * 4096;
-            Ctx->FwLogSlotOffset[Core] = slotOffset;
+    /* Scan all descriptors each time. Do not guess a slot or use a stale
+     * mapping after a firmware reset. Ambiguous descriptors are rejected. */
+    slotOffset = 0;
+    for (ULONG i = 0; i < 15u; ++i) {
+        ULONG type = SofDspRead32(sramBase, debugWinOffset + i * 12u + 4u);
+        if (type == (0x474F4C00u | Core)) {
+            if (slotOffset != 0u) return;
+            slotOffset = debugWinOffset + (i + 1u) * 4096u;
         }
     }
+    if (!slotOffset) return;
 
     /* Read DSP write pointer and host read pointer */
     hostReadPtr = SofDspRead32(sramBase, slotOffset);
     dspWritePtr = SofDspRead32(sramBase, slotOffset + 4);
     logBufSize = 4096 - 8; /* 4088 bytes circular buffer */
 
-    if (dspWritePtr >= logBufSize) dspWritePtr = 0;
-    if (hostReadPtr >= logBufSize) hostReadPtr = 0;
+    if (dspWritePtr >= logBufSize || hostReadPtr >= logBufSize) return;
 
     if (dspWritePtr == hostReadPtr) {
         return;
@@ -1131,6 +1143,7 @@ SofIpc4DrainFwLogs(
             (dspWritePtr - hostReadPtr) :
             (logBufSize - hostReadPtr + dspWritePtr);
 
+    consumed = 0;
     if (avail > 0 && avail <= logBufSize) {
         CHAR lineBuf[256];
         ULONG bytesToRead = (avail > 240) ? 240 : avail;
@@ -1140,6 +1153,7 @@ SofIpc4DrainFwLogs(
             lineBuf[b] = (CHAR)SofDspRead8(sramBase, slotOffset + 8 + bytePos);
         }
         lineBuf[bytesToRead] = '\0';
+        consumed = bytesToRead;
 
         /* Log newly arrived firmware trace */
         if (bytesToRead > 0) {
@@ -1153,8 +1167,12 @@ SofIpc4DrainFwLogs(
     }
 
     /* Advance host read pointer in DSP SRAM */
-    SofDspWrite32(sramBase, slotOffset, dspWritePtr);
-    Ctx->FwLogHostReadPtr[Core] = dspWritePtr;
+    if (consumed != 0u) {
+        hostReadPtr = (hostReadPtr + consumed) % logBufSize;
+        SofDspWrite32(sramBase, slotOffset, hostReadPtr);
+        Ctx->FwLogHostReadPtr[Core] = hostReadPtr;
+        Ctx->FwLogSlotOffset[Core] = slotOffset;
+    }
 }
 
 /**
