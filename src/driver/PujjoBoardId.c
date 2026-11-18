@@ -79,3 +79,28 @@ int PujjoMatchRawSmbios(const PJ_BYTE *raw, PJ_SIZE raw_size)
     }
     return 0;
 }
+
+int PujjoReadMemoryBar(const PJ_DWORD bars[6], PJ_DWORD index,
+                       PJ_DWORD *low, PJ_DWORD *high)
+{
+    PJ_DWORD i;
+    if (!bars || !low || !high || index >= 6u) return 0;
+    for (i = 0; i <= index;) {
+        PJ_DWORD raw = bars[i];
+        PJ_DWORD type = raw & 7u;
+        PJ_DWORD width = type == 4u ? 2u : 1u;
+        if (i + width > 6u) return 0;
+        if (i == index) {
+            PJ_DWORD lo = raw & ~15u;
+            PJ_DWORD hi = width == 2u ? bars[i + 1u] : 0u;
+            if (!(type == 0u || type == 4u) || raw == 0xffffffffu ||
+                (!lo && !hi) || hi == 0xffffffffu)
+                return 0;
+            *low = lo;
+            *high = hi;
+            return 1;
+        }
+        i += width;
+    }
+    return 0;
+}

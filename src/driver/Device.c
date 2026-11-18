@@ -18,6 +18,7 @@
 
 #include "Driver.h"
 #include "PujjoBoardGuard.h"
+#include "PujjoBoardId.h"
 #include "Device.h"
 #include "Loader.h"
 #include "Topo.h"
@@ -153,12 +154,13 @@ SofEvtDevicePrepareHardware(
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
     NTSTATUS status;
     ULONG resourceCount;
-    ULONG memoryBarIndex = 0;
+    PHYSICAL_ADDRESS bar0Bus = {0}, bar4Bus = {0};
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR bar0Resource = NULL, bar4Resource = NULL;
     ULONG i;
     BUS_INTERFACE_STANDARD busInterface;
+    PCI_COMMON_CONFIG pciConfig = {0};
     char msg[256];
 
-    UNREFERENCED_PARAMETER(ResourcesRaw);
     if (!SofHardwareDevelopmentAllowed()) return STATUS_NOT_SUPPORTED;
 
     /* Pujjo-only fork. Fail closed before touching PCI registers. */
@@ -176,33 +178,21 @@ SofEvtDevicePrepareHardware(
      * Identify hardware using a read-only PCI Standard Bus Interface query.
      * Do not change BME, MSE, or any PCI configuration while discovering.
      */
-    if (NT_SUCCESS(WdfFdoQueryForInterface(Device,
-                                           &GUID_BUS_INTERFACE_STANDARD,
-                                           (PINTERFACE)&busInterface,
-                                           sizeof(BUS_INTERFACE_STANDARD),
-                                           1,
-                                           NULL))) {
-        PCI_COMMON_CONFIG pciConfig;
-        ULONG bytesRead = busInterface.GetBusData(busInterface.Context,
-                                                  PCI_WHICHSPACE_CONFIG,
-                                                  &pciConfig,
-                                                  0,
-                                                  sizeof(PCI_COMMON_CONFIG));
-        if (bytesRead >= sizeof(PCI_COMMON_CONFIG)) {
-            ctx->VendorId = pciConfig.VendorID;
-            ctx->DeviceId = pciConfig.DeviceID;
-            ctx->RevisionId = pciConfig.RevisionID;
+    status = WdfFdoQueryForInterface(Device, &GUID_BUS_INTERFACE_STANDARD,
+        (PINTERFACE)&busInterface, sizeof(busInterface), 1, NULL);
+    if (!NT_SUCCESS(status)) return status;
+    ULONG bytesRead = busInterface.GetBusData(busInterface.Context, PCI_WHICHSPACE_CONFIG,
+        &pciConfig, 0, sizeof(pciConfig));
+    busInterface.InterfaceDereference(busInterface.Context);
+    if (bytesRead < FIELD_OFFSET(PCI_COMMON_CONFIG, u.type0.BaseAddresses) +
+                    sizeof(pciConfig.u.type0.BaseAddresses))
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
 
-            /* Windows PCI/PnP owns command register policy. Never turn
-             * on DMA bus mastering or memory decoding during discovery. */
-            if ((pciConfig.Command & 0x0006u) != 0x0006u) {
-                DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL,
-                           "[SOF] PCI MSE/BME not enabled (command=0x%04x); no change made\n",
-                           pciConfig.Command);
-            }
-        }
-        busInterface.InterfaceDereference(busInterface.Context);
-    }
+    ctx->VendorId = pciConfig.VendorID;
+    ctx->DeviceId = pciConfig.DeviceID;
+    ctx->RevisionId = pciConfig.RevisionID;
+    if ((pciConfig.Command & 0x0006u) != 0x0006u)
+        SofLogBreadcrumb("[PCI] Memory decode or bus mastering is disabled.\n");
 
     /* Only the Intel Alder Lake-N 54C8 controller is in scope.
      * Never silently default to another Intel DSP when PCI config access fails. */
@@ -230,32 +220,38 @@ SofEvtDevicePrepareHardware(
                "[SOF] Platform identified: %s (VID 0x%04x, DID 0x%04x)\n",
                ctx->HwDesc->PlatformName, ctx->VendorId, ctx->DeviceId);
 
-    /* Parse Translated Resources (BAR0 = HDA, BAR4 = DSP Shim/SRAM, Interrupts) */
+    /* Correlate PCI BAR bus addresses with the raw resource list. Use
+     * each raw descriptor's translated counterpart for host MMIO. */
+    ULONG high0, high4;
+    if ((pciConfig.HeaderType & 0x7fu) != 0 ||
+        !PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 0, &bar0Bus.LowPart, &high0) ||
+        !PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 4, &bar4Bus.LowPart, &high4))
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    bar0Bus.HighPart = (LONG)high0;
+    bar4Bus.HighPart = (LONG)high4;
+    if (bar0Bus.QuadPart == bar4Bus.QuadPart)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+
     resourceCount = WdfCmResourceListGetCount(ResourcesTranslated);
+    if (resourceCount != WdfCmResourceListGetCount(ResourcesRaw))
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
     for (i = 0; i < resourceCount; i++) {
-        PCM_PARTIAL_RESOURCE_DESCRIPTOR desc =
-            WdfCmResourceListGetDescriptor(ResourcesTranslated, i);
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR raw = WdfCmResourceListGetDescriptor(ResourcesRaw, i);
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR desc = WdfCmResourceListGetDescriptor(ResourcesTranslated, i);
+        if (!desc || !raw) return STATUS_DEVICE_CONFIGURATION_ERROR;
 
-        if (!desc)
-            continue;
-
-        if (desc->Type == CmResourceTypeMemory) {
-            if (memoryBarIndex == 0) {
-                /* BAR0: HD Audio Controller Registers */
-                ctx->Bar0PhysicalAddress = desc->u.Memory.Start;
-                ctx->Bar0Length = desc->u.Memory.Length;
-                ctx->Bar0VirtualAddress = MmMapIoSpace(desc->u.Memory.Start,
-                                                      desc->u.Memory.Length,
-                                                      MmNonCached);
-            } else if (memoryBarIndex == 1) {
-                /* BAR4: DSP Shim, Mailbox, and SRAM */
-                ctx->Bar4PhysicalAddress = desc->u.Memory.Start;
-                ctx->Bar4Length = desc->u.Memory.Length;
-                ctx->Bar4VirtualAddress = MmMapIoSpace(desc->u.Memory.Start,
-                                                      desc->u.Memory.Length,
-                                                      MmNonCached);
-            }
-            memoryBarIndex++;
+        if (raw->Type == CmResourceTypeMemory) {
+            PCM_PARTIAL_RESOURCE_DESCRIPTOR *target;
+            if (raw->u.Memory.Start.QuadPart == bar0Bus.QuadPart)
+                target = &bar0Resource;
+            else if (raw->u.Memory.Start.QuadPart == bar4Bus.QuadPart)
+                target = &bar4Resource;
+            else
+                continue;
+            if (*target || desc->Type != CmResourceTypeMemory || !desc->u.Memory.Length ||
+                raw->u.Memory.Length != desc->u.Memory.Length)
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+            *target = desc;
         } else if (desc->Type == CmResourceTypeInterrupt) {
             ctx->InterruptVector = desc->u.Interrupt.Vector;
             ctx->InterruptIrql = (KIRQL)desc->u.Interrupt.Level;
@@ -269,6 +265,16 @@ SofEvtDevicePrepareHardware(
                        ctx->IsMsi ? "Yes" : "No");
         }
     }
+
+    if (!bar0Resource || !bar4Resource ||
+        bar0Resource->u.Memory.Start.QuadPart == bar4Resource->u.Memory.Start.QuadPart)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    ctx->Bar0PhysicalAddress = bar0Resource->u.Memory.Start;
+    ctx->Bar0Length = bar0Resource->u.Memory.Length;
+    ctx->Bar4PhysicalAddress = bar4Resource->u.Memory.Start;
+    ctx->Bar4Length = bar4Resource->u.Memory.Length;
+    ctx->Bar0VirtualAddress = MmMapIoSpace(ctx->Bar0PhysicalAddress, ctx->Bar0Length, MmNonCached);
+    ctx->Bar4VirtualAddress = MmMapIoSpace(ctx->Bar4PhysicalAddress, ctx->Bar4Length, MmNonCached);
 
     /* Require both mapped BAR windows before any register reads. Never
      * continue with half-initialized resources after MmMapIoSpace failure. */

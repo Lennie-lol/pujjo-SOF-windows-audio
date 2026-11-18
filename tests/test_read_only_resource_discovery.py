@@ -11,6 +11,10 @@ assert "writel(" not in prep and "WRITE_REGISTER_" not in prep
 assert "SofHardwareDevelopmentAllowed()" in prep
 assert prep.index("!SofHardwareDevelopmentAllowed()") < prep.index("WdfFdoQueryForInterface")
 assert "status = SofDiscoverHdaCaps(ctx);\n    if (!NT_SUCCESS(status)) goto PreparationFailed;" in prep
+assert "PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 0" in prep
+assert "PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 4" in prep
+assert prep.index("WdfCmResourceListGetDescriptor(ResourcesRaw, i)") < prep.index("bar0Resource->u.Memory.Start")
+assert "memoryBarIndex" not in prep
 assert "SofIpcInitialize(ctx)" in prep
 assert "without CRST writes" in prep
 assert "ctx->Bar0Length < SOF_HDA_REG_ICS + sizeof(USHORT)" in prep

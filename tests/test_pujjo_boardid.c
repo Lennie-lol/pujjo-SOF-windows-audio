@@ -72,6 +72,24 @@ int main(void)
     len = make_smbios(raw, sizeof(raw), "Google", "Pujjo", 0);
     raw[9] = 255; /* length overruns SMBIOS table */
     EXPECT_FALSE(PujjoMatchRawSmbios(raw, len));
-    printf("PASS: %d Pujjo board identification checks\n", checks);
+    PJ_DWORD bars[6] = {0xdeeac004u, 0, 0, 0, 0xdef00004u, 1u};
+    PJ_DWORD low = 0, high = 0;
+    EXPECT_TRUE(PujjoReadMemoryBar(bars, 0, &low, &high));
+    EXPECT_TRUE(low == 0xdeeac000u && high == 0u);
+    EXPECT_FALSE(PujjoReadMemoryBar(bars, 1, &low, &high));
+    EXPECT_TRUE(PujjoReadMemoryBar(bars, 4, &low, &high));
+    EXPECT_TRUE(low == 0xdef00000u && high == 1u);
+    EXPECT_FALSE(PujjoReadMemoryBar(bars, 5, &low, &high));
+    bars[4] = 0xdef00001u;
+    EXPECT_FALSE(PujjoReadMemoryBar(bars, 4, &low, &high));
+    EXPECT_TRUE(low == 0xdef00000u && high == 1u);
+    bars[4] = 0xba000008u;
+    EXPECT_TRUE(PujjoReadMemoryBar(bars, 4, &low, &high));
+    EXPECT_TRUE(low == 0xba000000u && high == 0u);
+    bars[4] = 0;
+    EXPECT_FALSE(PujjoReadMemoryBar(bars, 4, &low, &high));
+    bars[4] = 4;
+    EXPECT_TRUE(PujjoReadMemoryBar(bars, 4, &low, &high) && low == 0u && high == 1u);
+    printf("PASS: %d Pujjo board identity and PCI BAR checks\n", checks);
     return 0;
 }
