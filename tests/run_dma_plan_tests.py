@@ -153,6 +153,55 @@ assert configure.index("if (timeout == 500u) return STATUS_IO_TIMEOUT;") < confi
 assert configure.index("if (timeout == 500u || (ctl & SOF_HDA_SD_CTL_DMA_START))") < configure.index("SOF_HDA_ADSP_REG_SD_BDLPL")
 print("PASS: code loader BAR preflight and required reset acknowledgment")
 
+# Exercise the production control helpers against an HDA DWORD whose upper
+# byte implements write-one-to-clear status.
+loader_source=(root/"src/driver/Loader.c").read_text()
+control_helpers=loader_source.split("static ULONG SofCodeLoaderReadControl(",1)[1].split("\n/**",1)[0]
+control_fixture=r'''
+#include <assert.h>
+#include <stdint.h>
+typedef uint32_t ULONG, *PULONG;
+typedef unsigned char *PUCHAR;
+typedef void VOID;
+#define _In_
+#define SOF_HDA_ADSP_REG_SD_CTL 0
+#define READ_REGISTER_ULONG(reg) (*(reg))
+static void WRITE_REGISTER_ULONG(PULONG reg, ULONG value)
+{
+    *reg = (*reg & 0xff000000u & ~value) | (value & 0x00ffffffu);
+}
+'''
+control_cases=r'''
+int main(void)
+{
+    ULONG reg = 0x1c500000u;
+    PUCHAR stream = (PUCHAR)&reg;
+    ULONG ctl = SofCodeLoaderReadControl(stream);
+    assert(ctl == 0x00500000u);
+    SofCodeLoaderWriteControl(stream, ctl | 2u);
+    assert(reg == 0x1c500002u);
+    SofCodeLoaderWriteControl(stream, reg & ~2u);
+    assert(reg == 0x1c500000u);
+    SofCodeLoaderWriteControl(stream, 1u);
+    assert(reg == 0x1c000001u);
+    reg = UINT32_MAX;
+    assert(SofCodeLoaderReadControl(stream) == UINT32_MAX);
+    return 0;
+}
+'''
+with tempfile.TemporaryDirectory(prefix="pj_loader_control_") as tmp:
+    test=Path(tmp)/"test.c"
+    exe=Path(tmp)/("test.exe" if os.name=="nt" else "test")
+    test.write_text(control_fixture+"static ULONG SofCodeLoaderReadControl("+control_helpers+control_cases)
+    subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror",str(test),"-o",str(exe)],
+                   check=True,timeout=40)
+    subprocess.run([str(exe)],check=True,timeout=10)
+assert loader_source.count("WRITE_REGISTER_ULONG((PULONG)(StreamRegs + SOF_HDA_ADSP_REG_SD_CTL)") == 1
+assert "streamRegs + SOF_HDA_ADSP_REG_SD_CTL" not in loader_source
+assert configure.index("if (intctl == 0xFFFFFFFFu || ppctl == 0xFFFFFFFFu || spbfcctl == 0xFFFFFFFFu)") < configure.index("SOF_HDA_ADSP_REG_SD_BDLPL")
+assert configure.index("SOF_HDA_ADSP_REG_SD_BDLPL") < configure.index("*OutStreamIndex = streamIndex;")
+print("PASS: code loader control preserves W1C status and rejects missing MMIO before BDL publication")
+
 # A failed gain request must not publish a successful control or stream.
 apply=wave.split("static NTSTATUS SofWaveRtApplyCachedGain(",1)[1].split("\n}",1)[0]
 assert "Stream->Format.ChannelsCount != 2u" in apply

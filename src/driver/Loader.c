@@ -474,6 +474,21 @@ SofPowerDownDsp(
     }
 }
 
+/* SD_CTL is 24 bits and shares a DWORD with the write-one-to-clear
+ * SD_STS byte. Preserve the all-ones read sentinel and write zero to
+ * SD_STS when updating control. Status is acknowledged separately. */
+static ULONG SofCodeLoaderReadControl(_In_ PUCHAR StreamRegs)
+{
+    ULONG value = READ_REGISTER_ULONG((PULONG)(StreamRegs + SOF_HDA_ADSP_REG_SD_CTL));
+    return value == 0xFFFFFFFFu ? value : value & 0x00FFFFFFu;
+}
+
+static VOID SofCodeLoaderWriteControl(_In_ PUCHAR StreamRegs, _In_ ULONG Value)
+{
+    WRITE_REGISTER_ULONG((PULONG)(StreamRegs + SOF_HDA_ADSP_REG_SD_CTL),
+                         Value & 0x00FFFFFFu);
+}
+
 /**
  * @brief Configures HD-A Code Loader decoupled DMA registers and Buffer Descriptor List.
  *
@@ -520,6 +535,9 @@ SofConfigureCodeLoaderDma(
     ULONG streamIndex;
     ULONG sdOffset;
     ULONG gctl;
+    ULONG ppctl = 0;
+    ULONG intctl;
+    ULONG spbfcctl = 0;
     char bmsg[256];
 
     if (OutStreamIndex) *OutStreamIndex = 0;
@@ -586,7 +604,6 @@ SofConfigureCodeLoaderDma(
      * Playback stream descriptor, which immediately follows the capture streams
      * (streamIndex = NumCaptureStreams).
      */
-    if (OutStreamIndex) *OutStreamIndex = streamIndex;
     streamRegs = bar0 + sdOffset;
 
     /*
@@ -638,21 +655,21 @@ SofConfigureCodeLoaderDma(
      * 1. Reset Stream Engine:
      * Assert SRST in SD_CTL, poll for hardware confirmation, then clear SRST and poll.
      */
-    ctl = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL));
+    ctl = SofCodeLoaderReadControl(streamRegs);
     if (ctl == 0xFFFFFFFFu || (ctl & SOF_HDA_SD_CTL_DMA_START))
         return STATUS_DEVICE_BUSY;
-    WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL), SOF_HDA_SD_CTL_DMA_RESET);
+    SofCodeLoaderWriteControl(streamRegs, SOF_HDA_SD_CTL_DMA_RESET);
     for (timeout = 0; timeout < 500u; ++timeout) {
-        ctl = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL));
+        ctl = SofCodeLoaderReadControl(streamRegs);
         if (ctl == 0xFFFFFFFFu) return STATUS_DEVICE_NOT_READY;
         if (ctl & SOF_HDA_SD_CTL_DMA_RESET) break;
         KeStallExecutionProcessor(10);
     }
     if (timeout == 500u) return STATUS_IO_TIMEOUT;
 
-    WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL), 0);
+    SofCodeLoaderWriteControl(streamRegs, 0);
     for (timeout = 0; timeout < 500u; ++timeout) {
-        ctl = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL));
+        ctl = SofCodeLoaderReadControl(streamRegs);
         if (ctl == 0xFFFFFFFFu) return STATUS_DEVICE_NOT_READY;
         if (!(ctl & SOF_HDA_SD_CTL_DMA_RESET)) break;
         KeStallExecutionProcessor(10);
@@ -660,9 +677,19 @@ SofConfigureCodeLoaderDma(
     if (timeout == 500u || (ctl & SOF_HDA_SD_CTL_DMA_START))
         return STATUS_IO_TIMEOUT;
 
+    /* Snapshot the control registers before publishing an address to DMA.
+     * An inaccessible capability must never become an all-ones write. */
+    intctl = readl(bar0 + SOF_HDA_INTCTL);
+    if (Ctx->PpCapOffset)
+        ppctl = readl(bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL);
+    if (Ctx->SpbCapOffset)
+        spbfcctl = readl(bar0 + Ctx->SpbCapOffset + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL);
+    if (intctl == 0xFFFFFFFFu || ppctl == 0xFFFFFFFFu || spbfcctl == 0xFFFFFFFFu)
+        return STATUS_DEVICE_NOT_READY;
+
     /* Only decouple a stream after the controller acknowledged its reset. */
     if (Ctx->PpCapOffset) {
-        writel(readl(bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL) | (1 << streamIndex) | SOF_HDA_PPCTL_GPROCEN | SOF_HDA_PPCTL_PIE,
+        writel(ppctl | (1u << streamIndex) | SOF_HDA_PPCTL_GPROCEN | SOF_HDA_PPCTL_PIE,
                bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL);
     }
 
@@ -686,10 +713,10 @@ SofConfigureCodeLoaderDma(
 
     /* 7. Program Stream Tag and Interrupt Mask in SD_CTL */
     ctl = (StreamTag << 20) | SOF_HDA_CL_DMA_SD_INT_MASK;
-    WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL), ctl);
+    SofCodeLoaderWriteControl(streamRegs, ctl);
 
     /* 8. Enable stream interrupt & Global Interrupt in SOF_HDA_INTCTL */
-    writel(readl(bar0 + SOF_HDA_INTCTL) | (1 << streamIndex) | SOF_HDA_INT_GLOBAL_EN | SOF_HDA_INT_CTRL_EN,
+    writel(intctl | (1u << streamIndex) | SOF_HDA_INT_GLOBAL_EN | SOF_HDA_INT_CTRL_EN,
            bar0 + SOF_HDA_INTCTL);
 
     /*
@@ -702,7 +729,7 @@ SofConfigureCodeLoaderDma(
         PUCHAR spibAddr = spibBar + SOF_HDA_SPIB_BASE + (streamIndex * SOF_HDA_SPIB_INTERVAL) + SOF_HDA_SPIB_SPIB;
 
         /* Enable SPIB in SPBFCCTL (bit = 1 << streamIndex) */
-        writel(readl(spibBar + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL) | (1 << streamIndex),
+        writel(spbfcctl | (1u << streamIndex),
                spibBar + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL);
 
         /* Program software position in buffer to full buffer size */
@@ -720,7 +747,7 @@ SofConfigureCodeLoaderDma(
         gctl,
         Ctx->PpCapOffset ? readl(bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL) : 0,
         readl(bar0 + SOF_HDA_INTCTL),
-        READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL)),
+        SofCodeLoaderReadControl(streamRegs),
         READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CBL)),
         READ_REGISTER_USHORT((PUSHORT)(streamRegs + SOF_HDA_ADSP_REG_SD_LVI)),
         BdlDmaBuf->PhysicalAddress.QuadPart);
@@ -730,6 +757,7 @@ SofConfigureCodeLoaderDma(
                "[SOF] Code Loader DMA programmed: StreamIndex=%u (offset 0x%x), StreamTag=%u, BufferSize=0x%x\n",
                streamIndex, sdOffset, StreamTag, FwDmaBuf->Size);
 
+    if (OutStreamIndex) *OutStreamIndex = streamIndex;
     return STATUS_SUCCESS;
 }
 
@@ -1058,12 +1086,12 @@ SofStartFirmwareBoot(
     KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
     writel(readl(bar0 + SOF_HDA_INTCTL) | (1 << streamIndex) | SOF_HDA_INT_GLOBAL_EN, bar0 + SOF_HDA_INTCTL);
     {
-        ULONG ctlVal = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL));
+        ULONG ctlVal = SofCodeLoaderReadControl(streamRegs);
         ctlVal |= SOF_HDA_SD_CTL_DMA_START | SOF_HDA_CL_DMA_SD_INT_MASK;
-        WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL), ctlVal);
+        SofCodeLoaderWriteControl(streamRegs, ctlVal);
 
         KeStallExecutionProcessor(50);
-        ULONG ctlAfter = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL));
+        ULONG ctlAfter = SofCodeLoaderReadControl(streamRegs);
 
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                    "[SOF] Code loader DMA triggered on stream %u (offset 0x%x, SD_CTL=0x%08x RUN=%s), streaming firmware...\n",
@@ -1110,9 +1138,9 @@ SofStartFirmwareBoot(
 
     /* 7. Stop Code Loader DMA and disable SPIB */
     {
-        ULONG ctlVal = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL));
+        ULONG ctlVal = SofCodeLoaderReadControl(streamRegs);
         ctlVal &= ~SOF_HDA_SD_CTL_DMA_START;
-        WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL), ctlVal);
+        SofCodeLoaderWriteControl(streamRegs, ctlVal);
 
         if (Ctx->SpbCapOffset) {
             PUCHAR spibBar = bar0 + Ctx->SpbCapOffset;
