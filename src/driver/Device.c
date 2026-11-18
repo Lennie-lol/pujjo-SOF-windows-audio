@@ -43,6 +43,21 @@ static BOOLEAN SofHardwareDevelopmentAllowed(VOID)
 #endif
 }
 
+/* For a failed PrepareHardware, WDF may not call ReleaseHardware. */
+static VOID SofUnmapFailedPreparedBars(_Inout_ PSOF_DEVICE_CONTEXT Ctx)
+{
+    if (Ctx->Bar4VirtualAddress) {
+        MmUnmapIoSpace(Ctx->Bar4VirtualAddress, Ctx->Bar4Length);
+        Ctx->Bar4VirtualAddress = NULL;
+        Ctx->Bar4Length = 0;
+    }
+    if (Ctx->Bar0VirtualAddress) {
+        MmUnmapIoSpace(Ctx->Bar0VirtualAddress, Ctx->Bar0Length);
+        Ctx->Bar0VirtualAddress = NULL;
+        Ctx->Bar0Length = 0;
+    }
+}
+
 /**
  * @brief Traverses the Intel HDA extended capability linked list in BAR0.
  *
@@ -279,6 +294,14 @@ SofEvtDevicePrepareHardware(
         }
     }
 
+    /* Require both mapped BAR windows before any register reads. Never
+     * continue with half-initialized resources after MmMapIoSpace failure. */
+    if (!ctx->Bar0VirtualAddress || !ctx->Bar4VirtualAddress ||
+        ctx->Bar0Length < 0x80u || ctx->Bar4Length < sizeof(ULONG)) {
+        status = STATUS_DEVICE_CONFIGURATION_ERROR;
+        goto PreparationFailed;
+    }
+
     /* Discover HD-A controller capabilities without activating DSP processing */
     SofDiscoverHdaCaps(ctx);
 
@@ -290,8 +313,10 @@ SofEvtDevicePrepareHardware(
     if (ctx->Bar0VirtualAddress) {
         /* The caller is still in resource discovery: no CRST writes. */
         if (ctx->Bar0Length < SOF_HDA_WAKESTS + sizeof(USHORT) ||
-            ctx->Bar0Length < SOF_HDA_REG_ICS + sizeof(USHORT))
-            return STATUS_INVALID_BUFFER_SIZE;
+            ctx->Bar0Length < SOF_HDA_REG_ICS + sizeof(USHORT)) {
+            status = STATUS_INVALID_BUFFER_SIZE;
+            goto PreparationFailed;
+        }
         if (readw((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_REG_ICS) & SOF_HDA_ICS_ICB)
             SofLogBreadcrumb("[HDA] ICB busy during read-only discovery (no reset)\n");
 
@@ -321,7 +346,7 @@ SofEvtDevicePrepareHardware(
 
     /* Initialize IPC state machine */
     status = SofIpcInitialize(ctx);
-    if (!NT_SUCCESS(status)) return status;
+    if (!NT_SUCCESS(status)) goto PreparationFailed;
 
     /* Initialize default audio control states (0 dB, unmuted) */
     for (ULONG ep = 0; ep < SOF_ENDPOINT_COUNT; ep++) {
@@ -451,6 +476,12 @@ SofEvtDevicePrepareHardware(
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] Hardware preparation completed successfully.\n");
     return STATUS_SUCCESS;
+
+PreparationFailed:
+    /* Only BARs were acquired before these failure points; never leak them
+     * if WDF does not deliver ReleaseHardware for failed preparation. */
+    SofUnmapFailedPreparedBars(ctx);
+    return status;
 }
 
 /**
