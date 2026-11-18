@@ -25,6 +25,7 @@
 #include "WaveRt.h"
 #include "PortClsAdapter.h"
 #include "HdaBusInterface.h"
+#include "HdaVerb.h"
 #include <ntstrsafe.h>
 #include <initguid.h>
 #include <wdmguid.h>

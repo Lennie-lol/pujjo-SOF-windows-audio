@@ -855,7 +855,7 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
         SOF_HDA_REG_PP_PPCTL + sizeof(ULONG) > Ctx->Bar0Length - Ctx->PpCapOffset)
         return STATUS_DEVICE_CONFIGURATION_ERROR;
 
-    Dma->Registers = bar0 + SOF_HDA_STREAM_REG_OFFSET(slot);
+    Dma->Registers = bar0 + SOF_HDA_ADSP_LOADER_BASE + slot * SOF_HDA_ADSP_SD_ENTRY_SIZE;
     Dma->Ppctl = bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL;
     Dma->Ltrp = bar0 + SOF_ADLN_LTRP_OFFSET;
     ppctl = readl(Dma->Ppctl);

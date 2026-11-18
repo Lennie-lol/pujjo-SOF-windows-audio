@@ -218,7 +218,7 @@ typedef struct _SOF_PIPELINE_DESC {
  * @param[out] OutFmt   Pointer to firmware sof_ipc4_audio_format structure.
  */
 VOID SofIpc4BuildAudioFormat(
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS InParams,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *InParams,
     _Out_ struct sof_ipc4_audio_format *OutFmt
 );
 
@@ -247,7 +247,7 @@ VOID SofIpc4BuildDefaultStereoFormat(
  * @return STATUS_SUCCESS on success, or STATUS_BUFFER_TOO_SMALL.
  */
 NTSTATUS SofIpc4BuildCopierConfig(
-    _In_ const PSOF_COPIER_PARAMS Params,
+    _In_ const SOF_COPIER_PARAMS *Params,
     _Out_writes_bytes_(MaxBuffer) PVOID CopierBuffer,
     _In_ ULONG MaxBuffer,
     _Out_ PULONG OutLength
@@ -557,7 +557,7 @@ NTSTATUS SofIpc4CreatePlaybackPipeline(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -579,7 +579,7 @@ NTSTATUS SofIpc4CreateCapturePipeline(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -603,7 +603,7 @@ NTSTATUS SofIpc4CreateHdmiPipeline(
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
     _In_ ULONG HdmiLinkIndex,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -629,7 +629,7 @@ NTSTATUS SofIpc4CreateSspPipeline(
     _In_ ULONG StreamTag,
     _In_ ULONG SspPort,
     _In_ BOOLEAN IsCapture,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -651,7 +651,7 @@ NTSTATUS SofIpc4CreateDmicPipeline(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -677,7 +677,7 @@ NTSTATUS SofIpc4CreateAlhPipeline(
     _In_ ULONG StreamTag,
     _In_ ULONG LinkIndex,
     _In_ BOOLEAN IsCapture,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst

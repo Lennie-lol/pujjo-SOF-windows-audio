@@ -35,7 +35,7 @@ void SofLogBreadcrumb(const char* text);
  * @param[out] OutFmt   Pointer to firmware sof_ipc4_audio_format structure.
  */
 VOID SofIpc4BuildAudioFormat(
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS InParams,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *InParams,
     _Out_ struct sof_ipc4_audio_format *OutFmt
 )
 {
@@ -92,7 +92,7 @@ static NTSTATUS SofIpc4ComputeChunkBytes(
 }
 
 NTSTATUS SofIpc4BuildCopierConfig(
-    _In_ const PSOF_COPIER_PARAMS Params,
+    _In_ const SOF_COPIER_PARAMS *Params,
     _Out_writes_bytes_(MaxBuffer) PVOID CopierBuffer,
     _In_ ULONG MaxBuffer,
     _Out_ PULONG OutLength
@@ -199,7 +199,7 @@ NTSTATUS SofIpc4BuildCopierConfig(
 }
 
 static NTSTATUS SofIpc4BuildGainConfigForFormat(
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _In_ ULONG InitVal,
     _Out_writes_bytes_(MaxBuffer) PVOID GainBuffer,
     _In_ ULONG MaxBuffer,
@@ -756,7 +756,7 @@ NTSTATUS SofIpc4CreatePlaybackPipeline(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -888,7 +888,7 @@ NTSTATUS SofIpc4CreateCapturePipeline(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -1021,7 +1021,7 @@ NTSTATUS SofIpc4CreateHdmiPipeline(
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
     _In_ ULONG HdmiLinkIndex,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -1295,7 +1295,7 @@ NTSTATUS SofIpc4CreateAlhPipeline(
     _In_ ULONG StreamTag,
     _In_ ULONG LinkIndex,
     _In_ BOOLEAN IsCapture,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
