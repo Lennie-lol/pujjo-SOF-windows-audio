@@ -62,3 +62,70 @@ for name in ("Driver.c","PortClsAdapter.cpp"):
     assert "InterlockedExchange(&" not in src or "->ReferenceCount, 100000" not in src
     assert "i < 100000" not in src
 print("PASS: production source gates and geometry integration")
+
+# Compile the exact arithmetic helper from Topo.c with only fixed-width host
+# types. This checks arithmetic/control flow, not WDK structure layout or I/O.
+topo=(root/"src/driver/Topo.c").read_text()
+helper="static NTSTATUS SofIpc4ComputeChunkBytes("+topo.split(
+    "static NTSTATUS SofIpc4ComputeChunkBytes(",1)[1].split("\n}",1)[0]+"\n}\n"
+fixture=r'''
+#include <stdint.h>
+#include <stddef.h>
+#include <assert.h>
+typedef uint32_t ULONG, *PULONG;
+typedef int NTSTATUS;
+#define STATUS_INVALID_PARAMETER (-1)
+#define STATUS_SUCCESS 0
+#define SOF_IPC4_CHANNELS_INTERLEAVED 0u
+typedef struct {
+    ULONG SamplingFrequency, BitDepth, ValidBitDepth, ChannelsCount;
+    ULONG InterleavingStyle, ChannelMap, ChannelConfig;
+} SOF_AUDIO_FORMAT_PARAMS;
+'''
+cases=r'''
+int main(void) {
+    SOF_AUDIO_FORMAT_PARAMS f={48000u,32u,24u,2u,0u,0u,0u};
+    ULONG n=17u;
+    assert(SofIpc4ComputeChunkBytes(&f,&n)==STATUS_SUCCESS && n==384u);
+    f.SamplingFrequency=44100u;
+    f.BitDepth=16u;
+    f.ValidBitDepth=16u;
+    assert(SofIpc4ComputeChunkBytes(&f,&n)==STATUS_SUCCESS && n==180u);
+    f.ChannelsCount=1u;
+    assert(SofIpc4ComputeChunkBytes(&f,&n)==STATUS_SUCCESS && n==90u);
+    f.SamplingFrequency=192000u;
+    f.ChannelsCount=8u;
+    f.BitDepth=32u;
+    f.ValidBitDepth=32u;
+    assert(SofIpc4ComputeChunkBytes(&f,&n)==STATUS_SUCCESS && n==6144u);
+    f.ChannelsCount=9u;
+    assert(SofIpc4ComputeChunkBytes(&f,&n)==STATUS_INVALID_PARAMETER && n==6144u);
+    f.ChannelsCount=2u;
+    f.SamplingFrequency=UINT32_MAX;
+    assert(SofIpc4ComputeChunkBytes(&f,&n)==STATUS_INVALID_PARAMETER && n==6144u);
+    f.SamplingFrequency=48000u;
+    f.ValidBitDepth=33u;
+    assert(SofIpc4ComputeChunkBytes(&f,&n)==STATUS_INVALID_PARAMETER);
+    f.ValidBitDepth=24u;
+    f.InterleavingStyle=1u;
+    assert(SofIpc4ComputeChunkBytes(&f,&n)==STATUS_INVALID_PARAMETER);
+    assert(SofIpc4ComputeChunkBytes(NULL,&n)==STATUS_INVALID_PARAMETER);
+    assert(SofIpc4ComputeChunkBytes(&f,NULL)==STATUS_INVALID_PARAMETER);
+    return 0;
+}
+'''
+with tempfile.TemporaryDirectory(prefix="pj_topo_chunk_") as tmp:
+    test=Path(tmp)/"test.c"
+    exe=Path(tmp)/("test.exe" if os.name=="nt" else "test")
+    test.write_text(fixture+helper+cases)
+    subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror","-Wconversion",
+                    "-Wsign-conversion","-pedantic",str(test),"-o",str(exe)],
+                   check=True,timeout=40)
+    subprocess.run([str(exe)],check=True,timeout=10)
+assert topo.count("SofIpc4BuildGainConfigForFormat(Fmt,")==8
+gain=topo.split("static NTSTATUS SofIpc4BuildGainConfigForFormat(",1)[1].split("\n}",1)[0]
+assert "SofIpc4BuildAudioFormat(Fmt," in gain
+copier=topo.split("NTSTATUS SofIpc4BuildCopierConfig(",1)[1].split("\n}",1)[0]
+assert copier.index("totalSize += sizeof(struct sof_ipc4_alh_configuration_blob)") < copier.index("if (MaxBuffer < totalSize)") < copier.index("RtlZeroMemory(CopierBuffer, totalSize)")
+assert "chunkBytes = 384" not in copier and "chunkBytes = 384" not in gain
+print("PASS: IPC4 frame-aligned copier/gain geometry and bounded ALH blob")
