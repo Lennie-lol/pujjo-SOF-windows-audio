@@ -1,0 +1,3 @@
+# Pre-hardware BAR mapping failure cleanup
+
+If WDF PrepareHardware fails, the driver cannot assume ReleaseHardware will be delivered. This patch detects missing BAR0/BAR4 mappings and missing minimum register windows before resource reads, and explicitly unmaps any acquired BARs on failures including IPC allocation failure. It does not enable hardware initialization or establish correct PCI BAR ordering on the actual Chromebook. IRQ/DPC quiescence, DMA teardown and Windows PCI resource identities still require physical evidence. Source-only preflight tests enforce the rollback path; they cannot simulate all WDF kernel lifetime conditions.
