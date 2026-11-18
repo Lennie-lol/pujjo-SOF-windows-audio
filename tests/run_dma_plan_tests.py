@@ -141,3 +141,14 @@ free=wave.split("NTSTATUS SofWaveRtFreeStream(",1)[1].split("\n}",1)[0]
 assert free.index("KeCancelTimer") < free.index("KeRemoveQueueDpc") < free.index("KeFlushQueuedDpcs") < free.index("ExFreePoolWithTag")
 assert free.index("if (NT_SUCCESS(deleteStatus))") < free.index("SofIpc4FreeInstanceId")
 print("PASS: WaveRT lifecycle ordering and failed deletion ownership guards")
+
+# Ensure code loader validates controller and optional capability registers
+# before any MMIO, and never publishes DMA descriptors after a reset timeout.
+configure=loader.split("\n/**",1)[0]
+assert configure.index("capOffset = Ctx->SpbCapOffset") < configure.index("gctl = readl")
+assert "spibRelative > Ctx->Bar0Length - capOffset" in configure
+assert "gctl == 0xFFFFFFFFu || !(gctl & SOF_HDA_GCTL_RESET)" in configure
+assert configure.count("for (timeout = 0; timeout < 500u; ++timeout)")==2
+assert configure.index("if (timeout == 500u) return STATUS_IO_TIMEOUT;") < configure.index("/* Only decouple")
+assert configure.index("if (timeout == 500u || (ctl & SOF_HDA_SD_CTL_DMA_START))") < configure.index("SOF_HDA_ADSP_REG_SD_BDLPL")
+print("PASS: code loader BAR preflight and required reset acknowledgment")
