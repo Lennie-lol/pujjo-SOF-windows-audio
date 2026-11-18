@@ -879,6 +879,7 @@ SofIpcSendMessage(
     NTSTATUS status = STATUS_IO_TIMEOUT;
     ULONG replyPrimary;
     ULONG replyExtension;
+    ULONG hostDoorbell;
 
     if (!Ctx || !Msg || TimeoutMs == 0 || TimeoutMs > 60000)
         return STATUS_INVALID_PARAMETER;
@@ -916,6 +917,20 @@ SofIpcSendMessage(
         return STATUS_DEVICE_NOT_READY;
     }
     if (Ctx->IpcTxBusy) {
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        return STATUS_DEVICE_BUSY;
+    }
+
+    /* Software ownership alone is insufficient: don't overwrite a command
+     * that the DSP has not consumed. An all-ones read indicates inaccessible
+     * MMIO, not a legitimate BUSY state. Check under the transmitter lock. */
+    hostDoorbell = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcIdr);
+    if (hostDoorbell == 0xFFFFFFFFu) {
+        Ctx->IpcFaulted = TRUE;
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        return STATUS_DEVICE_NOT_READY;
+    }
+    if (hostDoorbell & Ctx->HwDesc->HipcIdrBusy) {
         KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
         return STATUS_DEVICE_BUSY;
     }
@@ -1019,7 +1034,8 @@ SofReadFwStatus(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
-    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->FwStatusReg, 4u))
         return 0;
 
     return SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->FwStatusReg);
@@ -1036,7 +1052,8 @@ SofReadRomStatus(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
-    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomStatusReg, 4u))
         return 0;
 
     return SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->RomStatusReg);
