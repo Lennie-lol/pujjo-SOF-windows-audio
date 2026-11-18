@@ -24,7 +24,10 @@ int main(void) {
  before=sends;assert(bus.write_then_read(bus.context,tx,2,rx,2)==-1);assert(sends==before);
  assert(Pj5682sSpbSetPower(&spb,TRUE)==0);
  for(transferred=0;transferred<6;++transferred) {
+  rx[0]=0xaa;rx[1]=0xbb;
   assert((bus.write_then_read(bus.context,tx,2,rx,2)==0)==(transferred==4));
+  assert(rx[0]==(transferred==4?0x67:0xaa));
+  assert(rx[1]==(transferred==4?0x49:0xbb));
  }
  transferred=4;
  before=sends;
@@ -34,7 +37,9 @@ int main(void) {
   assert((bus.write_then_read(bus.context,tx,2,rx,2)==0)==allowed);
  }
  assert(sends==before+3);tx[0]=0;tx[1]=0xff;
+ rx[0]=0xaa;rx[1]=0xbb;
  fail_send=1;assert(bus.write_then_read(bus.context,tx,2,rx,2)==-1);fail_send=0;
+ assert(rx[0]==0xaa && rx[1]==0xbb);
  for(unsigned i=0;i<1000;++i) {
   assert(Pj5682sSpbSetPower(&spb,FALSE)==0);
   before=sends;assert(bus.write_then_read(bus.context,tx,2,rx,2)==-1);assert(before==sends);
