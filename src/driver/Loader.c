@@ -752,14 +752,25 @@ SofStartFirmwareBoot(
     ULONG timeout;
     char bmsg[128];
     NTSTATUS status;
+    KIRQL oldIrql;
+    LARGE_INTEGER readyTimeout;
+    SOF_FW_BOOT_STATE bootState;
 
     if (!Ctx || !Ctx->Bar0VirtualAddress || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
         return STATUS_DEVICE_NOT_READY;
 
-    /* Reset firmware state & clear events for fresh boot / resume re-boot */
-    Ctx->FwState = SOF_FW_BOOT_NOT_STARTED;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return STATUS_INVALID_DEVICE_STATE;
+
+    /* Do not reset active ownership or a latched IPC fault. */
+    KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+    if (Ctx->IpcTxBusy || Ctx->IpcFaulted ||
+        Ctx->FwState != SOF_FW_BOOT_NOT_STARTED) {
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        return STATUS_DEVICE_NOT_READY;
+    }
     KeClearEvent(&Ctx->FwReadyEvent);
-    Ctx->IpcTxBusy = FALSE;
+    KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
 
     bar4 = (PUCHAR)Ctx->Bar4VirtualAddress;
     bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
@@ -1008,7 +1019,9 @@ SofStartFirmwareBoot(
      */
     /* FW_READY is meaningful only after we have explicitly initiated this
      * boot attempt. Notification received earlier must not mark us ready. */
+    KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
     Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS;
+    KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
     writel(readl(bar0 + SOF_HDA_INTCTL) | (1 << streamIndex) | SOF_HDA_INT_GLOBAL_EN, bar0 + SOF_HDA_INTCTL);
     {
         ULONG ctlVal = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL));
@@ -1034,8 +1047,13 @@ SofStartFirmwareBoot(
     timeout = 4000; /* 4 seconds */
     while (timeout--) {
         statusReg = SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg);
+        KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+        bootState = Ctx->FwState;
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        if (bootState == SOF_FW_BOOT_FAILED || statusReg == 0xFFFFFFFFu)
+            break;
         if (FSR_TO_STATE_CODE(statusReg) == FSR_STATE_FW_ENTERED ||
-            Ctx->FwState == SOF_FW_BOOT_COMPLETE) {
+            bootState == SOF_FW_BOOT_COMPLETE) {
             DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                        "[SOF] *** FIRMWARE SUCCESSFULLY ENTERED (ROM Status: 0x%08x) ***\n",
                        statusReg);
@@ -1075,9 +1093,13 @@ SofStartFirmwareBoot(
     SofFreeDmaBuffer(Ctx, &bdlDma);
     SofFreeDmaBuffer(Ctx, &fwDma);
 
-    /* Check if FW entered successfully */
-    if (FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED &&
-        Ctx->FwState != SOF_FW_BOOT_COMPLETE) {
+    /* Check if FW entered successfully; a fault must never become success. */
+    KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+    bootState = Ctx->FwState;
+    KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+    if (bootState == SOF_FW_BOOT_FAILED || statusReg == 0xFFFFFFFFu ||
+        (FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED &&
+         bootState != SOF_FW_BOOT_COMPLETE)) {
         ULONG lpib = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_LPIB));
         UCHAR sdsts = READ_REGISTER_UCHAR((PUCHAR)(streamRegs + SOF_HDA_ADSP_REG_SD_STS));
         ULONG romErr = SofDspRead32(bar4, Ctx->HwDesc->RomErrorReg);
@@ -1091,7 +1113,10 @@ SofStartFirmwareBoot(
 
         /* Fail closed. Never silently retry a different unreviewed firmware
          * after a ROM/DMA boot failure, especially on the Pujjo ADL-N board. */
+        KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
         Ctx->FwState = SOF_FW_BOOT_FAILED;
+        Ctx->IpcFaulted = TRUE;
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
         return STATUS_IO_TIMEOUT;
     }
 
@@ -1101,23 +1126,22 @@ SofStartFirmwareBoot(
 
     /* 9. Wait for DSP firmware initialization and SOF_IPC4_NOTIFY_FW_READY */
     SofLogBreadcrumb("[12f] Firmware entered ROM_EXT. Waiting for FW_READY notification...\n");
-    timeout = 3000; /* 3 seconds */
-    while (timeout--) {
-        if (Ctx->FwState == SOF_FW_BOOT_COMPLETE) {
-            break;
-        }
-
-        /* Poll IPC registers in case line-based interrupt was delayed */
-        SofIpcDpcHandler(Ctx);
-
-        if (Ctx->FwState == SOF_FW_BOOT_COMPLETE) {
-            break;
-        }
-
-        KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
+    /* Only the registered DPC consumes doorbells. The loader waits at
+     * PASSIVE_LEVEL; loss of an IRQ fails closed instead of racing the DPC. */
+    readyTimeout.QuadPart = -3000LL * 10000LL;
+    status = KeWaitForSingleObject(&Ctx->FwReadyEvent, Executive, KernelMode,
+                                   FALSE, &readyTimeout);
+    KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+    bootState = Ctx->FwState;
+    if (status != STATUS_SUCCESS || Ctx->IpcFaulted ||
+        bootState != SOF_FW_BOOT_COMPLETE) {
+        Ctx->FwState = SOF_FW_BOOT_FAILED;
+        Ctx->IpcFaulted = TRUE;
+        bootState = SOF_FW_BOOT_FAILED;
     }
+    KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
 
-    if (Ctx->FwState == SOF_FW_BOOT_COMPLETE) {
+    if (bootState == SOF_FW_BOOT_COMPLETE) {
         RtlStringCbPrintfA(bmsg, sizeof(bmsg),
             "[12g] *** DSP FIRMWARE BOOT COMPLETED (FW_READY received)! ***\n");
         SofLogBreadcrumb(bmsg);
@@ -1136,9 +1160,8 @@ SofStartFirmwareBoot(
             statusReg);
         SofLogBreadcrumb(bmsg);
         /* ROM entry is not IPC4 readiness. Never manufacture boot success. */
-        Ctx->FwState = SOF_FW_BOOT_FAILED;
         SofPowerDownDsp(Ctx);
-        return STATUS_IO_TIMEOUT;
+        return status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_DEVICE_NOT_READY;
     }
 #endif /* PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT */
 }
