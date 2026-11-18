@@ -29,3 +29,13 @@ assert prepare.index("if (result != PJ_POLICY_OK)") < prepare.index("ctx->Eviden
 assert prepare.index("#if defined(PJ_TARGET_CODEC) && defined(PJ5682S_ENABLE_READONLY_PROBE)") < prepare.index("Pj5682sSpbOpen(")
 assert "Pj1019" not in prepare
 print("PASS: peripheral diagnostics report translated resources without default activation")
+
+transport=(Path(__file__).resolve().parents[1]/"src/driver/peripheral/PujjoRt5682sSpbWindows.c").read_text()
+assert "WdfIoTargetSendWriteSynchronously" not in transport
+assert "bus->write_only=NULL;" in transport
+read=transport.split("static int Pj5682sSpbRead(",1)[1].split("\n}",1)[0]
+for register in ("PJ5682S_DEVICE_ID_REGISTER","PJ5682S_VENDOR_ID_REGISTER","PJ5682S_VERSION_REGISTER"):
+    assert read.index(register) < read.index("WdfIoTargetSendIoctlSynchronously")
+assert "tx[0] != 0" in read and "txLen!=2" in read
+assert "transferred == txLen + rxLen" in read
+print("PASS: Windows SPB transport restricts physical transactions to identity reads")
