@@ -56,6 +56,12 @@ pj5682s_status pj5682s_identify(pj5682s_codec *c);
 pj5682s_status pj5682s_read_identity(pj5682s_codec *c,
                                       PJ_WORD register_address,
                                       PJ_WORD *value);
+/* Diagnostic snapshot only. Publish after all reads and the final device-ID
+ * recheck succeed. Vendor/version are observations, not an authorization. */
+typedef struct pj5682s_identity {
+    PJ_WORD device_id, vendor_id, version;
+} pj5682s_identity;
+pj5682s_status pj5682s_collect_identity(pj5682s_codec *c, pj5682s_identity *out);
 pj5682s_status pj5682s_suspend(pj5682s_codec *c);
 pj5682s_status pj5682s_resume(pj5682s_codec *c);
 void pj5682s_unbind(pj5682s_codec *c);

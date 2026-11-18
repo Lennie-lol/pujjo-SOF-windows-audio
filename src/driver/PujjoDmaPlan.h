@@ -16,6 +16,11 @@ int pj_dma_plan_pair(PJ_DWORD low, PJ_DWORD high, PJ_DWORD total,
 int pj_pcm_period(PJ_DWORD rate, PJ_DWORD channels, PJ_DWORD bits,
                   PJ_DWORD valid_bits, PJ_DWORD period_ms,
                   PJ_DWORD ring_bytes, PJ_DWORD *out_bytes);
+/* Resolve a direction-relative HDA descriptor only within reported counts
+ * and the mapped BAR. Output unchanged on failure. No resource reservation
+ * or hardware activation is implied by a successful geometry check. */
+int pj_hda_stream_slot(PJ_DWORD captures, PJ_DWORD playbacks, PJ_DWORD capture,
+                       PJ_DWORD slot, PJ_DWORD bar_bytes, PJ_DWORD *index);
 #ifdef __cplusplus
 }
 #endif

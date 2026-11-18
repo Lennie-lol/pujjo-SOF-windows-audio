@@ -13,6 +13,8 @@ CASES=[
  ('map','src/driver/experimental/PujjoDeviceMap.c','tests/test_pujjo_device_map.c',[]),
  ('clock','src/driver/experimental/PujjoHeadsetClock.c','tests/test_pujjo_headset_clock.c',[]),
  ('firmware','src/driver/experimental/PujjoSofFirmwarePolicy.c','tests/test_pujjo_sof_fw_policy.c',[]),
+ ('catalog','src/driver/PujjoFirmwareCatalog.c','tests/test_pujjo_firmware_catalog.c',[]),
+ ('profile-cache','src/driver/PujjoFirmwareCatalog.c','tests/test_pujjo_profile_cache.c',[]),
  ('codec-locked','src/driver/experimental/PujjoRt5682sCodec.c','tests/test_rt5682s_codec.c',[]),
  ('codec-mock','src/driver/experimental/PujjoRt5682sCodec.c','tests/test_rt5682s_codec.c',['-DPJ5682S_TEST_ONLY_WRITES']),
  ('amp-locked','src/driver/experimental/PujjoRt1019pAmp.c','tests/test_rt1019p_amp.c',[]),

@@ -8,6 +8,7 @@ typedef struct mock {
     uint16_t words[65536];
     unsigned reads, writes, bad_wire;
     int fail_read, fail_write, drop_write, swap_identity;
+    unsigned fail_after_reads;
     uint8_t last_tx[4];
 } mock;
 
@@ -17,7 +18,7 @@ static int mock_read(void *user, const uint8_t *tx, size_t tlen,
     mock *m=(mock*)user;
     uint16_t reg, v;
     if (tlen!=2 || rlen!=2) {m->bad_wire++;return -1;}
-    if (m->fail_read) return -1;
+    if (m->fail_read || (m->fail_after_reads && m->reads>=m->fail_after_reads)) return -1;
     reg=(uint16_t)(((uint16_t)tx[0]<<8)|tx[1]);
     v=m->words[reg];
     if (reg==PJ5682S_DEVICE_ID_REGISTER && m->swap_identity)
@@ -156,6 +157,27 @@ int main(void)
         assert(empty.verified_id==0);
         assert(pj5682s_resume(&empty)==PJ5682S_OK);
         assert(pj5682s_identify(&empty)==PJ5682S_OK);
+    }
+    /* Every failure point preserves the caller snapshot and invalidates identity. */
+    for (unsigned step=0;step<4;++step) {
+        pj5682s_identity id={0xaaaa,0xbbbb,0xcccc};
+        pj5682s_unbind(&empty);init(&m);b=test_bus(&m);
+        assert(pj5682s_bind(&empty,&b)==PJ5682S_OK);
+        if (!step) m.fail_read=1; else m.fail_after_reads=step;
+        assert(pj5682s_collect_identity(&empty,&id)==PJ5682S_BUS_ERROR);
+        assert(id.device_id==0xaaaa && id.vendor_id==0xbbbb && id.version==0xcccc);
+        assert(empty.state==PJ5682S_FAILED && empty.verified_id==0 && !m.writes);
+    }
+    pj5682s_unbind(&empty);init(&m);b=test_bus(&m);
+    assert(pj5682s_bind(&empty,&b)==PJ5682S_OK);
+    {
+        pj5682s_identity id={0};
+        assert(pj5682s_collect_identity(&empty,&id)==PJ5682S_OK);
+        assert(id.device_id==PJ5682S_EXPECTED_DEVICE_ID && id.vendor_id==0x10ec && id.version==2);
+        assert(m.reads==4u && !m.writes);
+        m.swap_identity=1;
+        assert(pj5682s_collect_identity(&empty,&id)==PJ5682S_WRONG_CHIP);
+        assert(id.device_id==PJ5682S_EXPECTED_DEVICE_ID && empty.state==PJ5682S_FAILED);
     }
     assert(m.bad_wire==0);
     puts("PASS: RT5682S codec ID, I2C protocol, read guard, suspend, bus failures and mock-only write tests");

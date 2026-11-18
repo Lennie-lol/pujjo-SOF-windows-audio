@@ -55,3 +55,17 @@ int pj_pcm_period(PJ_DWORD rate, PJ_DWORD channels, PJ_DWORD bits,
     *out_bytes = period_bytes;
     return 1;
 }
+
+int pj_hda_stream_slot(PJ_DWORD captures, PJ_DWORD playbacks, PJ_DWORD capture,
+                       PJ_DWORD slot, PJ_DWORD bar_bytes, PJ_DWORD *index)
+{
+    PJ_DWORD resolved, offset;
+    if (!index || captures>15u || playbacks>15u || capture>1u ||
+        slot >= (capture ? captures : playbacks)) return 0;
+    resolved = capture ? slot : captures + slot;
+    /* Intel HDA SD0 starts at 0x80; each descriptor occupies 0x20 bytes. */
+    offset = 0x80u + resolved * 0x20u;
+    if (offset>bar_bytes || bar_bytes-offset<0x20u) return 0;
+    *index=resolved;
+    return 1;
+}

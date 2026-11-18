@@ -138,6 +138,9 @@ NTSTATUS SofWaveRtCreateStream(
     ULONG bdlSize;
 #endif
     ULONG periodBytes;
+#ifdef _KERNEL_MODE
+    ULONG directionSlot, descriptorIndex;
+#endif
 
     if (StreamOut == NULL) return STATUS_INVALID_PARAMETER;
     *StreamOut = NULL;
@@ -154,6 +157,31 @@ NTSTATUS SofWaveRtCreateStream(
     if (Ctx == NULL || Ctx->FwState != SOF_FW_BOOT_COMPLETE ||
         !SofWaveRtHardwareBackendVerified())
         return STATUS_NOT_SUPPORTED;
+
+    /* Never fabricate a capture count or treat a render-only endpoint as
+     * capture. This selects geometry only; ownership remains unqualified. */
+    switch (EndpointType) {
+    case SOF_ENDPOINT_HDA_ANALOG: directionSlot = 0; break;
+    case SOF_ENDPOINT_DMIC_PDM:
+        if (!IsCapture) return STATUS_INVALID_PARAMETER;
+        directionSlot = 1; break;
+    case SOF_ENDPOINT_HDMI_1:
+    case SOF_ENDPOINT_HDMI_2:
+    case SOF_ENDPOINT_HDMI_3:
+        if (IsCapture) return STATUS_INVALID_PARAMETER;
+        directionSlot = 1u + (ULONG)(EndpointType - SOF_ENDPOINT_HDMI_1); break;
+    case SOF_ENDPOINT_I2S_SSP2: return STATUS_NOT_SUPPORTED;
+    case SOF_ENDPOINT_SDW_RENDER:
+        if (IsCapture) return STATUS_INVALID_PARAMETER;
+        directionSlot = 5; break;
+    case SOF_ENDPOINT_SDW_CAPTURE:
+        if (!IsCapture) return STATUS_INVALID_PARAMETER;
+        directionSlot = 3; break;
+    default: return STATUS_NOT_SUPPORTED;
+    }
+    if (!Ctx->Bar0VirtualAddress || !pj_hda_stream_slot(Ctx->NumCaptureStreams,
+        Ctx->NumPlaybackStreams, IsCapture ? 1u : 0u, directionSlot,
+        Ctx->Bar0Length, &descriptorIndex)) return STATUS_DEVICE_CONFIGURATION_ERROR;
 #endif
 
 #ifdef _KERNEL_MODE
@@ -215,6 +243,11 @@ NTSTATUS SofWaveRtCreateStream(
         stream->StreamIndex = (Ctx != NULL && Ctx->NumCaptureStreams > 0) ? Ctx->NumCaptureStreams : 7;
     }
 
+#ifdef _KERNEL_MODE
+    /* Override the legacy host-simulation descriptor choices with the
+     * actual bounded capability-derived descriptor. */
+    stream->StreamIndex = descriptorIndex;
+#endif
     stream->Format = *Format;
     stream->BufferSizeBytes = BufferSizeBytes;
     stream->PeriodMs = (PeriodMs > 0) ? PeriodMs : SOF_WAVERT_DEFAULT_PERIOD_MS;

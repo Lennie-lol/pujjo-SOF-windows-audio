@@ -155,3 +155,61 @@ pj_catalog_status pj_firmware_find_config(const PJ_BYTE *image, PJ_SIZE size,
     *out=result;
     return PJ_CATALOG_OK;
 }
+
+pj_catalog_status pj_firmware_load_profile(const PJ_BYTE *image, PJ_SIZE size,
+    const PJ_BYTE uuid[16], pj_firmware_profile *out)
+{
+    catalog_view v;
+    PJ_DWORD i,j,offset,count;
+    const PJ_BYTE *m;
+    pj_firmware_profile result={0};
+    pj_catalog_status s;
+    if (!out) return PJ_CATALOG_INVALID_ARGUMENT;
+    s=locate(image,size,uuid,&v,&i);
+    if (s!=PJ_CATALOG_OK) return s;
+    m=v.modules+(PJ_SIZE)i*MODULE_BYTES;
+    offset=rd16(m+68u);
+    count=rd16(m+70u);
+    if (!count) return PJ_CATALOG_NOT_FOUND;
+    if (count>PJ_CATALOG_MAX_CONFIGS) return PJ_CATALOG_INVALID_IMAGE;
+    result.module.module_id=i;
+    result.module.affinity_mask=rd32(m+72u);
+    result.module.instance_max_count=rd16(m+76u);
+    result.module.config_count=(PJ_WORD)count;
+    for (j=0u;j<16u;++j) result.module.uuid[j]=m[12u+j];
+    result.count=count;
+    for (j=0u;j<count;++j) {
+        const PJ_BYTE *c=v.configs+((PJ_SIZE)offset+j)*CONFIG_BYTES;
+        pj_firmware_config *record=&result.configs[j];
+        record->instance_bytes=rd32(c+16u);
+        record->ibs=rd32(c+24u);
+        record->obs=rd32(c+28u);
+        record->cpc=rd32(c+36u);
+    }
+    *out=result;
+    return PJ_CATALOG_OK;
+}
+
+pj_catalog_status pj_firmware_profile_config(const pj_firmware_profile *profile,
+    PJ_DWORD ibs, PJ_DWORD obs, pj_firmware_config *out)
+{
+    PJ_DWORD i;
+    pj_firmware_config result={0};
+    int found=0;
+    if (!profile || !out || !ibs || !obs) return PJ_CATALOG_INVALID_ARGUMENT;
+    if (!profile->count) return PJ_CATALOG_NOT_FOUND;
+    if (profile->count>PJ_CATALOG_MAX_CONFIGS ||
+        profile->count!=profile->module.config_count)
+        return PJ_CATALOG_INVALID_IMAGE;
+    for (i=0u;i<profile->count;++i) {
+        const pj_firmware_config *c=&profile->configs[i];
+        if (c->ibs!=ibs || c->obs!=obs) continue;
+        if (found && (result.instance_bytes!=c->instance_bytes || result.cpc!=c->cpc))
+            return PJ_CATALOG_AMBIGUOUS;
+        result=*c;
+        found=1;
+    }
+    if (!found) return PJ_CATALOG_NOT_FOUND;
+    *out=result;
+    return PJ_CATALOG_OK;
+}

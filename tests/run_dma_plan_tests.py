@@ -35,6 +35,25 @@ int main(void) {
     assert(!pj_pcm_period(0xffffffffu,8u,32u,32u,1000u,65536u,&period));
     assert(!pj_pcm_period(48000u,2u,32u,24u,10u,65536u,NULL));
     assert(period==3840u);
+    for (PJ_DWORD n=0;n<=15u;++n) {
+        for (PJ_DWORD m=0;m<=15u;++m) {
+            for (PJ_DWORD slot=0;slot<=15u;++slot) {
+                PJ_DWORD idx=99u;
+                assert(pj_hda_stream_slot(n,m,1u,slot,4096u,&idx)==(slot<n));
+                assert(idx==(slot<n ? slot : 99u));
+                idx=99u;
+                assert(pj_hda_stream_slot(n,m,0u,slot,4096u,&idx)==(slot<m));
+                assert(idx==(slot<m ? n+slot : 99u));
+            }
+        }
+    }
+    PJ_DWORD idx=99u;
+    assert(!pj_hda_stream_slot(2,3,0,0,0xdf,&idx) && idx==99u);
+    assert(pj_hda_stream_slot(2,3,0,0,0xe0,&idx) && idx==2u);
+    assert(!pj_hda_stream_slot(16,2,1,0,4096,&idx));
+    assert(!pj_hda_stream_slot(2,16,0,0,4096,&idx));
+    assert(!pj_hda_stream_slot(2,3,2,0,4096,&idx));
+    assert(!pj_hda_stream_slot(2,3,1,0,4096,NULL));
     puts("PASS: DMA carry, span overflow, alignment, and checked PCM geometry");
     return 0;
 }
@@ -56,6 +75,8 @@ assert device.index("!SofHardwareDevelopmentAllowed()")<device.index("WdfFdoQuer
 wave=(root/"src/driver/WaveRt.c").read_text()
 assert "stream->PeriodSizeBytes = periodBytes;" in wave
 assert "!SofWaveRtHardwareBackendVerified()" in wave
+assert wave.index("!SofWaveRtHardwareBackendVerified()") < wave.index("pj_hda_stream_slot(") < wave.index("ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(SOF_WAVERT_STREAM)")
+assert "stream->StreamIndex = descriptorIndex;" in wave
 assert "operating in silence capture mode" not in wave
 for name in ("Driver.c","PortClsAdapter.cpp"):
     src=(root/"src/driver"/name).read_text()

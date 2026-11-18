@@ -222,6 +222,7 @@ NTSTATUS PjEvtD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
 {
     PJ_DEV_CONTEXT *ctx=PjGetDeviceContext(Device);
     pj5682s_status result;
+    pj5682s_identity identity={0};
     UNREFERENCED_PARAMETER(PreviousState);
     PAGED_CODE();
     if (!ctx->ResourceEvidenceValid || !ctx->Spb.Opened)
@@ -233,10 +234,10 @@ NTSTATUS PjEvtD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
         (void)Pj5682sSpbSetPower(&ctx->Spb, FALSE);
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
-    result=pj5682s_identify(&ctx->Codec);
+    result=pj5682s_collect_identity(&ctx->Codec, &identity);
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, result==PJ5682S_OK ? DPFLTR_INFO_LEVEL : DPFLTR_ERROR_LEVEL,
-        "[PujjoProbe] RT5682S identity status=%ld verified=0x%04x\n",
-        (LONG)result, (ULONG)ctx->Codec.verified_id);
+        "[PujjoProbe] RT5682S identity status=%ld device=0x%04x vendor=0x%04x version=0x%04x\n",
+        (LONG)result, (ULONG)identity.device_id, (ULONG)identity.vendor_id, (ULONG)identity.version);
     if (result!=PJ5682S_OK) (void)Pj5682sSpbSetPower(&ctx->Spb, FALSE);
     return result==PJ5682S_OK ? STATUS_SUCCESS : STATUS_DEVICE_CONFIGURATION_ERROR;
 }

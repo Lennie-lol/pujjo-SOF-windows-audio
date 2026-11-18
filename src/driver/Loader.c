@@ -917,14 +917,14 @@ SofStartFirmwareBoot(
         };
         RtlZeroMemory(&Ctx->CopierModule, sizeof(Ctx->CopierModule));
         RtlZeroMemory(&Ctx->GainModule, sizeof(Ctx->GainModule));
-        (void)pj_firmware_find_module(rawFw, rawFwSize, copierUuid, &Ctx->CopierModule);
-        (void)pj_firmware_find_module(rawFw, rawFwSize, gainUuid, &Ctx->GainModule);
-        /* Current graph profile: one millisecond of 48 kHz stereo PCM
-         * in 32-bit containers. Other geometries require their own record. */
-        RtlZeroMemory(&Ctx->CopierConfig, sizeof(Ctx->CopierConfig));
-        RtlZeroMemory(&Ctx->GainConfig, sizeof(Ctx->GainConfig));
-        (void)pj_firmware_find_config(rawFw, rawFwSize, copierUuid, 384u, 384u, &Ctx->CopierConfig);
-        (void)pj_firmware_find_config(rawFw, rawFwSize, gainUuid, 384u, 384u, &Ctx->GainConfig);
+        /* Cache bounded records before releasing the raw firmware image.
+         * On missing or oversized catalogs, leave the role unavailable. */
+        RtlZeroMemory(&Ctx->CopierProfile, sizeof(Ctx->CopierProfile));
+        RtlZeroMemory(&Ctx->GainProfile, sizeof(Ctx->GainProfile));
+        if (pj_firmware_load_profile(rawFw, rawFwSize, copierUuid, &Ctx->CopierProfile) == PJ_CATALOG_OK)
+            Ctx->CopierModule = Ctx->CopierProfile.module;
+        if (pj_firmware_load_profile(rawFw, rawFwSize, gainUuid, &Ctx->GainProfile) == PJ_CATALOG_OK)
+            Ctx->GainModule = Ctx->GainProfile.module;
     }
 
     /* Allocate Contiguous DMA Buffer for Firmware Payload */

@@ -434,19 +434,20 @@ NTSTATUS SofIpc4InitModuleInstance(
     ULONG storage[64];
     struct sof_ipc4_base_module_cfg *base = (struct sof_ipc4_base_module_cfg *)storage;
     const pj_firmware_module *module = SofGraphModule(Ctx, ModuleId);
-    const pj_firmware_config *config;
+    const pj_firmware_profile *profile;
+    pj_firmware_config config;
     pj_ipc4_status result;
     if (!Payload || PayloadSize < sizeof(*base) || PayloadSize > sizeof(storage))
         return STATUS_INVALID_BUFFER_SIZE;
     if (!module || CoreId >= 32u || !(module->affinity_mask & (1u << CoreId)))
         return STATUS_NOT_SUPPORTED;
-    config = ModuleId == SOF_IPC4_MOD_ID_COPIER ? &Ctx->CopierConfig : &Ctx->GainConfig;
+    profile = ModuleId == SOF_IPC4_MOD_ID_COPIER ? &Ctx->CopierProfile : &Ctx->GainProfile;
     RtlCopyMemory(storage, Payload, PayloadSize);
-    if (!config->ibs || base->ibs != config->ibs || base->obs != config->obs)
+    if (pj_firmware_profile_config(profile, base->ibs, base->obs, &config) != PJ_CATALOG_OK)
         return STATUS_NOT_SUPPORTED;
-    base->cpc = config->cpc;
-    base->is_pages = config->instance_bytes / PAGE_SIZE +
-                     (config->instance_bytes % PAGE_SIZE != 0u);
+    base->cpc = config.cpc;
+    base->is_pages = config.instance_bytes / PAGE_SIZE +
+                     (config.instance_bytes % PAGE_SIZE != 0u);
     result = pj_ipc4_module_init(SofGraphWireId(Ctx, ModuleId, InstanceId),
         InstanceId, PipelineId, CoreId, 0u, (const PJ_BYTE *)storage, PayloadSize, &packet);
     return SofIpc4SendGraphPacket(Ctx, result, &packet);

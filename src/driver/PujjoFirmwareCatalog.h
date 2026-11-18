@@ -29,6 +29,18 @@ pj_catalog_status pj_firmware_find_module(const PJ_BYTE *image, PJ_SIZE size,
  * Does not establish a valid DSP core, format, or firmware budget. */
 pj_catalog_status pj_firmware_find_config(const PJ_BYTE *image, PJ_SIZE size,
     const PJ_BYTE uuid[16], PJ_DWORD ibs, PJ_DWORD obs, pj_firmware_config *out);
+/* Bounded, immutable copy of manifest configuration records. No pointers to
+ * a released firmware image. 64 is a software capacity, not a hardware limit. */
+#define PJ_CATALOG_MAX_CONFIGS 64u
+typedef struct {
+    pj_firmware_module module;
+    PJ_DWORD count;
+    pj_firmware_config configs[PJ_CATALOG_MAX_CONFIGS];
+} pj_firmware_profile;
+pj_catalog_status pj_firmware_load_profile(const PJ_BYTE *image, PJ_SIZE size,
+    const PJ_BYTE uuid[16], pj_firmware_profile *out);
+pj_catalog_status pj_firmware_profile_config(const pj_firmware_profile *profile,
+    PJ_DWORD ibs, PJ_DWORD obs, pj_firmware_config *out);
 #ifdef __cplusplus
 }
 #endif

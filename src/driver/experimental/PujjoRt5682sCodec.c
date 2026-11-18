@@ -105,6 +105,23 @@ pj5682s_status pj5682s_read_identity(pj5682s_codec *c,
     return s;
 }
 
+pj5682s_status pj5682s_collect_identity(pj5682s_codec *c, pj5682s_identity *out)
+{
+    pj5682s_identity result={0};
+    pj5682s_status status;
+    if (!c || !out) return PJ5682S_BAD_ARGUMENT;
+    status=pj5682s_identify(c);
+    if (status!=PJ5682S_OK) return status;
+    status=pj5682s_read_identity(c, PJ5682S_VENDOR_ID_REGISTER, &result.vendor_id);
+    if (status!=PJ5682S_OK) return status;
+    status=pj5682s_read_identity(c, PJ5682S_VERSION_REGISTER, &result.version);
+    if (status!=PJ5682S_OK) return status;
+    status=pj5682s_read_identity(c, PJ5682S_DEVICE_ID_REGISTER, &result.device_id);
+    if (status!=PJ5682S_OK) return status;
+    *out=result;
+    return PJ5682S_OK;
+}
+
 pj5682s_status pj5682s_suspend(pj5682s_codec *c)
 {
     if (!c) return PJ5682S_BAD_ARGUMENT;

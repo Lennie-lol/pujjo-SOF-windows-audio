@@ -169,8 +169,8 @@ typedef struct _SOF_DEVICE_CONTEXT {
     /** @brief WDF framework DMA enabler handle for scatter/gather mapping. */
     pj_firmware_module CopierModule;
     pj_firmware_module GainModule;
-    pj_firmware_config CopierConfig;
-    pj_firmware_config GainConfig;
+    pj_firmware_profile CopierProfile;
+    pj_firmware_profile GainProfile;
     WDFDMAENABLER       DmaEnabler;
 
     /* PCI Identity */

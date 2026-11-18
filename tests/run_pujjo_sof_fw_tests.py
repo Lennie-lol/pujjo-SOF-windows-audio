@@ -22,3 +22,11 @@ with tempfile.TemporaryDirectory(prefix='pujjo_catalog_') as d:
                     str(root/'src/driver/PujjoFirmwareCatalog.c'),
                     str(root/'tests/test_pujjo_firmware_catalog.c'),'-o',str(exe)],check=True,timeout=40)
     subprocess.run([str(exe)],check=True,timeout=10)
+
+with tempfile.TemporaryDirectory(prefix='pujjo_profile_cache_') as d:
+    exe=Path(d)/('test.exe' if os.name=='nt' else 'test')
+    subprocess.run([cc,'-std=c11','-pedantic','-Wall','-Wextra','-Werror',
+                    '-Wconversion','-Wsign-conversion',
+                    str(root/'src/driver/PujjoFirmwareCatalog.c'),
+                    str(root/'tests/test_pujjo_profile_cache.c'),'-o',str(exe)],check=True,timeout=40)
+    subprocess.run([str(exe)],check=True,timeout=10)
