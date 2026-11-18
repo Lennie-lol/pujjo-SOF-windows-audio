@@ -224,3 +224,7 @@ for name in ("RegisterNotificationEvent", "UnregisterNotificationEvent", "Signal
 position = wave.split("NTSTATUS SofWaveRtGetPosition(",1)[1].split("#else",1)[0]
 assert position.index("ctx->Bar0Length - offset") < position.index("position = readl") < position.index("*PositionBytes = position")
 assert "LinearPositionBytes +=" not in wave
+assert "MmGetPhysicalAddress(" not in wave and "MmAllocateContiguousMemory(" not in wave
+assert "stream->Bdl[1].AddrHigh = plan.second.high" in wave
+assert free.index("!(ctl & SOF_HDA_SD_CTL_DMA_START)") < free.index("if (stopped)") < free.index("SofFreeDmaBuffer")
+assert "NTSTATUS status = streamObj->SetFormat(DataFormat)" in port

@@ -3,7 +3,7 @@
 from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 ipc = (root / "src/driver/Ipc.c").read_text()
-send = ipc.split("NTSTATUS\nSofIpcSendMessage(", 1)[1].split("\n/**", 1)[0]
+send = ipc.split("NTSTATUS\nSofIpcSendWhilePowered(", 1)[1].split("\n/**", 1)[0]
 dpc = ipc.split("VOID\nSofIpcDpcHandler(", 1)[1].split("\n/**", 1)[0]
 assert "Reply && (Reply->Payload || Reply->PayloadSize != 0)" in send
 assert send.index("Reply &&") < send.index("WRITE_REGISTER_ULONG")

@@ -61,6 +61,7 @@ SofIpcInitialize(
 )
 {
     /* Initialize spinlock protecting IPC transmitter state and pending reply buffer */
+    ExInitializeRundownProtection(&Ctx->IpcRundown);
     KeInitializeSpinLock(&Ctx->IpcLock);
 
     /* Notification events: manually cleared before dispatch, signaled by DPC on completion */
@@ -103,6 +104,14 @@ SofIpcCleanup(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
+    KIRQL irql;
+    if (!Ctx->ReplyBuffer) return;
+    KeAcquireSpinLock(&Ctx->IpcLock, &irql);
+    Ctx->IpcFaulted = TRUE;
+    KeSetEvent(&Ctx->IpcReplyEvent, IO_NO_INCREMENT, FALSE);
+    KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
+    KeReleaseSpinLock(&Ctx->IpcLock, irql);
+    ExWaitForRundownProtectionRelease(&Ctx->IpcRundown);
     if (Ctx->ReplyBuffer) {
         ExFreePoolWithTag(Ctx->ReplyBuffer, SOF_DEVICE_TAG);
         Ctx->ReplyBuffer = NULL;
@@ -882,8 +891,8 @@ SofIpcDpcHandler(
  * @return STATUS_SUCCESS on success; STATUS_DEVICE_BUSY if already sending; STATUS_IO_TIMEOUT
  *         on timeout; STATUS_UNSUCCESSFUL if DSP returned an error code.
  */
-NTSTATUS
-SofIpcSendMessage(
+static NTSTATUS
+SofIpcSendWhilePowered(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ PSOF_IPC_MESSAGE Msg,
     _Out_opt_ PSOF_IPC_MESSAGE Reply,
@@ -1037,6 +1046,24 @@ SofIpcSendMessage(
         return STATUS_UNSUCCESSFUL;
     }
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+SofIpcSendMessage(
+    _In_ PSOF_DEVICE_CONTEXT Ctx,
+    _In_ PSOF_IPC_MESSAGE Msg,
+    _Out_opt_ PSOF_IPC_MESSAGE Reply,
+    _In_ ULONG TimeoutMs
+)
+{
+    NTSTATUS status;
+    if (!Ctx || !Msg) return STATUS_INVALID_PARAMETER;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) return STATUS_INVALID_DEVICE_STATE;
+    if (!ExAcquireRundownProtection(&Ctx->IpcRundown))
+        return STATUS_DEVICE_NOT_READY;
+    status = SofIpcSendWhilePowered(Ctx, Msg, Reply, TimeoutMs);
+    ExReleaseRundownProtection(&Ctx->IpcRundown);
+    return status;
 }
 
 /**

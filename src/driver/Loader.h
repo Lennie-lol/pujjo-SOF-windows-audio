@@ -276,7 +276,7 @@ NTSTATUS SofStartFirmwareBoot(
  *
  * @param[in] Ctx Pointer to the SOF device context.
  */
-VOID SofPowerDownDsp(
+NTSTATUS SofPowerDownDsp(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 );
 

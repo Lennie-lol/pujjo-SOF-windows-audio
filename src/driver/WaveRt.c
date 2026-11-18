@@ -134,7 +134,9 @@ NTSTATUS SofWaveRtCreateStream(
 {
     PSOF_WAVERT_STREAM stream;
     NTSTATUS status;
+#ifndef _KERNEL_MODE
     ULONG bdlSize;
+#endif
     ULONG periodBytes;
 
     if (StreamOut == NULL) return STATUS_INVALID_PARAMETER;
@@ -227,68 +229,38 @@ NTSTATUS SofWaveRtCreateStream(
     /* 1. Allocate circular ring buffer */
 #ifdef _KERNEL_MODE
     {
-        PHYSICAL_ADDRESS maxAddr;
-        maxAddr.QuadPart = 0xFFFFFFFFFFFFFFFFULL;
-
-        stream->KernelBuffer = MmAllocateContiguousMemory(stream->BufferSizeBytes, maxAddr);
-        if (stream->KernelBuffer == NULL) {
-            maxAddr.QuadPart = 0xFFFFFFFFULL;
-            stream->KernelBuffer = MmAllocateContiguousMemory(stream->BufferSizeBytes, maxAddr);
+        pj_dma_plan plan;
+        /* PortCls can map whole pages. Keep every mapped byte within the
+         * zeroed ring allocation, including the padding of its last page. */
+        status = SofAllocateDmaBuffer(Ctx, (ULONG)ROUND_TO_PAGES(BufferSizeBytes),
+                                      &stream->RingAllocation);
+        if (NT_SUCCESS(status))
+            status = SofAllocateDmaBuffer(Ctx, PAGE_SIZE, &stream->BdlAllocation);
+        if (NT_SUCCESS(status)) {
+            stream->KernelBuffer = stream->RingAllocation.VirtualAddress;
+            stream->PhysicalAddress = stream->RingAllocation.PhysicalAddress;
+            stream->Bdl = (PSOF_INTEL_DSP_BDL)stream->BdlAllocation.VirtualAddress;
+            stream->BdlPhysicalAddress = stream->BdlAllocation.PhysicalAddress;
+            if (BYTE_OFFSET(stream->KernelBuffer) ||
+                (stream->BdlPhysicalAddress.LowPart & 127u) ||
+                !pj_dma_plan_pair(stream->PhysicalAddress.LowPart,
+                                  (ULONG)stream->PhysicalAddress.HighPart,
+                                  BufferSizeBytes, BufferSizeBytes / 2u, &plan))
+                status = STATUS_INVALID_BUFFER_SIZE;
         }
-        if (stream->KernelBuffer == NULL) {
-            char bmsg[128];
-            RtlStringCbPrintfA(bmsg, sizeof(bmsg), "[WaveRt] MmAllocateContiguousMemory(%u) FAILED\n", stream->BufferSizeBytes);
-            SofLogBreadcrumb(bmsg);
+        if (!NT_SUCCESS(status)) {
+            SofFreeDmaBuffer(Ctx, &stream->BdlAllocation);
+            SofFreeDmaBuffer(Ctx, &stream->RingAllocation);
             ExFreePoolWithTag(stream, SOF_DEVICE_TAG);
-            return STATUS_INSUFFICIENT_RESOURCES;
+            return status;
         }
-
-        RtlZeroMemory(stream->KernelBuffer, stream->BufferSizeBytes);
-        stream->PhysicalAddress = MmGetPhysicalAddress(stream->KernelBuffer);
-
-        /* 2. Allocate 4KB BDL */
-        bdlSize = 4096;
-        maxAddr.QuadPart = 0xFFFFFFFFFFFFFFFFULL;
-        stream->Bdl = (PSOF_INTEL_DSP_BDL)MmAllocateContiguousMemory(bdlSize, maxAddr);
-        if (stream->Bdl == NULL) {
-            maxAddr.QuadPart = 0xFFFFFFFFULL;
-            stream->Bdl = (PSOF_INTEL_DSP_BDL)MmAllocateContiguousMemory(bdlSize, maxAddr);
-        }
-        if (stream->Bdl == NULL) {
-            char bmsg[128];
-            RtlStringCbPrintfA(bmsg, sizeof(bmsg), "[WaveRt] MmAllocateContiguousMemory BDL FAILED\n");
-            SofLogBreadcrumb(bmsg);
-            MmFreeContiguousMemory(stream->KernelBuffer);
-            ExFreePoolWithTag(stream, SOF_DEVICE_TAG);
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        RtlZeroMemory(stream->Bdl, bdlSize);
-        stream->BdlPhysicalAddress = MmGetPhysicalAddress(stream->Bdl);
-
-        {
-            char bmsg[192];
-            RtlStringCbPrintfA(bmsg, sizeof(bmsg),
-                "[WaveRt] Buffer=%p (Phys=0x%llx, %u B), BDL=%p (Phys=0x%llx), StreamIndex=%u, Tag=%u\n",
-                stream->KernelBuffer, stream->PhysicalAddress.QuadPart, stream->BufferSizeBytes,
-                stream->Bdl, stream->BdlPhysicalAddress.QuadPart,
-                stream->StreamIndex, stream->StreamTag);
-            SofLogBreadcrumb(bmsg);
-        }
-
-        /*
-         * Populate 2 BDL entries for double buffering / circular period wrap:
-         * Entry 0: First half of ring buffer, IOC asserted.
-         * Entry 1: Second half of ring buffer, IOC asserted.
-         */
-        stream->Bdl[0].AddrLow = stream->PhysicalAddress.LowPart;
-        stream->Bdl[0].AddrHigh = stream->PhysicalAddress.HighPart;
-        stream->Bdl[0].Size = stream->BufferSizeBytes / 2;
+        stream->Bdl[0].AddrLow = plan.first.low;
+        stream->Bdl[0].AddrHigh = plan.first.high;
+        stream->Bdl[0].Size = plan.first.length;
         stream->Bdl[0].Ioc = 1;
-
-        stream->Bdl[1].AddrLow = (ULONG)(stream->PhysicalAddress.LowPart + (stream->BufferSizeBytes / 2));
-        stream->Bdl[1].AddrHigh = stream->PhysicalAddress.HighPart;
-        stream->Bdl[1].Size = stream->BufferSizeBytes / 2;
+        stream->Bdl[1].AddrLow = plan.second.low;
+        stream->Bdl[1].AddrHigh = plan.second.high;
+        stream->Bdl[1].Size = plan.second.length;
         stream->Bdl[1].Ioc = 1;
 
         /* Initialize timer and DPC for period notifications */
@@ -384,6 +356,9 @@ NTSTATUS SofWaveRtCreateStream(
 
     /* 4. Configure BAR0 HDA Stream Engine (if DSP pipeline instantiated) */
     if (stream->HostCopierInstance != 0xFFFFFFFF) {
+#ifdef _KERNEL_MODE
+        stream->DescriptorPublished = TRUE;
+#endif
         SofWaveRtConfigureHdaStream(stream);
 
         /* 5. Configure Link Stream Engine (PPLC) */
@@ -486,14 +461,27 @@ NTSTATUS SofWaveRtFreeStream(
     }
 
 #ifdef _KERNEL_MODE
-    if (Stream->Bdl != NULL) {
-        MmFreeContiguousMemory(Stream->Bdl);
-        Stream->Bdl = NULL;
+    BOOLEAN stopped = !Stream->DescriptorPublished;
+    PSOF_DEVICE_CONTEXT ctx = Stream->DeviceContext;
+    if (!stopped && ctx && ctx->Bar0VirtualAddress && Stream->StreamIndex < 30u) {
+        ULONG offset = SOF_HDA_STREAM_REG_OFFSET(Stream->StreamIndex);
+        if (offset <= ctx->Bar0Length && sizeof(ULONG) <= ctx->Bar0Length - offset) {
+            for (ULONG attempt = 0; attempt < 500u; ++attempt) {
+                ULONG ctl = readl((PUCHAR)ctx->Bar0VirtualAddress + offset);
+                if (ctl != MAXULONG && !(ctl & SOF_HDA_SD_CTL_DMA_START)) {
+                    stopped = TRUE;
+                    break;
+                }
+                KeStallExecutionProcessor(10);
+            }
+        }
     }
-
-    if (Stream->KernelBuffer != NULL) {
-        MmFreeContiguousMemory(Stream->KernelBuffer);
-        Stream->KernelBuffer = NULL;
+    if (stopped) {
+        SofFreeDmaBuffer(ctx, &Stream->BdlAllocation);
+        SofFreeDmaBuffer(ctx, &Stream->RingAllocation);
+    } else {
+        /* Keep both WDF children until device destruction. */
+        status = STATUS_DEVICE_NOT_READY;
     }
 
     ExFreePoolWithTag(Stream, SOF_DEVICE_TAG);

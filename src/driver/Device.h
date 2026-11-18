@@ -323,6 +323,10 @@ typedef struct _SOF_DEVICE_CONTEXT {
     PVOID               PortEvents;
     /** @brief Periodic passive WDF timer for jack and display presence polling. */
     WDFTIMER            JackPollTimer;
+    volatile LONG       JackPolling;
+#ifdef _KERNEL_MODE
+    EX_RUNDOWN_REF      IpcRundown;
+#endif
     /** @brief Delayed passive WDF timer to confirm healthy boot and reset watchdog. */
     WDFTIMER            WatchdogHealthTimer;
 

@@ -76,3 +76,30 @@ provide the Chromebook's PnP or ACPI evidence.
 EXE.** A double-click installer is just a deployment wrapper, not a substitute
 for the requirements above. Never disable Windows driver signing/integrity
 controls as a shortcut.
+
+## Preparing a candidate package
+
+The Windows build produces an unsigned DSP driver, two independent peripheral
+probe drivers and a static library. The library is a build dependency. Each
+peripheral probe needs its own ACPI match and translated Resource Hub connection.
+The DSP must not claim either peripheral's resources. Keep the USB and SoundWire
+extension templates outside the Pujjo candidate pending matching device evidence.
+
+Before creating a signed test package:
+
+1. Export the device tree, hardware and compatible IDs, subsystem identifiers,
+   translated resources and current driver-store package names from the target.
+   Record the OS build and firmware version alongside the inventory.
+2. Identify the approved ADL-N IPC4 image, its provenance and digest, and
+   compare the module UUIDs, resource records, SSP formats and DMIC geometry.
+3. Review each INF match and service against the inventory. Validate the
+   staged INF files with the matching WDK InfVerif. Generate catalogs from
+   the final files, sign through the authorized signing process and verify
+   each catalog and its member hashes before distribution.
+4. Preserve the existing signed packages and prepare an independent recovery
+   boot path. Rehearse removal and restoration on a disposable Windows image.
+   Record the published INF names so rollback targets only the candidate.
+5. On the Chromebook begin with read-only inventory and identity checks.
+   Qualify interrupt shutdown and DMA stop before firmware execution.
+   Qualify capture before playback. Speaker activation also requires confirmed
+   SDB polarity, calibration behavior, mute sequencing and safe gain limits.

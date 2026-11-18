@@ -374,7 +374,7 @@ SofFreeDmaBuffer(
  *
  * @param[in] Ctx Pointer to the SOF device context.
  */
-VOID
+NTSTATUS
 SofPowerDownDsp(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
@@ -384,11 +384,20 @@ SofPowerDownDsp(
     char bmsg[128];
 
     if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
-        return;
+        return STATUS_DEVICE_NOT_READY;
 
     bar4 = (PUCHAR)Ctx->Bar4VirtualAddress;
 
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomStatusReg, 4u))
+        return STATUS_INVALID_BUFFER_SIZE;
     if (Ctx->HwDesc->IsAce) {
+    ULONG pwrCtl = (Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_4_0 || Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_3_0) ? PTL_HFPWRCTL2 : MTL_HFPWRCTL;
+    ULONG pwrSts = (Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_4_0 || Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_3_0) ? PTL_HFPWRSTS2 : MTL_HFPWRSTS;
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, pwrCtl, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, pwrSts, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_HFDSSCS, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_DSP2CXCTL_PRIMARY_CORE, 4u))
+        return STATUS_INVALID_BUFFER_SIZE;
 
     /*
      * 1. Set Host CPU ownership and power down Primary Core:
@@ -401,29 +410,27 @@ SofPowerDownDsp(
     SofDspUpdateBits(bar4, MTL_DSP2CXCTL_PRIMARY_CORE,
                      MTL_DSP2CXCTL_PRIMARY_CORE_SPA_MASK, 0);
     KeStallExecutionProcessor(1000);
-    timeout = 5000;
-    while (timeout--) {
+    for (timeout = 0; timeout < 5000u; ++timeout) {
         ULONG ctl = SofDspRead32(bar4, MTL_DSP2CXCTL_PRIMARY_CORE);
         if (ctl != 0xFFFFFFFF && !(ctl & MTL_DSP2CXCTL_PRIMARY_CORE_CPA_MASK))
             break;
         KeStallExecutionProcessor(10);
     }
+    if (timeout == 5000u) return STATUS_IO_TIMEOUT;
 
     /*
      * 2. Gate domain power:
      * Clear WPDSPHPXPG bit to gate power to the DSP high-performance domain.
      */
-    ULONG pwrCtl = (Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_4_0 || Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_3_0) ? PTL_HFPWRCTL2 : MTL_HFPWRCTL;
-    ULONG pwrSts = (Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_4_0 || Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_3_0) ? PTL_HFPWRSTS2 : MTL_HFPWRSTS;
     SofDspUpdateBits(bar4, pwrCtl, MTL_HFPWRCTL_WPDSPHPXPG, 0);
     KeStallExecutionProcessor(1000);
-    timeout = 5000;
-    while (timeout--) {
+    for (timeout = 0; timeout < 5000u; ++timeout) {
         ULONG psts = SofDspRead32(bar4, pwrSts);
         if (psts != 0xFFFFFFFF && !(psts & MTL_HFPWRSTS_DSPHPXPGS_MASK))
             break;
         KeStallExecutionProcessor(10);
     }
+    if (timeout == 5000u) return STATUS_IO_TIMEOUT;
 
     /*
      * 3. Power down DSP Subsystem:
@@ -431,13 +438,13 @@ SofPowerDownDsp(
      */
     SofDspUpdateBits(bar4, MTL_HFDSSCS, MTL_HFDSSCS_SPA_MASK, 0);
     KeStallExecutionProcessor(1000);
-    timeout = 5000;
-    while (timeout--) {
+    for (timeout = 0; timeout < 5000u; ++timeout) {
         ULONG dsscs = SofDspRead32(bar4, MTL_HFDSSCS);
         if (dsscs != 0xFFFFFFFF && !(dsscs & MTL_HFDSSCS_CPA_MASK))
             break;
         KeStallExecutionProcessor(10);
     }
+    if (timeout == 5000u) return STATUS_IO_TIMEOUT;
 
     RtlStringCbPrintfA(bmsg, sizeof(bmsg),
         "[12-PWR] DSP powered down: Core0 CPA=%s, Subsystem CPA=%s, ROM_STS=0x%08x\n",
@@ -446,6 +453,8 @@ SofPowerDownDsp(
         SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg));
     SofLogBreadcrumb(bmsg);
     } else {
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPCS, 4u))
+            return STATUS_INVALID_BUFFER_SIZE;
         /*
          * cAVS power-down: Stall and reset Core 0, then clear SPA in ADSPCS.
          */
@@ -458,13 +467,13 @@ SofPowerDownDsp(
         SofDspUpdateBits(bar4, HDA_DSP_REG_ADSPCS,
                          HDA_DSP_ADSPCS_SPA_MASK(1), 0);
         KeStallExecutionProcessor(1000);
-        timeout = 5000;
-        while (timeout--) {
+        for (timeout = 0; timeout < 5000u; ++timeout) {
             ULONG adspcs = SofDspRead32(bar4, HDA_DSP_REG_ADSPCS);
             if (adspcs != 0xFFFFFFFF && !(adspcs & HDA_DSP_ADSPCS_CPA_MASK(1)))
                 break;
             KeStallExecutionProcessor(10);
         }
+        if (timeout == 5000u) return STATUS_IO_TIMEOUT;
 
         RtlStringCbPrintfA(bmsg, sizeof(bmsg),
             "[12-PWR] cAVS DSP powered down: ADSPCS=0x%08x, ROM_STS=0x%08x\n",
@@ -472,6 +481,7 @@ SofPowerDownDsp(
             SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg));
         SofLogBreadcrumb(bmsg);
     }
+    return STATUS_SUCCESS;
 }
 
 /* SD_CTL is 24 bits and shares a DWORD with the write-one-to-clear
@@ -824,6 +834,12 @@ SofStartFirmwareBoot(
     if (KeGetCurrentIrql() != PASSIVE_LEVEL)
         return STATUS_INVALID_DEVICE_STATE;
 
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIda, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdr, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomStatusReg, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomErrorReg, 4u))
+        return STATUS_INVALID_BUFFER_SIZE;
+
     /* Do not reset active ownership or a latched IPC fault. */
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
     if (Ctx->IpcTxBusy || Ctx->IpcFaulted ||
@@ -941,7 +957,8 @@ SofStartFirmwareBoot(
     SofFreeFirmwareBuffer(rawFw);
 
     /* 0. Ensure DSP is powered down and reset before configuring DMA */
-    SofPowerDownDsp(Ctx);
+    status = SofPowerDownDsp(Ctx);
+    if (!NT_SUCCESS(status)) goto boot_failed;
 
     /* Configure Code Loader stream on BAR0 */
     status = SofConfigureCodeLoaderDma(Ctx, &fwDma, &bdlDma, streamTag, &streamIndex);
@@ -1053,6 +1070,16 @@ SofStartFirmwareBoot(
                          HDA_DSP_ADSPCS_SPA_MASK(1),
                          HDA_DSP_ADSPCS_SPA_MASK(1));
 
+        for (timeout = 0; timeout < 5000u; ++timeout) {
+            ULONG power = SofDspRead32(bar4, HDA_DSP_REG_ADSPCS);
+            if (power != MAXULONG && (power & HDA_DSP_ADSPCS_CPA_MASK(1))) break;
+            KeStallExecutionProcessor(10);
+        }
+        if (timeout == 5000u) {
+            status = STATUS_IO_TIMEOUT;
+            goto boot_failed;
+        }
+
         /* Release reset and unstall Core 0 */
         SofDspUpdateBits(bar4, HDA_DSP_REG_ADSPCS,
                          HDA_DSP_ADSPCS_CRST_MASK(1),
@@ -1094,11 +1121,7 @@ SofStartFirmwareBoot(
 
     /* 4. Enable Host IPC Interrupts in DSP */
     if (Ctx->HwDesc->IsAce && Ctx->HwDesc->IntIpPtrReg) {
-        ULONG ptr = SofDspRead32(bar4, Ctx->HwDesc->IntIpPtrReg) & MTL_HFINTIPPTR_PTR_MASK;
-        SofDspUpdateBits(bar4, ptr + Ctx->HwDesc->IrqStsOffset, MTL_IRQ_INTEN_L_HOST_IPC_MASK, MTL_IRQ_INTEN_L_HOST_IPC_MASK);
-        SofDspUpdateBits(bar4, MTL_DSP_REG_HfHIPCIE, MTL_DSP_REG_HfHIPCIE_IE_MASK, MTL_DSP_REG_HfHIPCIE_IE_MASK);
-        SofDspUpdateBits(bar4, Ctx->HwDesc->HipcCtl, Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone,
-                         Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone);
+        SofIpcEnableInterrupts(Ctx);
     }
 
     /* Wait for ROM status FSR_STATE_INIT_DONE (0x1) before triggering DMA */

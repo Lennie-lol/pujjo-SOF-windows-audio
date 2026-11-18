@@ -708,6 +708,7 @@ SofEvtDeviceD0Entry(
 
     /* Start / re-arm Jack Poll Timer (1000ms periodic) */
     if (ctx->PortClsRegistered && ctx->PortEvents != NULL && ctx->JackPollTimer) {
+        InterlockedExchange(&ctx->JackPolling, TRUE);
         WdfTimerStart(ctx->JackPollTimer, WDF_REL_TIMEOUT_IN_MS(1000));
         SofLogBreadcrumb("[Jack] Started JackPollTimer (1000ms periodic)\n");
     }
@@ -772,9 +773,12 @@ SofEvtDeviceD0Exit(
         SofLogBreadcrumb(xmsg);
     }
 
+    InterlockedExchange(&ctx->JackPolling, FALSE);
+    if (ctx->JackPollTimer) WdfTimerStop(ctx->JackPollTimer, TRUE);
+
     /* Stop Watchdog Health Timer when leaving D0 */
     if (ctx->WatchdogHealthTimer) {
-        WdfTimerStop(ctx->WatchdogHealthTimer, FALSE);
+        WdfTimerStop(ctx->WatchdogHealthTimer, TRUE);
         SofLogBreadcrumb("[Watchdog] Stopped WatchdogHealthTimer\n");
 
         /* If cleanly leaving D0, reset ConsecutiveCrashCount */
@@ -850,7 +854,7 @@ SofEvtJackPollTimer(
 {
     WDFDEVICE device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(device);
-    if (ctx != NULL) {
+    if (ctx && InterlockedCompareExchange(&ctx->JackPolling, 0, 0)) {
         if (ctx->PortEvents != NULL) {
             SofCheckAndNotifyJackPresence(ctx);
         }

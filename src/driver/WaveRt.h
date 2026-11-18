@@ -17,6 +17,7 @@
 #include <ntddk.h>
 #include <wdf.h>
 #include <portcls.h>
+#include "Loader.h"
 #else
 #include <windows.h>
 #include <strsafe.h>
@@ -141,6 +142,9 @@ typedef struct _SOF_WAVERT_STREAM {
 #ifdef _KERNEL_MODE
     /** @brief Memory Descriptor List (MDL) for user-mode mapping into audiosrv. */
     PMDL                Mdl;
+    SOF_DMA_BUFFER      RingAllocation;
+    SOF_DMA_BUFFER      BdlAllocation;
+    BOOLEAN             DescriptorPublished;
 
     /** @brief User-mode virtual mapping address in Windows Audio Service. */
     PVOID               UserMapping;
