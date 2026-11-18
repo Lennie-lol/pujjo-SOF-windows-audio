@@ -1006,6 +1006,9 @@ SofStartFirmwareBoot(
      * Set DMA_START (RUN bit) in SD_CTL. The HD-A engine begins reading descriptors
      * and pushing firmware binary data into the DSP memory window.
      */
+    /* FW_READY is meaningful only after we have explicitly initiated this
+     * boot attempt. Notification received earlier must not mark us ready. */
+    Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS;
     writel(readl(bar0 + SOF_HDA_INTCTL) | (1 << streamIndex) | SOF_HDA_INT_GLOBAL_EN, bar0 + SOF_HDA_INTCTL);
     {
         ULONG ctlVal = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL));
@@ -1086,25 +1089,8 @@ SofStartFirmwareBoot(
                    "[SOF] Firmware boot timed out (ROM Status: 0x%08x, ERR: 0x%08x, LPIB: 0x%x, SD_STS: 0x%02x)\n",
                    statusReg, romErr, lpib, sdsts);
 
-        /* If default failed, try community-signed binary fallback */
-        if (!OptionalFwPath) {
-            WCHAR communityPath[128];
-            PCSTR socName = "tgl";
-            if (Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_4_0) socName = (Ctx->HwDesc->CoresNum == 2) ? "nvl-s" : "nvl";
-            else if (Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_3_0) socName = "ptl";
-            else if (Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_2_0) socName = "lnl";
-            else if (Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_1_0) socName = "mtl";
-            else if (Ctx->HwDesc->Family == SOF_HW_INTEL_CAVS_2_0) socName = "icl";
-            else if (Ctx->HwDesc->Family == SOF_HW_INTEL_CAVS_1_8) socName = "cnl";
-            else if (Ctx->HwDesc->Family == SOF_HW_INTEL_CAVS_1_5) socName = "apl";
-
-            RtlStringCbPrintfW(communityPath, sizeof(communityPath),
-                               L"\\SystemRoot\\System32\\drivers\\intel\\sof\\sof-%S-community.ri",
-                               socName);
-            SofLogBreadcrumb("[12f] Falling back to community firmware...\n");
-            return SofStartFirmwareBoot(Ctx, communityPath);
-        }
-
+        /* Fail closed. Never silently retry a different unreviewed firmware
+         * after a ROM/DMA boot failure, especially on the Pujjo ADL-N board. */
         Ctx->FwState = SOF_FW_BOOT_FAILED;
         return STATUS_IO_TIMEOUT;
     }
