@@ -546,18 +546,36 @@ SofIpcIsrCheck(
     ULONG tdr;
     ULONG ida;
 
-    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+        return FALSE;
+
+    /* Shared IRQs must never probe outside the mapped BAR. A malformed
+     * descriptor fails closed without acknowledging another device's IRQ. */
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdr, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIda, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u))
         return FALSE;
 
     /* For ACE platforms (MTL, LNL, PTL), verify top-level DSP IRQ status register */
     if (Ctx->HwDesc->IsAce && Ctx->HwDesc->IntIpPtrReg) {
-        ULONG ptr = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->IntIpPtrReg) & MTL_HFINTIPPTR_PTR_MASK;
-        ULONG irqSts = SofDspRead32(Ctx->Bar4VirtualAddress, ptr + MTL_DSP_IRQSTS);
-
-        /* Return FALSE immediately if register is unmapped (0xFFFFFFFF) or IPC bit is not set */
-        if (irqSts == 0xFFFFFFFF || !(irqSts & MTL_DSP_IRQSTS_IPC)) {
+        ULONG ptr;
+        ULONG irqSts;
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length,
+                                    Ctx->HwDesc->IntIpPtrReg, 4u))
             return FALSE;
-        }
+        ptr = SofDspRead32(Ctx->Bar4VirtualAddress,
+                           Ctx->HwDesc->IntIpPtrReg) & MTL_HFINTIPPTR_PTR_MASK;
+        /* Check before addition so even hostile firmware offsets cannot wrap. */
+        if (ptr > Ctx->Bar4Length ||
+            MTL_DSP_IRQSTS > Ctx->Bar4Length - ptr ||
+            !pj_ipc4_mmio_span_valid(Ctx->Bar4Length,
+                                    ptr + MTL_DSP_IRQSTS, 4u))
+            return FALSE;
+        irqSts = SofDspRead32(Ctx->Bar4VirtualAddress, ptr + MTL_DSP_IRQSTS);
+
+        /* Return FALSE if register is unmapped or IPC bit is not asserted. */
+        if (irqSts == 0xFFFFFFFF || !(irqSts & MTL_DSP_IRQSTS_IPC))
+            return FALSE;
     }
 
     /* Check whether DSP raised an incoming message (TDR BUSY) or acknowledged our command (IDA DONE) */
@@ -693,7 +711,8 @@ SofIpcDpcHandler(
                        "[SOF] IPC Notification: Type %u (0x%08x|0x%08x)\n",
                        notifyType, primary, extension);
 
-            if (pj_ipc4_is_fw_ready(primary)) {
+            if (pj_ipc4_is_fw_ready(primary) &&
+                Ctx->FwState == SOF_FW_BOOT_IN_PROGRESS) {
                 /* Firmware initialization complete and scheduler running */
                 char bmsg[128];
                 RtlStringCbPrintfA(bmsg, sizeof(bmsg),
