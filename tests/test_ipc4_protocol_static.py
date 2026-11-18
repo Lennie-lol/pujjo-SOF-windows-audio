@@ -67,3 +67,19 @@ for function,encoder in (
     assert body.index(encoder) < body.index('return SofIpc4SendGraphPacket(Ctx, result, &packet);')
     assert 'return STATUS_SUCCESS' not in body
 print('PASS: WDK graph commands use tested encoders and propagate real transport status')
+
+# All graph constructors must reserve IDs explicitly and release them only
+# after firmware confirms deletion. Failed allocation must not return ID zero.
+allocator=topo.split('NTSTATUS SofIpc4AllocInstanceId(',1)[1].split('VOID SofIpc4FreeInstanceId(',1)[0]
+assert '*OutInstanceId = 0xFFFFFFFFu;' in allocator
+assert 'if (!mask) return STATUS_NOT_SUPPORTED;' in allocator
+assert allocator.index('KeAcquireSpinLock') < allocator.index('*mask |=') < allocator.index('KeReleaseSpinLock')
+for name in ('Playback','Capture','Hdmi','Ssp','Dmic','Alh'):
+    body=topo.split('NTSTATUS SofIpc4Create'+name+'Pipeline(',1)[1].split('\n}',1)[0]
+    assert body.count('status = SofIpc4AllocInstanceId(')==3
+    for part in body.split('status = SofIpc4AllocInstanceId(')[1:]:
+        assert part.split(';',1)[1].lstrip().startswith('if (!NT_SUCCESS(status)) goto cleanup;')
+    cleanup=body.split('cleanup:',1)[1]
+    assert cleanup.index('if (NT_SUCCESS(SofIpc4DeletePipeline') < cleanup.index('SofIpc4FreeInstanceId')
+    assert cleanup.count('SofIpc4FreeInstanceId(')==3
+print('PASS: module ID allocation failures and pipeline deletion ownership checks')
