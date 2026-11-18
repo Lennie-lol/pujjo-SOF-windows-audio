@@ -80,6 +80,10 @@ SofIpcInitialize(
 
     RtlZeroMemory(Ctx->ReplyBuffer, Ctx->ReplyBufferSize);
     Ctx->IpcTxBusy = FALSE;
+    Ctx->IpcReplyReady = FALSE;
+    Ctx->IpcFaulted = FALSE;
+    Ctx->IpcRequestPrimary = 0;
+    RtlZeroMemory(&Ctx->PendingReply, sizeof(Ctx->PendingReply));
     Ctx->FwState = SOF_FW_BOOT_NOT_STARTED;
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
@@ -597,8 +601,16 @@ SofIpcDpcHandler(
 {
     ULONG ida;
     ULONG tdr;
+    BOOLEAN signalReply = FALSE;
 
-    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+        return;
+    /* Bounds check register windows actually used by this handler. */
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIda, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdr, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdd, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTda, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u))
         return;
 
     /*
@@ -653,24 +665,20 @@ SofIpcDpcHandler(
             KIRQL oldIrql;
             KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
 
-            Ctx->PendingReply.Primary = primary;
-            Ctx->PendingReply.Extension = extension;
-
-            /* If there is payload in the uplink mailbox, read it via 32-bit DWORD MMIO reads */
-            if (Ctx->ReplyBuffer && Ctx->HwDesc->MailboxUplinkSize > 0) {
-                volatile ULONG *src = (volatile ULONG *)((PUCHAR)Ctx->Bar4VirtualAddress + Ctx->HwDesc->MailboxUplinkOffset);
-                ULONG *dst = (ULONG *)Ctx->ReplyBuffer;
-                ULONG copyDwords = min(Ctx->ReplyBufferSize, Ctx->HwDesc->MailboxUplinkSize) / sizeof(ULONG);
-                for (ULONG i = 0; i < copyDwords; i++) {
-                    dst[i] = src[i];
-                }
-                Ctx->PendingReply.Payload = Ctx->ReplyBuffer;
-                Ctx->PendingReply.PayloadSize = min(Ctx->ReplyBufferSize, Ctx->HwDesc->MailboxUplinkSize);
+            /* IPC4 has no universal wire transaction ID. Never retry a
+             * timed-out session without a separately verified hardware reset. */
+            if (Ctx->IpcTxBusy && !Ctx->IpcReplyReady && !Ctx->IpcFaulted &&
+                pj_ipc4_reply_matches(Ctx->IpcRequestPrimary, primary)) {
+                Ctx->PendingReply.Primary = primary;
+                Ctx->PendingReply.Extension = extension;
+                /* Current commands need only headers; do not infer a payload
+                 * length from the size of the mapped mailbox. */
+                Ctx->PendingReply.Payload = NULL;
+                Ctx->PendingReply.PayloadSize = 0;
+                Ctx->IpcReplyReady = TRUE;
+                signalReply = TRUE;
             }
-
-            Ctx->IpcTxBusy = FALSE;
             KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
-            KeSetEvent(&Ctx->IpcReplyEvent, IO_NO_INCREMENT, FALSE);
 
             DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                        "[SOF] IPC Reply: Primary 0x%08x, Ext 0x%08x (status=0x%x)\n",
@@ -704,7 +712,15 @@ SofIpcDpcHandler(
                     primary, extension);
                 SofLogBreadcrumb(bmsg);
                 DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "%s", bmsg);
-                SofDspDumpCore(Ctx, "IPC4_NOTIFY_EXCEPTION_CAUGHT");
+                /* File dumps are not legal at DISPATCH_LEVEL. */
+                {
+                    KIRQL oldIrql;
+                    KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+                    Ctx->IpcFaulted = TRUE;
+                    Ctx->FwState = SOF_FW_BOOT_FAILED;
+                    KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+                    signalReply = TRUE;
+                }
             } else if (pj_ipc4_is_notification(primary) &&
                        notifyType == SOF_IPC4_NOTIFY_LOG_BUFFER_STATUS) {
                 /*
@@ -712,7 +728,9 @@ SofIpcDpcHandler(
                  * in its SRAM debug slot (CONFIG_LOG_BACKEND_ADSP_MTRACE).
                  */
                 ULONG core = SOF_IPC4_LOG_CORE_GET(primary);
-                SofIpc4DrainFwLogs(Ctx, core);
+                /* Defer SRAM log draining pending bounds/ownership review. */
+                DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
+                           "[SOF] Firmware log notification for core %u (drain disabled).\n", core);
             }
         }
 
@@ -751,6 +769,14 @@ SofIpcDpcHandler(
                          Ctx->HwDesc->HipcCtlBusy,
                          Ctx->HwDesc->HipcCtlBusy);
     }
+    /* Acknowledge device notification before waking the sender. */
+    if (signalReply) {
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+        if (Ctx->IpcTxBusy && (Ctx->IpcReplyReady || Ctx->IpcFaulted))
+            KeSetEvent(&Ctx->IpcReplyEvent, IO_NO_INCREMENT, FALSE);
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+    }
 }
 
 /**
@@ -784,12 +810,26 @@ SofIpcSendMessage(
     KIRQL oldIrql;
     LARGE_INTEGER timeout;
     NTSTATUS status = STATUS_IO_TIMEOUT;
-    ULONG elapsedMs = 0;
+    ULONG replyPrimary;
+    ULONG replyExtension;
 
     if (!Ctx || !Msg || TimeoutMs == 0 || TimeoutMs > 60000)
         return STATUS_INVALID_PARAMETER;
-    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return STATUS_INVALID_DEVICE_STATE;
+    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc || !Ctx->ReplyBuffer ||
+        Ctx->FwState != SOF_FW_BOOT_COMPLETE)
         return STATUS_DEVICE_NOT_READY;
+    if ((Msg->Primary & PJ_IPC4_RESERVED_MASK) != 0u ||
+        pj_ipc4_is_reply(Msg->Primary) || pj_ipc4_is_notification(Msg->Primary))
+        return STATUS_INVALID_PARAMETER;
+    /* Existing callers request headers only. Until response lengths are
+     * verified, refuse payload-bearing replies before MMIO. */
+    if (Reply && (Reply->Payload || Reply->PayloadSize != 0))
+        return STATUS_NOT_SUPPORTED;
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdr, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdd, 4u))
+        return STATUS_INVALID_BUFFER_SIZE;
     /* Do not silently truncate mailbox payloads or read past their source.
      * Round up only when the mapped mailbox can hold the padded DWORD. */
     if ((Msg->PayloadSize != 0 && !Msg->Payload) ||
@@ -797,15 +837,26 @@ SofIpcSendMessage(
         Msg->PayloadSize > Ctx->HwDesc->MailboxDownlinkSize ||
         ((Msg->PayloadSize + 3u) & ~3u) > Ctx->HwDesc->MailboxDownlinkSize)
         return STATUS_INVALID_BUFFER_SIZE;
+    if (Msg->PayloadSize && !pj_ipc4_mmio_span_valid(
+            Ctx->Bar4Length, Ctx->HwDesc->MailboxDownlinkOffset,
+            (Msg->PayloadSize + 3u) & ~3u))
+        return STATUS_INVALID_BUFFER_SIZE;
 
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
 
+    if (Ctx->IpcFaulted) {
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        return STATUS_DEVICE_NOT_READY;
+    }
     if (Ctx->IpcTxBusy) {
         KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
         return STATUS_DEVICE_BUSY;
     }
 
     Ctx->IpcTxBusy = TRUE;
+    Ctx->IpcReplyReady = FALSE;
+    Ctx->IpcRequestPrimary = Msg->Primary;
+    RtlZeroMemory(&Ctx->PendingReply, sizeof(Ctx->PendingReply));
     KeResetEvent(&Ctx->IpcReplyEvent);
 
     /*
@@ -855,78 +906,38 @@ SofIpcSendMessage(
                "[SOF] IPC TX Sent: Primary 0x%08x, Ext 0x%08x\n",
                Msg->Primary, Msg->Extension);
 
-    /*
-     * Synchronous Wait with Polling Fallback:
-     * Waits in 25ms increments. If an interrupt was delayed or missed by the kernel
-     * under heavy load, calls SofIpcDpcHandler directly to check hardware status.
-     */
-    while (elapsedMs < TimeoutMs) {
-        timeout.QuadPart = -10000LL * 25; /* 25ms */
-        status = KeWaitForSingleObject(&Ctx->IpcReplyEvent,
-                                       Executive,
-                                       KernelMode,
-                                       FALSE,
-                                       &timeout);
-        if (status == STATUS_SUCCESS) {
-            break;
-        }
-
-        /* Poll hardware registers directly */
-        SofIpcDpcHandler(Ctx);
-        if (KeReadStateEvent(&Ctx->IpcReplyEvent) != 0) {
-            status = STATUS_SUCCESS;
-            break;
-        }
-
-        elapsedMs += 25;
-    }
-
-    if (status != STATUS_SUCCESS) {
-        KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
-        Ctx->IpcTxBusy = FALSE; /* Reset busy flag so subsequent commands are not blocked */
+    /* Wait at passive level; do not also call the interrupt handler here.
+     * A timeout faults the session rather than permitting a late untagged
+     * response to satisfy a subsequent command. */
+    timeout.QuadPart = -10000LL * (LONGLONG)TimeoutMs;
+    status = KeWaitForSingleObject(&Ctx->IpcReplyEvent, Executive, KernelMode,
+                                   FALSE, &timeout);
+    KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+    if (status != STATUS_SUCCESS || !Ctx->IpcReplyReady || Ctx->IpcFaulted) {
+        Ctx->IpcFaulted = TRUE;
+        Ctx->IpcTxBusy = FALSE;
+        Ctx->IpcReplyReady = FALSE;
         KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
-
-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
-                   "[SOF] IPC TX Timed out waiting for DSP reply (%u ms, primary=0x%08x)!\n",
-                   TimeoutMs, Msg->Primary);
-        SofDspDumpCore(Ctx, "IPC_TRANSMIT_TIMEOUT");
-        return STATUS_IO_TIMEOUT;
+        return status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_DEVICE_NOT_READY;
     }
 
-    /* Copy pending reply data into caller's structure if requested */
+    replyPrimary = Ctx->PendingReply.Primary;
+    replyExtension = Ctx->PendingReply.Extension;
     if (Reply) {
-        KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
-        Reply->Primary = Ctx->PendingReply.Primary;
-        Reply->Extension = Ctx->PendingReply.Extension;
-        Reply->PayloadSize = Ctx->PendingReply.PayloadSize;
-        if (Reply->Payload && Ctx->PendingReply.Payload) {
-            RtlCopyMemory(Reply->Payload,
-                          Ctx->PendingReply.Payload,
-                          min(Reply->PayloadSize, Ctx->PendingReply.PayloadSize));
-        }
-        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        Reply->Primary = replyPrimary;
+        Reply->Extension = replyExtension;
+        Reply->PayloadSize = 0;
     }
+    Ctx->IpcReplyReady = FALSE;
+    Ctx->IpcTxBusy = FALSE;
+    KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
 
-    /* Check status field in IPC4 reply header (bits 0..23; 0 indicates success) */
-    {
-        ULONG replyStatus = Ctx->PendingReply.Primary & SOF_IPC4_REPLY_STATUS;
-        if (replyStatus != 0) {
-            char bmsg[160];
-            RtlStringCbPrintfA(bmsg, sizeof(bmsg),
-                "[IPC-ERR] Pri=0x%08x Ext=0x%08x RepPri=0x%08x RepExt=0x%08x (status=0x%x)\n",
-                Msg->Primary, Msg->Extension, Ctx->PendingReply.Primary, Ctx->PendingReply.Extension, replyStatus);
-            SofLogBreadcrumb(bmsg);
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL, "%s", bmsg);
-            return STATUS_UNSUCCESSFUL;
-        } else {
-            char bmsg[128];
-            RtlStringCbPrintfA(bmsg, sizeof(bmsg),
-                "[IPC-OK] Primary=0x%08x Reply=0x%08x\n",
-                Msg->Primary, Ctx->PendingReply.Primary);
-            SofLogBreadcrumb(bmsg);
-        }
+    if ((replyPrimary & SOF_IPC4_REPLY_STATUS) != 0u) {
+        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL,
+                   "[SOF] IPC firmware error: 0x%08x (extension 0x%08x)\n",
+                   replyPrimary, replyExtension);
+        return STATUS_UNSUCCESSFUL;
     }
-
     return STATUS_SUCCESS;
 }
 

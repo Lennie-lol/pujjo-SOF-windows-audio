@@ -11,6 +11,14 @@ static void protocol_tests(void)
     PJ_BYTE out[20]={0}, malformed[12]={0}, payload[5]={2u,3u,5u,7u,11u};
     pj_ipc4_packet p={0x02000010u,0xaabbccddu,payload,sizeof(payload)},decoded={0};
     PJ_SIZE n=123u;
+    assert(pj_ipc4_mmio_span_valid(4096u,0u,4u));
+    assert(pj_ipc4_mmio_span_valid(4096u,4092u,4u));
+    assert(!pj_ipc4_mmio_span_valid(4096u,4092u,8u));
+    assert(!pj_ipc4_mmio_span_valid(4096u,4096u,4u));
+    assert(!pj_ipc4_mmio_span_valid(4096u,1u,4u));
+    assert(!pj_ipc4_mmio_span_valid(4096u,4u,1u));
+    assert(!pj_ipc4_mmio_span_valid(4096u,0u,0u));
+    assert(!pj_ipc4_mmio_span_valid(0xffffffffu,0xfffffffcu,8u));
     assert(pj_ipc4_validate(NULL)==PJ_IPC4_BAD_PARAMETER);
     assert(pj_ipc4_validate(&p)==PJ_IPC4_VALID);
     assert(pj_ipc4_encode(&p,out,sizeof(out),&n)==PJ_IPC4_VALID && n==13u);

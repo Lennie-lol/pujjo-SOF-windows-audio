@@ -42,6 +42,8 @@ int pj_ipc4_is_reply(PJ_DWORD primary);
 int pj_ipc4_is_notification(PJ_DWORD primary);
 int pj_ipc4_is_fw_ready(PJ_DWORD primary);
 int pj_ipc4_reply_matches(PJ_DWORD request, PJ_DWORD reply);
+/* DWORD-aligned span inside an already mapped MMIO window; no I/O. */
+int pj_ipc4_mmio_span_valid(PJ_DWORD mapped_bytes, PJ_DWORD offset, PJ_DWORD bytes);
 #ifdef __cplusplus
 }
 #endif

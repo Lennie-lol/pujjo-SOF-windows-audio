@@ -45,7 +45,9 @@ void SofLogBreadcrumb(const char* text)
     HANDLE hFile;
     ULONG len = 0;
 
-    if (!text) return;
+    /* Zw file operations require PASSIVE_LEVEL and special APCs enabled. */
+    if (!text || KeGetCurrentIrql() != PASSIVE_LEVEL || KeAreAllApcsDisabled())
+        return;
     while (text[len]) len++;
 
     RtlInitUnicodeString(&fn, L"\\DosDevices\\C:\\sof_entry.txt");
