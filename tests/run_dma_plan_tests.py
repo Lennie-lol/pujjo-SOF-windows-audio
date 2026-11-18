@@ -217,3 +217,10 @@ port=(root/"src/driver/PortClsAdapter.cpp").read_text()
 for call in ("SofWaveRtGetVolume","SofWaveRtSetVolume","SofWaveRtGetMute","SofWaveRtSetMute"):
     assert "NTSTATUS status = "+call+"(" in port
 print("PASS: gain error propagation, per-channel restoration and control publication")
+
+for name in ("RegisterNotificationEvent", "UnregisterNotificationEvent", "SignalNotification"):
+    body = wave.split("SofWaveRt"+name+"(\n",1)[1].split("\n}",1)[0]
+    assert body.index("KeAcquireSpinLock") < body.index("Stream->NotificationEvents[") < body.index("KeReleaseSpinLock")
+position = wave.split("NTSTATUS SofWaveRtGetPosition(",1)[1].split("#else",1)[0]
+assert position.index("ctx->Bar0Length - offset") < position.index("position = readl") < position.index("*PositionBytes = position")
+assert "LinearPositionBytes +=" not in wave

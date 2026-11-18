@@ -86,7 +86,7 @@ print('PASS: module ID allocation failures and pipeline deletion ownership check
 
 # Gain commands share the tested single-block large config encoder.
 volume=topo.split('NTSTATUS SofIpc4SetVolumeCurve(',1)[1].split('\n}',1)[0]
-assert 'pj_ipc4_large_config_set(SOF_IPC4_MOD_ID_GAIN' in volume
+assert 'pj_ipc4_large_config_set(SofGraphWireId(Ctx, SOF_IPC4_MOD_ID_GAIN' in volume
 assert 'return SofIpc4SendGraphPacket(Ctx, result, &packet);' in volume
 assert 'GainInstanceId >= 256u' in volume
 assert 'VolumeLinear > SOF_IPC4_VOLUME_ZERO_DB' in volume

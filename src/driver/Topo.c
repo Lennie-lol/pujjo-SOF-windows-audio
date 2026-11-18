@@ -321,6 +321,24 @@ static ULONG s_CopierMask = 0;
 static ULONG s_GainMask = 0;
 #endif
 
+#ifdef _KERNEL_MODE
+/* The graph builders use logical roles. Translate at the IPC boundary. */
+static const pj_firmware_module *SofGraphModule(PSOF_DEVICE_CONTEXT Ctx, ULONG Role)
+{
+    if (!Ctx) return NULL;
+    if (Role == SOF_IPC4_MOD_ID_COPIER) return &Ctx->CopierModule;
+    if (Role == SOF_IPC4_MOD_ID_GAIN) return &Ctx->GainModule;
+    return NULL;
+}
+
+static ULONG SofGraphWireId(PSOF_DEVICE_CONTEXT Ctx, ULONG Role, ULONG Instance)
+{
+    const pj_firmware_module *module = SofGraphModule(Ctx, Role);
+    if (!module || Instance >= module->instance_max_count) return MAXULONG;
+    return module->module_id;
+}
+#endif
+
 NTSTATUS SofIpc4AllocInstanceId(
     _In_opt_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ ULONG ModuleId,
@@ -328,7 +346,7 @@ NTSTATUS SofIpc4AllocInstanceId(
 )
 {
     ULONG *mask = NULL;
-    ULONG i;
+    ULONG i, limit = 32u;
     NTSTATUS status = STATUS_INSUFFICIENT_RESOURCES;
 #ifdef _KERNEL_MODE
     KIRQL oldIrql;
@@ -337,6 +355,9 @@ NTSTATUS SofIpc4AllocInstanceId(
     *OutInstanceId = 0xFFFFFFFFu;
 
 #ifdef _KERNEL_MODE
+    const pj_firmware_module *module = SofGraphModule(Ctx, ModuleId);
+    if (!module || !module->instance_max_count) return STATUS_NOT_SUPPORTED;
+    limit = min(limit, module->instance_max_count);
     if (!Ctx) return STATUS_INVALID_PARAMETER;
     if (ModuleId == SOF_IPC4_MOD_ID_COPIER)
         mask = &Ctx->CopierInstanceMask;
@@ -353,7 +374,7 @@ NTSTATUS SofIpc4AllocInstanceId(
 #ifdef _KERNEL_MODE
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
 #endif
-    for (i = 0; i < 32u; ++i) {
+    for (i = 0; i < limit; ++i) {
         if (!(*mask & (1UL << i))) {
             *mask |= (1UL << i);
             *OutInstanceId = i;
@@ -410,7 +431,24 @@ NTSTATUS SofIpc4InitModuleInstance(
 {
 #ifdef _KERNEL_MODE
     pj_ipc4_packet packet = {0};
-    pj_ipc4_status result = pj_ipc4_module_init(ModuleId, InstanceId, PipelineId, CoreId, 0u, (const PJ_BYTE *)Payload, PayloadSize, &packet);
+    ULONG storage[64];
+    struct sof_ipc4_base_module_cfg *base = (struct sof_ipc4_base_module_cfg *)storage;
+    const pj_firmware_module *module = SofGraphModule(Ctx, ModuleId);
+    const pj_firmware_config *config;
+    pj_ipc4_status result;
+    if (!Payload || PayloadSize < sizeof(*base) || PayloadSize > sizeof(storage))
+        return STATUS_INVALID_BUFFER_SIZE;
+    if (!module || CoreId >= 32u || !(module->affinity_mask & (1u << CoreId)))
+        return STATUS_NOT_SUPPORTED;
+    config = ModuleId == SOF_IPC4_MOD_ID_COPIER ? &Ctx->CopierConfig : &Ctx->GainConfig;
+    RtlCopyMemory(storage, Payload, PayloadSize);
+    if (!config->ibs || base->ibs != config->ibs || base->obs != config->obs)
+        return STATUS_NOT_SUPPORTED;
+    base->cpc = config->cpc;
+    base->is_pages = config->instance_bytes / PAGE_SIZE +
+                     (config->instance_bytes % PAGE_SIZE != 0u);
+    result = pj_ipc4_module_init(SofGraphWireId(Ctx, ModuleId, InstanceId),
+        InstanceId, PipelineId, CoreId, 0u, (const PJ_BYTE *)storage, PayloadSize, &packet);
     return SofIpc4SendGraphPacket(Ctx, result, &packet);
 #else
     SOF_IPC_MESSAGE msg = {0};
@@ -446,7 +484,7 @@ NTSTATUS SofIpc4BindModules(
 {
 #ifdef _KERNEL_MODE
     pj_ipc4_packet packet = {0};
-    pj_ipc4_status result = pj_ipc4_module_link(1u, SrcModuleId, SrcInstanceId, SrcQueue, DstModuleId, DstInstanceId, DstQueue, &packet);
+    pj_ipc4_status result = pj_ipc4_module_link(1u, SofGraphWireId(Ctx, SrcModuleId, SrcInstanceId), SrcInstanceId, SrcQueue, SofGraphWireId(Ctx, DstModuleId, DstInstanceId), DstInstanceId, DstQueue, &packet);
     return SofIpc4SendGraphPacket(Ctx, result, &packet);
 #else
     SOF_IPC_MESSAGE msg = {0};
@@ -478,7 +516,7 @@ NTSTATUS SofIpc4UnbindModules(
 {
 #ifdef _KERNEL_MODE
     pj_ipc4_packet packet = {0};
-    pj_ipc4_status result = pj_ipc4_module_link(0u, SrcModuleId, SrcInstanceId, SrcQueue, DstModuleId, DstInstanceId, DstQueue, &packet);
+    pj_ipc4_status result = pj_ipc4_module_link(0u, SofGraphWireId(Ctx, SrcModuleId, SrcInstanceId), SrcInstanceId, SrcQueue, SofGraphWireId(Ctx, DstModuleId, DstInstanceId), DstInstanceId, DstQueue, &packet);
     return SofIpc4SendGraphPacket(Ctx, result, &packet);
 #else
     SOF_IPC_MESSAGE msg = {0};
@@ -607,7 +645,7 @@ NTSTATUS SofIpc4SetVolumeCurve(
     params.curve_duration_h = 0;
 
 #ifdef _KERNEL_MODE
-    result = pj_ipc4_large_config_set(SOF_IPC4_MOD_ID_GAIN, GainInstanceId,
+    result = pj_ipc4_large_config_set(SofGraphWireId(Ctx, SOF_IPC4_MOD_ID_GAIN, GainInstanceId), GainInstanceId,
         SOF_IPC4_GAIN_PARAM_ID, (const PJ_BYTE *)&params, sizeof(params), &packet);
     return SofIpc4SendGraphPacket(Ctx, result, &packet);
 #else

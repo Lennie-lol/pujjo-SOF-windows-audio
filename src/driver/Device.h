@@ -39,6 +39,7 @@ typedef struct _HDAUDIO_CONVERTER_FORMAT { USHORT ConverterFormat; } HDAUDIO_CON
 #endif
 #include <sof/sof_osal.h>
 #include "PciIds.h"
+#include "PujjoFirmwareCatalog.h"
 #include "Hw.h"
 #include "Ipc.h"
 #include "Nhlt.h"
@@ -166,6 +167,10 @@ typedef struct _SOF_DEVICE_CONTEXT {
     WDFINTERRUPT        WdfInterrupt;
 
     /** @brief WDF framework DMA enabler handle for scatter/gather mapping. */
+    pj_firmware_module CopierModule;
+    pj_firmware_module GainModule;
+    pj_firmware_config CopierConfig;
+    pj_firmware_config GainConfig;
     WDFDMAENABLER       DmaEnabler;
 
     /* PCI Identity */

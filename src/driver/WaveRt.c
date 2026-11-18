@@ -63,9 +63,6 @@ static VOID SofWaveRtTimerDpc(
     UNREFERENCED_PARAMETER(SystemArgument2);
 
     if (stream != NULL && stream->State == KSSTATE_RUN) {
-        if (stream->BufferSizeBytes > 0 && stream->PeriodSizeBytes > 0) {
-            stream->LinearPositionBytes += stream->PeriodSizeBytes;
-        }
         SofWaveRtSignalNotification(stream);
     }
 }
@@ -295,6 +292,7 @@ NTSTATUS SofWaveRtCreateStream(
         stream->Bdl[1].Ioc = 1;
 
         /* Initialize timer and DPC for period notifications */
+        KeInitializeSpinLock(&stream->NotificationLock);
         KeInitializeDpc(&stream->NotificationDpc, SofWaveRtTimerDpc, stream);
         KeInitializeTimer(&stream->NotificationTimer);
     }
@@ -700,11 +698,21 @@ NTSTATUS SofWaveRtGetPosition(
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (Stream->BufferSizeBytes > 0) {
-        *PositionBytes = Stream->LinearPositionBytes % Stream->BufferSizeBytes;
-    } else {
-        *PositionBytes = 0;
-    }
+#ifdef _KERNEL_MODE
+    PSOF_DEVICE_CONTEXT ctx = Stream->DeviceContext;
+    ULONG offset, position;
+    if (!ctx || !ctx->Bar0VirtualAddress || Stream->StreamIndex >= 30u)
+        return STATUS_DEVICE_NOT_READY;
+    offset = SOF_HDA_STREAM_REG_OFFSET(Stream->StreamIndex) + SOF_HDA_ADSP_REG_SD_LPIB;
+    if (offset > ctx->Bar0Length || sizeof(ULONG) > ctx->Bar0Length - offset)
+        return STATUS_INVALID_BUFFER_SIZE;
+    position = readl((PUCHAR)ctx->Bar0VirtualAddress + offset);
+    if (position >= Stream->BufferSizeBytes) return STATUS_DEVICE_NOT_READY;
+    *PositionBytes = position;
+#else
+    if (!Stream->BufferSizeBytes) return STATUS_INVALID_BUFFER_SIZE;
+    *PositionBytes = Stream->LinearPositionBytes % Stream->BufferSizeBytes;
+#endif
     return STATUS_SUCCESS;
 }
 
@@ -756,12 +764,22 @@ NTSTATUS SofWaveRtRegisterNotificationEvent(
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (Stream->NumNotificationEvents >= SOF_WAVERT_MAX_EVENTS) {
-        return STATUS_INSUFFICIENT_RESOURCES;
+    NTSTATUS status = STATUS_SUCCESS;
+#ifdef _KERNEL_MODE
+    KIRQL irql;
+    KeAcquireSpinLock(&Stream->NotificationLock, &irql);
+#endif
+    ULONG i;
+    for (i = 0; i < Stream->NumNotificationEvents; ++i)
+        if (Stream->NotificationEvents[i] == NotificationEvent) break;
+    if (i == Stream->NumNotificationEvents) {
+        if (i == SOF_WAVERT_MAX_EVENTS) status = STATUS_INSUFFICIENT_RESOURCES;
+        else Stream->NotificationEvents[Stream->NumNotificationEvents++] = NotificationEvent;
     }
-
-    Stream->NotificationEvents[Stream->NumNotificationEvents++] = NotificationEvent;
-    return STATUS_SUCCESS;
+#ifdef _KERNEL_MODE
+    KeReleaseSpinLock(&Stream->NotificationLock, irql);
+#endif
+    return status;
 }
 
 /**
@@ -782,17 +800,27 @@ NTSTATUS SofWaveRtUnregisterNotificationEvent(
         return STATUS_INVALID_PARAMETER;
     }
 
+    NTSTATUS status = STATUS_NOT_FOUND;
+#ifdef _KERNEL_MODE
+    KIRQL irql;
+    KeAcquireSpinLock(&Stream->NotificationLock, &irql);
+#endif
     for (i = 0; i < Stream->NumNotificationEvents; i++) {
         if (Stream->NotificationEvents[i] == NotificationEvent) {
             for (j = i; j < Stream->NumNotificationEvents - 1; j++) {
                 Stream->NotificationEvents[j] = Stream->NotificationEvents[j + 1];
             }
             Stream->NumNotificationEvents--;
-            return STATUS_SUCCESS;
+            Stream->NotificationEvents[Stream->NumNotificationEvents] = NULL;
+            status = STATUS_SUCCESS;
+            break;
         }
     }
 
-    return STATUS_NOT_FOUND;
+#ifdef _KERNEL_MODE
+    KeReleaseSpinLock(&Stream->NotificationLock, irql);
+#endif
+    return status;
 }
 
 /**
@@ -811,11 +839,14 @@ VOID SofWaveRtSignalNotification(
     }
 
 #ifdef _KERNEL_MODE
+    KIRQL irql;
+    KeAcquireSpinLock(&Stream->NotificationLock, &irql);
     for (i = 0; i < Stream->NumNotificationEvents; i++) {
         if (Stream->NotificationEvents[i] != NULL) {
             KeSetEvent((PKEVENT)Stream->NotificationEvents[i], 0, FALSE);
         }
     }
+    KeReleaseSpinLock(&Stream->NotificationLock, irql);
 #else
     UNREFERENCED_PARAMETER(i);
 #endif
@@ -1351,12 +1382,7 @@ NTSTATUS SofWaveRtGetPeakMeter(
         return STATUS_SUCCESS;
     }
 
-    /* When running and unmuted: return current volume level as peak */
-    if (Channel == 1) {
-        *PeakMeterDbOut = Stream->VolumeLevelDb[1];
-    } else {
-        *PeakMeterDbOut = Stream->VolumeLevelDb[0];
-    }
-
-    return STATUS_SUCCESS;
+    /* Active peak reporting requires a measured sample or DSP meter. */
+    UNREFERENCED_PARAMETER(Channel);
+    return STATUS_NOT_SUPPORTED;
 }

@@ -146,6 +146,7 @@ typedef struct _SOF_WAVERT_STREAM {
     PVOID               UserMapping;
 
     /** @brief DPC worker for periodic notification timer callbacks. */
+    KSPIN_LOCK          NotificationLock;
     KDPC                NotificationDpc;
 
     /** @brief High-resolution kernel timer for period notifications. */

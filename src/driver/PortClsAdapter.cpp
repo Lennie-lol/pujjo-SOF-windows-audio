@@ -232,9 +232,9 @@ public:
     STDMETHODIMP GetPosition(PKSAUDIO_POSITION Position) {
         if (Position == NULL) return STATUS_INVALID_PARAMETER;
         ULONG bytePos = 0;
-        if (m_Stream != NULL) {
-            SofWaveRtGetPosition(m_Stream, &bytePos);
-        }
+        if (!m_Stream) return STATUS_DEVICE_NOT_READY;
+        NTSTATUS status = SofWaveRtGetPosition(m_Stream, &bytePos);
+        if (!NT_SUCCESS(status)) return status;
         Position->PlayOffset = bytePos;
         Position->WriteOffset = bytePos;
         return STATUS_SUCCESS;
@@ -1152,7 +1152,7 @@ static NTSTATUS PropertyHandler_PeakMeter(
     }
 
     LONG channel = 0;
-    if (PropertyRequest->InstanceSize >= sizeof(KSNODEPROPERTY_AUDIO_CHANNEL)) {
+    if (PropertyRequest->Instance && PropertyRequest->InstanceSize >= sizeof(KSNODEPROPERTY_AUDIO_CHANNEL)) {
         PKSNODEPROPERTY_AUDIO_CHANNEL chanProp = (PKSNODEPROPERTY_AUDIO_CHANNEL)PropertyRequest->Instance;
         channel = chanProp->Channel;
     }
@@ -1175,7 +1175,8 @@ static NTSTATUS PropertyHandler_PeakMeter(
 
         LONG peakDb = SOF_VOLUME_MIN_DB_UNITS;
         if (stream != NULL) {
-            SofWaveRtGetPeakMeter(stream, channel, &peakDb);
+            NTSTATUS status = SofWaveRtGetPeakMeter(stream, channel, &peakDb);
+            if (!NT_SUCCESS(status)) return status;
         }
 
         *(PLONG)PropertyRequest->Value = peakDb;

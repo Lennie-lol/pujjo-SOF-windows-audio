@@ -890,6 +890,27 @@ SofStartFirmwareBoot(
         targetPath, rawFwSize, fwInfo.PayloadSize);
     SofLogBreadcrumb(bmsg);
 
+    /* SOF uuid-registry.txt, in manifest GUID byte order. A firmware image
+     * can boot without these modules. Graph operations require a match. */
+    {
+        static const PJ_BYTE copierUuid[16] = {
+            0x83,0x0c,0xa0,0x9b,0x12,0xca,0x83,0x4a,0x94,0x3c,0x1f,0xa2,0xe8,0x2f,0x9d,0xda
+        };
+        static const PJ_BYTE gainUuid[16] = {
+            0xa8,0xa9,0xbc,0x61,0xd0,0x18,0x18,0x4a,0x8e,0x7b,0x26,0x39,0x21,0x98,0x04,0xb7
+        };
+        RtlZeroMemory(&Ctx->CopierModule, sizeof(Ctx->CopierModule));
+        RtlZeroMemory(&Ctx->GainModule, sizeof(Ctx->GainModule));
+        (void)pj_firmware_find_module(rawFw, rawFwSize, copierUuid, &Ctx->CopierModule);
+        (void)pj_firmware_find_module(rawFw, rawFwSize, gainUuid, &Ctx->GainModule);
+        /* Current graph profile: one millisecond of 48 kHz stereo PCM
+         * in 32-bit containers. Other geometries require their own record. */
+        RtlZeroMemory(&Ctx->CopierConfig, sizeof(Ctx->CopierConfig));
+        RtlZeroMemory(&Ctx->GainConfig, sizeof(Ctx->GainConfig));
+        (void)pj_firmware_find_config(rawFw, rawFwSize, copierUuid, 384u, 384u, &Ctx->CopierConfig);
+        (void)pj_firmware_find_config(rawFw, rawFwSize, gainUuid, 384u, 384u, &Ctx->GainConfig);
+    }
+
     /* Allocate Contiguous DMA Buffer for Firmware Payload */
     status = SofAllocateDmaBuffer(Ctx, fwInfo.PayloadSize, &fwDma);
     if (!NT_SUCCESS(status)) {
@@ -948,23 +969,29 @@ SofStartFirmwareBoot(
         /* Step 1a: Power ON DSP Subsystem */
         SofDspUpdateBits(bar4, MTL_HFDSSCS, MTL_HFDSSCS_SPA_MASK, MTL_HFDSSCS_SPA_MASK);
         KeStallExecutionProcessor(1000);
-        timeout = 5000;
-        while (timeout--) {
+        for (timeout = 0; timeout < 5000u; ++timeout) {
             ULONG dsscs = SofDspRead32(bar4, MTL_HFDSSCS);
             if (dsscs != 0xFFFFFFFF && (dsscs & MTL_HFDSSCS_CPA_MASK))
                 break;
             KeStallExecutionProcessor(10);
         }
+        if (timeout == 5000u) {
+            status = STATUS_IO_TIMEOUT;
+            goto boot_failed;
+        }
 
         /* Step 1b: Un-gate DSP-0 Domain */
         SofDspUpdateBits(bar4, pwrCtl, MTL_HFPWRCTL_WPDSPHPXPG, MTL_HFPWRCTL_WPDSPHPXPG);
         KeStallExecutionProcessor(1000);
-        timeout = 5000;
-        while (timeout--) {
+        for (timeout = 0; timeout < 5000u; ++timeout) {
             ULONG psts = SofDspRead32(bar4, pwrSts);
             if (psts != 0xFFFFFFFF && (psts & MTL_HFPWRSTS_DSPHPXPGS_MASK))
                 break;
             KeStallExecutionProcessor(10);
+        }
+        if (timeout == 5000u) {
+            status = STATUS_IO_TIMEOUT;
+            goto boot_failed;
         }
 
         RtlStringCbPrintfA(bmsg, sizeof(bmsg),
@@ -1003,12 +1030,15 @@ SofStartFirmwareBoot(
         KeStallExecutionProcessor(1000);
 
         /* Poll for CPA confirmation (bit 8, ensure not 0xFFFFFFFF) */
-        timeout = 5000;
-        while (timeout--) {
+        for (timeout = 0; timeout < 5000u; ++timeout) {
             ULONG ctlVal = SofDspRead32(bar4, MTL_DSP2CXCTL_PRIMARY_CORE);
             if (ctlVal != 0xFFFFFFFF && (ctlVal & MTL_DSP2CXCTL_PRIMARY_CORE_CPA_MASK))
                 break;
             KeStallExecutionProcessor(10);
+        }
+        if (timeout == 5000u) {
+            status = STATUS_IO_TIMEOUT;
+            goto boot_failed;
         }
 
         RtlStringCbPrintfA(bmsg, sizeof(bmsg),
@@ -1038,12 +1068,19 @@ SofStartFirmwareBoot(
     }
 
     /* Wait for ROM IPC ACK in HIPCIDA */
-    timeout = 2000;
-    while (timeout--) {
+    for (timeout = 0; timeout < 2000u; ++timeout) {
         ULONG ack = SofDspRead32(bar4, Ctx->HwDesc->HipcIda);
+        if (ack == 0xFFFFFFFFu) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto boot_failed;
+        }
         if (ack & Ctx->HwDesc->HipcIdaDone)
             break;
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
+    }
+    if (timeout == 2000u) {
+        status = STATUS_IO_TIMEOUT;
+        goto boot_failed;
     }
 
     /* Acknowledge ROM */
@@ -1065,13 +1102,16 @@ SofStartFirmwareBoot(
     }
 
     /* Wait for ROM status FSR_STATE_INIT_DONE (0x1) before triggering DMA */
-    timeout = 1000;
-    while (timeout--) {
+    for (timeout = 0; timeout < 1000u; ++timeout) {
         statusReg = SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg);
         if (FSR_TO_STATE_CODE(statusReg) == FSR_STATE_INIT_DONE ||
             FSR_TO_STATE_CODE(statusReg) == FSR_STATE_FW_ENTERED)
             break;
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
+    }
+    if (timeout == 1000u) {
+        status = STATUS_IO_TIMEOUT;
+        goto boot_failed;
     }
 
     /*
@@ -1084,14 +1124,23 @@ SofStartFirmwareBoot(
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
     Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS;
     KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
-    writel(readl(bar0 + SOF_HDA_INTCTL) | (1 << streamIndex) | SOF_HDA_INT_GLOBAL_EN, bar0 + SOF_HDA_INTCTL);
+    status = STATUS_SUCCESS;
     {
         ULONG ctlVal = SofCodeLoaderReadControl(streamRegs);
+        if (ctlVal == 0xFFFFFFFFu || (ctlVal & SOF_HDA_SD_CTL_DMA_START)) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto dma_unconfirmed;
+        }
         ctlVal |= SOF_HDA_SD_CTL_DMA_START | SOF_HDA_CL_DMA_SD_INT_MASK;
         SofCodeLoaderWriteControl(streamRegs, ctlVal);
 
         KeStallExecutionProcessor(50);
         ULONG ctlAfter = SofCodeLoaderReadControl(streamRegs);
+
+        if (ctlAfter == 0xFFFFFFFFu || !(ctlAfter & SOF_HDA_SD_CTL_DMA_START)) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto stop_dma;
+        }
 
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                    "[SOF] Code loader DMA triggered on stream %u (offset 0x%x, SD_CTL=0x%08x RUN=%s), streaming firmware...\n",
@@ -1136,11 +1185,27 @@ SofStartFirmwareBoot(
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
     }
 
+stop_dma:
     /* 7. Stop Code Loader DMA and disable SPIB */
     {
         ULONG ctlVal = SofCodeLoaderReadControl(streamRegs);
+        if (ctlVal == 0xFFFFFFFFu) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto dma_unconfirmed;
+        }
         ctlVal &= ~SOF_HDA_SD_CTL_DMA_START;
         SofCodeLoaderWriteControl(streamRegs, ctlVal);
+
+        for (timeout = 0; timeout < 500u; ++timeout) {
+            ctlVal = SofCodeLoaderReadControl(streamRegs);
+            if (ctlVal != 0xFFFFFFFFu && !(ctlVal & SOF_HDA_SD_CTL_DMA_START))
+                break;
+            KeStallExecutionProcessor(10);
+        }
+        if (timeout == 500u) {
+            status = STATUS_IO_TIMEOUT;
+            goto dma_unconfirmed;
+        }
 
         if (Ctx->SpbCapOffset) {
             PUCHAR spibBar = bar0 + Ctx->SpbCapOffset;
@@ -1150,6 +1215,8 @@ SofStartFirmwareBoot(
                    spibBar + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL);
         }
     }
+
+    if (!NT_SUCCESS(status)) goto boot_failed;
 
     /* 8. Cleanup staging DMA buffers */
     SofFreeDmaBuffer(Ctx, &bdlDma);
@@ -1225,6 +1292,18 @@ SofStartFirmwareBoot(
         SofPowerDownDsp(Ctx);
         return status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_DEVICE_NOT_READY;
     }
+boot_failed:
+    /* RUN was never issued or was confirmed clear. */
+    SofFreeDmaBuffer(Ctx, &bdlDma);
+    SofFreeDmaBuffer(Ctx, &fwDma);
+dma_unconfirmed:
+    /* On an unconfirmed stop the common buffers stay parented to the WDF
+     * DMA enabler for device destruction. Latch the fault to exclude reuse. */
+    KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+    Ctx->FwState = SOF_FW_BOOT_FAILED;
+    Ctx->IpcFaulted = TRUE;
+    KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+    return status;
 #endif /* PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT */
 }
 
