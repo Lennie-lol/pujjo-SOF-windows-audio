@@ -130,11 +130,13 @@ extern "C" {
 /* Standard Gateway Node Types */
 #define SOF_IPC4_GTW_HOST                   0   /**< HD/A Host DMA Output (Playback) */
 #define SOF_IPC4_GTW_HOST_IN                1   /**< HD/A Host DMA Input (Capture) */
-#define SOF_IPC4_GTW_SSP                    2   /**< Intel SSP / I2S Gateway */
-#define SOF_IPC4_GTW_ALH                    4   /**< Audio Link Hub (SoundWire) */
 #define SOF_IPC4_GTW_HDA                    8   /**< HD/A Link Output (Codec Playback) */
 #define SOF_IPC4_GTW_HDA_IN                 9   /**< HD/A Link Input (Codec Capture) */
 #define SOF_IPC4_GTW_DMIC                   11  /**< Digital Mic Array (PDM) */
+#define SOF_IPC4_GTW_SSP_OUT                12
+#define SOF_IPC4_GTW_SSP_IN                 13
+#define SOF_IPC4_GTW_ALH_OUT                16
+#define SOF_IPC4_GTW_ALH_IN                 17
 
 /* Volume Constants */
 #define SOF_IPC4_VOLUME_ZERO_DB             0x7fffffff  /**< Unity gain (0 dB) in Q1.31 linear representation */
@@ -188,8 +190,10 @@ typedef struct _SOF_COPIER_PARAMS {
     ULONG NodeType;             /**< Gateway type (SOF_IPC4_GTW_*) */
     ULONG NodeIndex;            /**< Stream ID - 1 for Host, DAI index for DAI */
     ULONG BufferSize;           /**< Buffer size in bytes (typically 4ms) */
-    ULONG AlhStreamId;          /**< ALH Stream ID for SoundWire (Gateway 4) */
+    ULONG AlhStreamId;          /**< ALH stream ID for SoundWire */
     SOF_AUDIO_FORMAT_PARAMS AudioFormat; /**< Associated audio format */
+    const UCHAR *GatewayConfig; /**< SSP or DMIC NHLT configuration, including attributes */
+    ULONG GatewayConfigBytes;
 } SOF_COPIER_PARAMS, *PSOF_COPIER_PARAMS;
 
 /**

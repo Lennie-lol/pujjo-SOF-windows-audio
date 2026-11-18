@@ -5,10 +5,11 @@ root = Path(__file__).resolve().parents[1]
 ipc = (root / "src/driver/Ipc.c").read_text()
 send = ipc.split("NTSTATUS\nSofIpcSendWhilePowered(", 1)[1].split("\n/**", 1)[0]
 dpc = ipc.split("VOID\nSofIpcDpcHandler(", 1)[1].split("\n/**", 1)[0]
-assert "Reply && (Reply->Payload || Reply->PayloadSize != 0)" in send
-assert send.index("Reply &&") < send.index("WRITE_REGISTER_ULONG")
-assert "Reply->PayloadSize = 0;" in send
-assert "RtlCopyMemory(Reply->Payload" not in send
+assert "Reply && ((capacity != 0) != (Reply->Payload != NULL))" in send
+assert send.index("PJ_IPC4_MODULE_LARGE_GET") < send.index("MailboxUplinkSize") < send.index("WRITE_REGISTER_ULONG")
+assert send.index("MailboxUplinkOffset") < send.index("RtlCopyMemory(Reply->Payload")
+assert dpc.index("pj_ipc4_reply_matches") < dpc.index("pj_ipc4_large_reply_size") < dpc.index("READ_REGISTER_ULONG((PULONG)(mailbox + i))")
+assert "Reply->PayloadSize = Ctx->PendingReply.PayloadSize;" in send
 assert "pj_ipc4_mmio_span_valid" in send and "pj_ipc4_mmio_span_valid" in dpc
 assert "Ctx->IpcTxBusy && !Ctx->IpcReplyReady && !Ctx->IpcFaulted" in dpc
 assert "pj_ipc4_reply_matches(Ctx->IpcRequestPrimary, primary)" in dpc
@@ -20,7 +21,7 @@ assert "SofDspDumpCore(" not in dpc and "SofIpc4DrainFwLogs(" not in dpc
 assert "KeGetCurrentIrql() != PASSIVE_LEVEL" in send
 logger = (root / "src/driver/Driver.c").read_text().split("void SofLogBreadcrumb(", 1)[1]
 assert logger.index("KeAreAllApcsDisabled()") < logger.index("ZwCreateFile(")
-print("PASS: header-only response contract, mapped range checks, reply ownership and timeout fault latch")
+print("PASS: single-block response contract, mapped range checks, reply ownership and timeout fault latch")
 
 # Hardware busy must be checked while holding the software transmit lock and
 # before touching either the mailbox or extension/primary registers.

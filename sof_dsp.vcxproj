@@ -75,7 +75,7 @@
     <Link>
       <SubSystem>Native</SubSystem>
       <Driver>Driver</Driver>
-      <AdditionalDependencies>portcls.lib;Aux_Klib.lib;ks.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>portcls.lib;Aux_Klib.lib;ks.lib;Cng.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
     </Link>
@@ -96,7 +96,7 @@
     <Link>
       <SubSystem>Native</SubSystem>
       <Driver>Driver</Driver>
-      <AdditionalDependencies>portcls.lib;Aux_Klib.lib;ks.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>portcls.lib;Aux_Klib.lib;ks.lib;Cng.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
     </Link>

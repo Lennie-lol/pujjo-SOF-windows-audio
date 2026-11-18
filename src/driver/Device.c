@@ -23,11 +23,7 @@
 #include "Topo.h"
 #include "WaveRt.h"
 #include "PortClsAdapter.h"
-#include "HdaVerb.h"
 #include "HdaBusInterface.h"
-#include "SdwController.h"
-#include "UsbOffload.h"
-#include "UaolGateway.h"
 #include <ntstrsafe.h>
 #include <initguid.h>
 #include <wdmguid.h>
@@ -286,30 +282,14 @@ SofEvtDevicePrepareHardware(
     status = SofDiscoverHdaCaps(ctx);
     if (!NT_SUCCESS(status)) goto PreparationFailed;
 
-    /*
-     * Read codec wake/status without resetting HDA link or DSP state.
-     * Recovery from stuck Immediate Command Busy (ICB) must be a separate
-     * validated hardware operation, never part of PnP discovery.
-     */
-    if (ctx->Bar0VirtualAddress) {
-        /* The caller is still in resource discovery: no CRST writes. */
-        if (ctx->Bar0Length < SOF_HDA_WAKESTS + sizeof(USHORT) ||
-            ctx->Bar0Length < SOF_HDA_REG_ICS + sizeof(USHORT)) {
-            status = STATUS_INVALID_BUFFER_SIZE;
-            goto PreparationFailed;
-        }
-        if (readw((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_REG_ICS) & SOF_HDA_ICS_ICB)
-            SofLogBreadcrumb("[HDA] ICB busy during read-only discovery (no reset)\n");
-
-        USHORT wakests = readw((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_WAKESTS);
-        ctx->HdaCodecPresent = (wakests & SOF_HDA_WAKESTS_SDIN0) ? TRUE : FALSE;
-        ctx->IDispCodecPresent = (wakests & SOF_HDA_WAKESTS_SDIN2) ? TRUE : FALSE;
-        RtlStringCbPrintfA(msg, sizeof(msg),
-            "[9a] HDA Codec Probe: WAKESTS=0x%04X -> HdaCodecPresent=%s, IDispCodecPresent=%s\n",
-            wakests, ctx->HdaCodecPresent ? "TRUE" : "FALSE",
-            ctx->IDispCodecPresent ? "TRUE" : "FALSE");
-        SofLogBreadcrumb(msg);
+    /* Controller status is observed without CRST writes. Wake-status
+     * bits do not identify either ACPI peripheral on this board. */
+    if (ctx->Bar0Length < SOF_HDA_REG_ICS + sizeof(USHORT)) {
+        status = STATUS_INVALID_BUFFER_SIZE;
+        goto PreparationFailed;
     }
+    if (readw((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_REG_ICS) & SOF_HDA_ICS_ICB)
+        SofLogBreadcrumb("[HDA] ICB busy during read-only discovery\n");
 
     {
         ULONG romSts = (ctx->Bar4VirtualAddress && ctx->HwDesc) ? SofReadRomStatus(ctx) : 0;
@@ -329,11 +309,11 @@ SofEvtDevicePrepareHardware(
     status = SofIpcInitialize(ctx);
     if (!NT_SUCCESS(status)) goto PreparationFailed;
 
-    /* Initialize default audio control states (0 dB, unmuted) */
+    /* Start every endpoint muted. */
     for (ULONG ep = 0; ep < SOF_ENDPOINT_COUNT; ep++) {
         ctx->DefaultVolumeLevelDb[ep][0] = 0;
         ctx->DefaultVolumeLevelDb[ep][1] = 0;
-        ctx->DefaultMute[ep] = FALSE;
+        ctx->DefaultMute[ep] = TRUE;
     }
 
     /* Initialize display audio stream pointers and defaults */
@@ -351,116 +331,77 @@ SofEvtDevicePrepareHardware(
         NTSTATUS nhltStatus = SofNhltQueryAcpiTable(&nhltBuffer, &nhltSize);
         if (NT_SUCCESS(nhltStatus) && nhltBuffer != NULL) {
             nhltStatus = SofNhltParse(nhltBuffer, nhltSize, &ctx->NhltInfo);
-            if (!NT_SUCCESS(nhltStatus)) {
-                RtlZeroMemory(&ctx->NhltInfo, sizeof(ctx->NhltInfo));
-                SofLogBreadcrumb("[NHLT] Invalid table; no endpoint evidence accepted\n");
+            if (NT_SUCCESS(nhltStatus)) {
+                ctx->NhltTable = nhltBuffer;
+                ctx->NhltTableSize = nhltSize;
+                RtlStringCbPrintfA(msg, sizeof(msg),
+                    "[NHLT] Valid ACPI table: %u endpoints (DMIC=%u, SSP=%u, SDW=%u)\n",
+                    ctx->NhltInfo.TotalEndpoints, ctx->NhltInfo.DmicEndpointsCount,
+                    ctx->NhltInfo.SspEndpointsCount, ctx->NhltInfo.SdwEndpointsCount);
+            } else {
+                SofNhltFreeAcpiTable(nhltBuffer);
+                RtlStringCbPrintfA(msg, sizeof(msg),
+                    "[NHLT] Invalid ACPI table: 0x%08x\n", nhltStatus);
             }
+        } else {
             RtlStringCbPrintfA(msg, sizeof(msg),
-                "[10] ACPI NHLT parsed: Endpoints=%u (DMIC=%u ch=%u, SSP=%u, SDW=%u)\n",
-                ctx->NhltInfo.TotalEndpoints,
-                ctx->NhltInfo.DmicEndpointsCount,
-                ctx->NhltInfo.Dmic.ChannelCount,
-                ctx->NhltInfo.SspEndpointsCount,
-                ctx->NhltInfo.SdwEndpointsCount);
-            SofLogBreadcrumb(msg);
-
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] ACPI NHLT parsed: Total Endpoints=%u, DMIC=%u (Channels=%u), SSP=%u, SDW=%u\n",
-                       ctx->NhltInfo.TotalEndpoints,
-                       ctx->NhltInfo.DmicEndpointsCount,
-                       ctx->NhltInfo.Dmic.ChannelCount,
-                       ctx->NhltInfo.SspEndpointsCount,
-                       ctx->NhltInfo.SdwEndpointsCount);
-            SofNhltFreeAcpiTable(nhltBuffer);
-        } else {
-            SofLogBreadcrumb("[10] ACPI NHLT table not present (no endpoint evidence)\n");
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] ACPI NHLT table not found; no endpoint evidence.\n");
+                "[NHLT] ACPI table unavailable: 0x%08x\n", nhltStatus);
         }
+        SofLogBreadcrumb(msg);
     }
 
-    /* Enumerate SoundWire child PDOs (e.g. SOUNDWIRE\SDCA_PERIPHERAL) */
-    status = SofSdwEnumerateChildren(ctx);
-    if (!NT_SUCCESS(status)) {
-        SofLogBreadcrumb("[SDW] SofSdwEnumerateChildren failed\n");
-    }
-
-    /*
-     * Query PortCls configuration from driver parameters registry.
-     * Missing settings leave optional endpoints and offload disabled.
-     */
-    ULONG armedTesting = 0;
-    ULONG enablePortCls = 0;
-    WDFKEY paramKey = NULL;
-    NTSTATUS regStatus = WdfDriverOpenParametersRegistryKey(
-        WdfGetDriver(),
-        KEY_READ | KEY_WRITE,
-        WDF_NO_OBJECT_ATTRIBUTES,
-        &paramKey
-    );
-    if (NT_SUCCESS(regStatus)) {
-        UNICODE_STRING valArmed;
-        UNICODE_STRING valPortCls;
-        UNICODE_STRING valUsbOffload;
-        ULONG enableUsbOffload = 0;
-        RtlInitUnicodeString(&valArmed, L"ArmedTesting");
-        RtlInitUnicodeString(&valPortCls, L"EnablePortCls");
-        RtlInitUnicodeString(&valUsbOffload, L"EnableUsbOffload");
-        WdfRegistryQueryULong(paramKey, &valArmed, &armedTesting);
-        WdfRegistryQueryULong(paramKey, &valPortCls, &enablePortCls);
-        WdfRegistryQueryULong(paramKey, &valUsbOffload, &enableUsbOffload);
-        ctx->EnableUsbOffload = enableUsbOffload;
-        WdfRegistryClose(paramKey);
-    } else {
-        ctx->EnableUsbOffload = 0;
-    }
-
-    ctx->ArmedTesting = armedTesting;
-    ctx->EnablePortCls = enablePortCls;
-    SofUaolInit(ctx);
-
-    char safeMsg[160];
-    RtlStringCbPrintfA(safeMsg, sizeof(safeMsg),
-        "[10b] Safety Guards: CanaryArmed=%u, SafeBootPolicy=%u, EnablePortCls=%u\n",
-        g_CanaryArmed ? 1 : 0, g_SafeBootPolicy, enablePortCls);
-    SofLogBreadcrumb(safeMsg);
-    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "%s", safeMsg);
-
-    if (g_CanaryArmed && enablePortCls != 0) {
-        SofLogBreadcrumb("[10b] Canary Armed & PortCls enabled: Registering PortCls WaveRT Subdevices...\n");
-        status = SofRegisterPortClsSubdevices(Device, ctx);
-        if (!NT_SUCCESS(status)) {
-            char smsg[128];
-            RtlStringCbPrintfA(smsg, sizeof(smsg),
-                "[10b] SofRegisterPortClsSubdevices failed: 0x%08x -> falling back to Safe Mode\n", status);
-            SofLogBreadcrumb(smsg);
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "%s", smsg);
-            ctx->PortClsRegistered = FALSE;
-            status = STATUS_SUCCESS; /* Soft assert: ensure device and boot never fail */
-        } else {
-            ctx->PortClsRegistered = TRUE;
-            SofLogBreadcrumb("[10b] SofRegisterPortClsSubdevices succeeded (Wave subdevice active)!\n");
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] PortCls WaveRT subdevice registered successfully.\n");
+    /* These settings request an audio adapter after firmware boot. */
+    ctx->ArmedTesting = 0;
+    ctx->EnablePortCls = 0;
+    {
+        WDFKEY paramKey = NULL;
+        if (NT_SUCCESS(WdfDriverOpenParametersRegistryKey(WdfGetDriver(), KEY_READ,
+                WDF_NO_OBJECT_ATTRIBUTES, &paramKey))) {
+            UNICODE_STRING valArmed, valPortCls;
+            RtlInitUnicodeString(&valArmed, L"ArmedTesting");
+            RtlInitUnicodeString(&valPortCls, L"EnablePortCls");
+            WdfRegistryQueryULong(paramKey, &valArmed, &ctx->ArmedTesting);
+            WdfRegistryQueryULong(paramKey, &valPortCls, &ctx->EnablePortCls);
+            WdfRegistryClose(paramKey);
         }
-    } else {
-        SofLogBreadcrumb("[10b] Safe Mode active: PortCls subdevices registration bypassed.\n");
-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                   "[SOF] Safe Mode: PortCls registration bypassed (CanaryArmed=%u, EnablePortCls=%u).\n",
-                   g_CanaryArmed ? 1 : 0, enablePortCls);
-        ctx->PortClsRegistered = FALSE;
     }
 
     ctx->HardwarePrepared = TRUE;
-    SofLogBreadcrumb("[10a] Hardware prepared successfully (BAR0 & BAR4 mapped, IPC & NHLT ready)!\n");
+    SofLogBreadcrumb("[10a] BAR resources and host IPC state prepared\n");
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-               "[SOF] Hardware preparation completed successfully.\n");
+               "[SOF] Mapped hardware resources.\n");
     return STATUS_SUCCESS;
 
 PreparationFailed:
     /* Only BARs were acquired before these failure points; never leak them
      * if WDF does not deliver ReleaseHardware for failed preparation. */
     SofUnmapFailedPreparedBars(ctx);
+    return status;
+}
+
+/* Continue quiescing other endpoints after a failure. Report the first error
+ * and preserve any buffers which WaveRT could not prove safe to release. */
+static NTSTATUS SofQuiesceDeviceStreams(PSOF_DEVICE_CONTEXT Ctx, BOOLEAN Release)
+{
+    PVOID *slots[] = {
+        &Ctx->PlaybackStream, &Ctx->CaptureStream,
+        &Ctx->HdmiStreams[0], &Ctx->HdmiStreams[1], &Ctx->HdmiStreams[2],
+        &Ctx->DmicStream, &Ctx->SspPlaybackStream, &Ctx->SspCaptureStream
+    };
+    NTSTATUS status = STATUS_SUCCESS;
+
+    for (ULONG i = 0; i < RTL_NUMBER_OF(slots); ++i) {
+        PSOF_WAVERT_STREAM stream = (PSOF_WAVERT_STREAM)*slots[i];
+        NTSTATUS streamStatus;
+        if (!stream) continue;
+        if (Release) {
+            streamStatus = SofWaveRtFreeStream(stream);
+            *slots[i] = NULL;
+        } else {
+            streamStatus = SofWaveRtSetState(stream, KSSTATE_PAUSE);
+        }
+        if (NT_SUCCESS(status) && !NT_SUCCESS(streamStatus)) status = streamStatus;
+    }
     return status;
 }
 
@@ -489,43 +430,20 @@ SofEvtDeviceReleaseHardware(
                "[SOF] SofEvtDeviceReleaseHardware starting...\n");
     SofLogBreadcrumb("[Teardown] SofEvtDeviceReleaseHardware starting...\n");
 
-    /* Unregister PortCls Subdevices */
-    SofUnregisterPortClsSubdevices(Device, ctx);
-    SofLogBreadcrumb("[Teardown] SofUnregisterPortClsSubdevices completed.\n");
-
-    /* Free active audio streams */
-    if (ctx->PlaybackStream != NULL) {
-        SofWaveRtFreeStream((PSOF_WAVERT_STREAM)ctx->PlaybackStream);
-        ctx->PlaybackStream = NULL;
+    NTSTATUS status = SofUnregisterPortClsSubdevices(Device, ctx);
+    NTSTATUS streamStatus = SofQuiesceDeviceStreams(ctx, TRUE);
+    if (NT_SUCCESS(status)) status = streamStatus;
+    if (ctx->DspNeedsPowerDown) {
+        SofIpcDisableInterrupts(ctx);
+        KeFlushQueuedDpcs();
+        NTSTATUS powerStatus = SofPowerDownDsp(ctx);
+        if (NT_SUCCESS(status)) status = powerStatus;
     }
-    if (ctx->CaptureStream != NULL) {
-        SofWaveRtFreeStream((PSOF_WAVERT_STREAM)ctx->CaptureStream);
-        ctx->CaptureStream = NULL;
-    }
-    for (ULONG i = 0; i < 3; i++) {
-        if (ctx->HdmiStreams[i] != NULL) {
-            SofWaveRtFreeStream((PSOF_WAVERT_STREAM)ctx->HdmiStreams[i]);
-            ctx->HdmiStreams[i] = NULL;
-        }
-    }
-    if (ctx->DmicStream != NULL) {
-        SofWaveRtFreeStream((PSOF_WAVERT_STREAM)ctx->DmicStream);
-        ctx->DmicStream = NULL;
-    }
-    if (ctx->SspPlaybackStream != NULL) {
-        SofWaveRtFreeStream((PSOF_WAVERT_STREAM)ctx->SspPlaybackStream);
-        ctx->SspPlaybackStream = NULL;
-    }
-    if (ctx->SspCaptureStream != NULL) {
-        SofWaveRtFreeStream((PSOF_WAVERT_STREAM)ctx->SspCaptureStream);
-        ctx->SspCaptureStream = NULL;
-    }
-
-    /* Cleanup IPC resources */
     SofIpcCleanup(ctx);
-
-    /* Power down DSP hardware cleanly */
-    SofPowerDownDsp(ctx);
+    SofNhltFreeAcpiTable(ctx->NhltTable);
+    ctx->NhltTable = NULL;
+    ctx->NhltTableSize = 0;
+    RtlZeroMemory(&ctx->NhltInfo, sizeof(ctx->NhltInfo));
 
     if (ctx->Bar0VirtualAddress) {
         MmUnmapIoSpace(ctx->Bar0VirtualAddress, ctx->Bar0Length);
@@ -543,11 +461,8 @@ SofEvtDeviceReleaseHardware(
                    "[SOF] BAR4 unmapped.\n");
     }
 
-    /* Uninitialize SoundWire controller context */
-    SofSdwUninitController(ctx);
-
     ctx->HardwarePrepared = FALSE;
-    return STATUS_SUCCESS;
+    return status;
 }
 
 /**
@@ -610,7 +525,6 @@ SofEvtDeviceD0Entry(
     bootStatus = SofStartFirmwareBoot(ctx, NULL);
     if (!NT_SUCCESS(bootStatus)) {
         SofLogBreadcrumb("[Power] D0 entry aborted: firmware boot failed.\n");
-        SofIpcDisableInterrupts(ctx);
         return bootStatus;
     }
 
@@ -621,20 +535,18 @@ SofEvtDeviceD0Entry(
         SofIpcDisableInterrupts(ctx);
         return STATUS_DEVICE_NOT_READY;
     }
+
+    if (g_CanaryArmed && ctx->EnablePortCls != 0) {
+        NTSTATUS portStatus = SofRegisterPortClsSubdevices(Device, ctx);
+        if (!NT_SUCCESS(portStatus)) {
+            SofLogBreadcrumb("[Power] Requested PortCls registration failed.\n");
+            SofIpcDisableInterrupts(ctx);
+            NTSTATUS powerStatus = SofPowerDownDsp(ctx);
+            return NT_SUCCESS(powerStatus) ? portStatus : powerStatus;
+        }
+    }
     ctx->CurrentPowerState = PowerDeviceD0;
-    SofLogBreadcrumb("[Power] Firmware ready; audio graph and codec readiness are separate.\n");
-
-    /* Immediately check and report jack presence on D0 entry */
-    if (ctx->PortClsRegistered && ctx->PortEvents != NULL) {
-        SofCheckAndNotifyJackPresence(ctx);
-    }
-
-    /* Start / re-arm Jack Poll Timer (1000ms periodic) */
-    if (ctx->PortClsRegistered && ctx->PortEvents != NULL && ctx->JackPollTimer) {
-        InterlockedExchange(&ctx->JackPolling, TRUE);
-        WdfTimerStart(ctx->JackPollTimer, WDF_REL_TIMEOUT_IN_MS(1000));
-        SofLogBreadcrumb("[Jack] Started JackPollTimer (1000ms periodic)\n");
-    }
+    SofLogBreadcrumb("[Power] DSP firmware reported FW_READY.\n");
 
     /* Start Watchdog Health Timer (10s countdown to confirm healthy D0 uptime) */
     if (ctx->WatchdogHealthTimer) {
@@ -686,7 +598,7 @@ SofEvtDeviceD0Exit(
 )
 {
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
-    if (!SofHardwareDevelopmentAllowed()) return STATUS_SUCCESS;
+    if (!SofHardwareDevelopmentAllowed() || !ctx->DspNeedsPowerDown) return STATUS_SUCCESS;
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] EvtDeviceD0Exit: Transitioning from D0 to Target State %d\n",
@@ -718,39 +630,7 @@ SofEvtDeviceD0Exit(
         }
     }
 
-    /* Pause any active streams */
-    if (ctx->PlaybackStream != NULL) {
-        SofWaveRtSetState((PSOF_WAVERT_STREAM)ctx->PlaybackStream, KSSTATE_PAUSE);
-    }
-    if (ctx->CaptureStream != NULL) {
-        SofWaveRtSetState((PSOF_WAVERT_STREAM)ctx->CaptureStream, KSSTATE_PAUSE);
-    }
-    for (ULONG i = 0; i < 3; i++) {
-        if (ctx->HdmiStreams[i] != NULL) {
-            SofWaveRtSetState((PSOF_WAVERT_STREAM)ctx->HdmiStreams[i], KSSTATE_PAUSE);
-        }
-    }
-    if (ctx->DmicStream != NULL) {
-        SofWaveRtSetState((PSOF_WAVERT_STREAM)ctx->DmicStream, KSSTATE_PAUSE);
-    }
-    if (ctx->SspPlaybackStream != NULL) {
-        SofWaveRtSetState((PSOF_WAVERT_STREAM)ctx->SspPlaybackStream, KSSTATE_PAUSE);
-    }
-    if (ctx->SspCaptureStream != NULL) {
-        SofWaveRtSetState((PSOF_WAVERT_STREAM)ctx->SspCaptureStream, KSSTATE_PAUSE);
-    }
-
-    /* Put HDA Codec to D3 to conserve power (Display Audio is power-managed by Intel Graphics) */
-    if (ctx->HdaCodecPresent) {
-        ULONG dummy;
-        SofHdaSendVerb(ctx, HDA_VERB(0, 0x01, HDA_VERB_SET_POWER_STATE, 0x03), &dummy);
-        SofLogBreadcrumb("[Power] HDA Codec set to D3\n");
-    }
-
-    /* Release / suspend USB Audio Offload */
-    if (ctx->EnableUsbOffload) {
-        SofUsbOffloadRelease(ctx);
-    }
+    NTSTATUS streamStatus = SofQuiesceDeviceStreams(ctx, FALSE);
 
     /* Do not access the inherited Meteor Lake D0i3 register on Pujjo.
      * Invalidate the firmware session and wake waiters before power loss. */
@@ -765,12 +645,13 @@ SofEvtDeviceD0Exit(
         KeReleaseSpinLock(&ctx->IpcLock, irql);
         ctx->CurrentPowerState = PowerDeviceUnspecified;
         SofIpcDisableInterrupts(ctx);
+        KeFlushQueuedDpcs();
         powerStatus = SofPowerDownDsp(ctx);
         if (!NT_SUCCESS(powerStatus)) return powerStatus;
     }
     /* WDF_POWER_DEVICE_STATE is not DEVICE_POWER_STATE. Resume remains locked. */
     ctx->CurrentPowerState = PowerDeviceUnspecified;
-    return STATUS_SUCCESS;
+    return streamStatus;
 }
 
 /**

@@ -15,6 +15,7 @@ typedef enum {
 typedef struct {
     PJ_DWORD module_id; /* base firmware table index, not the $AME marker */
     PJ_DWORD affinity_mask;
+    PJ_DWORD type;
     PJ_WORD instance_max_count;
     PJ_WORD config_count;
     PJ_BYTE uuid[16];
@@ -41,6 +42,13 @@ pj_catalog_status pj_firmware_load_profile(const PJ_BYTE *image, PJ_SIZE size,
     const PJ_BYTE uuid[16], pj_firmware_profile *out);
 pj_catalog_status pj_firmware_profile_config(const pj_firmware_profile *profile,
     PJ_DWORD ibs, PJ_DWORD obs, pj_firmware_config *out);
+
+/* Plan a base-firmware low-latency instance on core 0. The CPC is the
+ * highest exact measurement, or zero when the manifest has no measurement
+ * for that geometry. A different geometry can supply BSS only when every
+ * record agrees on the instance size. */
+pj_catalog_status pj_firmware_plan_ll(const pj_firmware_profile *profile,
+    PJ_DWORD ibs, PJ_DWORD obs, pj_firmware_config *out, PJ_DWORD *pipeline_pages);
 #ifdef __cplusplus
 }
 #endif

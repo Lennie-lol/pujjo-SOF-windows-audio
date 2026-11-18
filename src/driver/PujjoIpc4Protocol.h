@@ -16,6 +16,7 @@ extern "C" {
 #define PJ_IPC4_CORRELATION_MASK 0x5f000000u
 #define PJ_IPC4_GLOBAL_NOTIFICATION 27u
 #define PJ_IPC4_NOTIFY_FW_READY 8u
+#define PJ_IPC4_MODULE_LARGE_GET (PJ_IPC4_TARGET_MASK | (3u << 24))
 
 typedef enum {
     PJ_IPC4_VALID = 0, PJ_IPC4_BAD_PARAMETER = -1,
@@ -61,6 +62,12 @@ pj_ipc4_status pj_ipc4_module_link(PJ_DWORD bind, PJ_DWORD src_module,
  * and last flags. Multi-block transactions and config reads are separate. */
 pj_ipc4_status pj_ipc4_large_config_set(PJ_DWORD module, PJ_DWORD instance,
     PJ_DWORD parameter, const PJ_BYTE *payload, PJ_SIZE bytes, pj_ipc4_packet *out);
+pj_ipc4_status pj_ipc4_large_config_get(PJ_DWORD module, PJ_DWORD instance,
+    PJ_DWORD parameter, PJ_DWORD capacity, pj_ipc4_packet *out);
+pj_ipc4_status pj_ipc4_large_reply_size(PJ_DWORD request_extension,
+    PJ_DWORD reply_extension, PJ_DWORD capacity, PJ_DWORD *bytes);
+pj_ipc4_status pj_ipc4_fw_version(const PJ_BYTE *config, PJ_SIZE bytes,
+    PJ_WORD version[4]);
 
 /* DWORD-aligned span inside an already mapped MMIO window; no I/O. */
 int pj_ipc4_mmio_span_valid(PJ_DWORD mapped_bytes, PJ_DWORD offset, PJ_DWORD bytes);

@@ -15,7 +15,8 @@ assert 'Ctx->FwState = SOF_FW_BOOT_FAILED;' in failure
 assert 'Ctx->IpcFaulted = TRUE;' in failure
 assert 'bootState = SOF_FW_BOOT_FAILED;' in failure
 assert end.index('bootState = SOF_FW_BOOT_FAILED;') < end.index('if (bootState == SOF_FW_BOOT_COMPLETE)')
-assert 'return status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_DEVICE_NOT_READY;' in end
+assert 'status = status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_DEVICE_NOT_READY;' in end
+assert end.index('status = status == STATUS_TIMEOUT ?') < end.index('goto boot_failed;', end.index('status = status == STATUS_TIMEOUT ?'))
 ns={'m':'http://schemas.microsoft.com/developer/msbuild/2003'}
 for project in root.glob('*.vcxproj'):
     tree=ET.parse(project)

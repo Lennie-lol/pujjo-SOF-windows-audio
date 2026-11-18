@@ -429,6 +429,9 @@ typedef struct _SOF_INTEL_DSP_BDL {
 
 /** @brief cAVS Audio DSP Control and Status register (BAR4: 0x04). */
 #define HDA_DSP_REG_ADSPCS                  0x04
+#define HDA_DSP_REG_ADSPIC                  0x08
+#define HDA_DSP_REG_ADSPIS                  0x0c
+#define HDA_DSP_IPC_INTERRUPT              0x01u
 
 /** @brief Core Reset bitmask macro for cAVS. Asserts core reset when set to 0. */
 #define HDA_DSP_ADSPCS_CRST_MASK(cm)        ((cm) << 0)
@@ -741,7 +744,9 @@ static inline VOID SofDspUpdateBits(
 )
 {
     ULONG oldVal = SofDspRead32(Bar4Base, Offset);
-    ULONG newVal = (oldVal & ~Mask) | (Value & Mask);
+    ULONG newVal;
+    if (oldVal == 0xffffffffu) return;
+    newVal = (oldVal & ~Mask) | (Value & Mask);
     SofDspWrite32(Bar4Base, Offset, newVal);
 }
 

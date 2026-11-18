@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-3-Clause
 """Execute the pure WDK-linked DMA/PCM planner; no real DMA or device access."""
-import os, shutil, subprocess, tempfile
+import os, shlex, shutil, subprocess, tempfile
 from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 cc = os.environ.get("CC") or next((v for v in ("clang","gcc","cc") if shutil.which(v)), None)
@@ -26,6 +26,17 @@ int main(void) {
     assert(!pj_dma_plan_pair(0u,0u,512u,129u,&p));
     assert(!pj_dma_plan_pair(0u,0u,PJ_DMA_MAX_BYTES+1u,256u,&p));
     assert(!pj_dma_plan_pair(0u,0u,512u,256u,NULL));
+    PJ_DWORD count=99u;
+    pj_dma_segment segment={0};
+    assert(pj_dma_period_count(0xffffff80u,1u,512u,128u,&count) && count==4u);
+    assert(pj_dma_period_segment(0xffffff80u,1u,512u,128u,1u,&segment));
+    assert(segment.low==0u && segment.high==2u && segment.length==128u);
+    assert(!pj_dma_period_segment(0xffffff80u,1u,512u,128u,4u,&segment));
+    assert(!pj_dma_period_count(0xffffff80u,0xffffffffu,512u,128u,&count));
+    assert(!pj_dma_period_count(0u,0u,512u,384u,&count));
+    assert(!pj_dma_period_count(0u,0u,32768u+128u,128u,&count));
+    assert(!pj_dma_period_count(0u,0u,128u,128u,&count));
+    assert(count==4u && segment.high==2u);
     assert(pj_pcm_period(48000u,2u,32u,24u,10u,65536u,&period) && period==3840u);
     assert(!pj_pcm_period(48000u,0u,32u,24u,10u,65536u,&period));
     assert(!pj_pcm_period(48000u,2u,16u,24u,10u,65536u,&period));
@@ -54,6 +65,14 @@ int main(void) {
     assert(!pj_hda_stream_slot(2,16,0,0,4096,&idx));
     assert(!pj_hda_stream_slot(2,3,2,0,4096,&idx));
     assert(!pj_hda_stream_slot(2,3,1,0,4096,NULL));
+    PJ_DWORD ring=0, ms=0, period_bytes=0;
+    assert(pj_pcm_notification_ring(48000u,2u,32u,24u,65536u,&ring,&ms));
+    assert(ring==66048u && ms==86u);
+    assert(pj_pcm_period(48000u,2u,32u,24u,ms,ring,&period_bytes));
+    assert(period_bytes*2u==ring);
+    assert(!pj_pcm_notification_ring(48000u,2u,24u,24u,65536u,&ring,&ms));
+    assert(!pj_pcm_notification_ring(48000u,2u,32u,24u,0u,&ring,&ms));
+    assert(ring==66048u && ms==86u);
     puts("PASS: DMA carry, span overflow, alignment, and checked PCM geometry");
     return 0;
 }
@@ -63,7 +82,7 @@ with tempfile.TemporaryDirectory(prefix="pj_dma_plan_") as tmp:
     exe=Path(tmp)/("test.exe" if os.name=="nt" else "test")
     test.write_text(main)
     subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror","-Wconversion",
-                    "-Wsign-conversion","-pedantic","-I"+str(root/"src/driver"),
+                    "-Wsign-conversion","-pedantic",*shlex.split(os.environ.get("CFLAGS","")),"-I"+str(root/"src/driver"),
                     str(root/"src/driver/PujjoDmaPlan.c"),str(test),"-o",str(exe)],
                    check=True,timeout=40)
     subprocess.run([str(exe)],check=True,timeout=10)
@@ -143,11 +162,11 @@ with tempfile.TemporaryDirectory(prefix="pj_topo_chunk_") as tmp:
                     "-Wsign-conversion","-pedantic",str(test),"-o",str(exe)],
                    check=True,timeout=40)
     subprocess.run([str(exe)],check=True,timeout=10)
-assert topo.count("SofIpc4BuildGainConfigForFormat(Fmt,")==8
+assert topo.count("SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_MUTE,")==6
 gain=topo.split("static NTSTATUS SofIpc4BuildGainConfigForFormat(",1)[1].split("\n}",1)[0]
 assert "SofIpc4BuildAudioFormat(Fmt," in gain
 copier=topo.split("NTSTATUS SofIpc4BuildCopierConfig(",1)[1].split("\n}",1)[0]
-assert copier.index("totalSize += sizeof(struct sof_ipc4_alh_configuration_blob)") < copier.index("if (MaxBuffer < totalSize)") < copier.index("RtlZeroMemory(CopierBuffer, totalSize)")
+assert copier.index("configBytes = sizeof(struct sof_ipc4_alh_configuration_blob)") < copier.index("totalSize += configBytes") < copier.index("if (MaxBuffer < totalSize)") < copier.index("RtlZeroMemory(CopierBuffer, totalSize)")
 assert "chunkBytes = 384" not in copier and "chunkBytes = 384" not in gain
 print("PASS: IPC4 frame-aligned copier/gain geometry and bounded ALH blob")
 
@@ -246,6 +265,112 @@ position = wave.split("NTSTATUS SofWaveRtGetPosition(",1)[1].split("#else",1)[0]
 assert position.index("ctx->Bar0Length - offset") < position.index("position = readl") < position.index("*PositionBytes = position")
 assert "LinearPositionBytes +=" not in wave
 assert "MmGetPhysicalAddress(" not in wave and "MmAllocateContiguousMemory(" not in wave
-assert "stream->Bdl[1].AddrHigh = plan.second.high" in wave
-assert free.index("!(ctl & SOF_HDA_SD_CTL_DMA_START)") < free.index("if (stopped)") < free.index("SofFreeDmaBuffer")
+assert "stream->Bdl[i].AddrHigh = segment.high" in wave
+assert "writew((USHORT)(Stream->BdlPeriodCount - 1u)" in wave
+timer = wave.split("static VOID SofWaveRtTimerDpc(",1)[1].split("\n}",1)[0]
+assert timer.index("flags & SOF_HDA_DMA_ERROR_FLAGS") < timer.index("flags & SOF_HDA_PERIOD_COMPLETE")
+assert timer.index("flags & SOF_HDA_PERIOD_COMPLETE") < timer.index("SofWaveRtSignalNotification(stream)")
+stop = wave.split("NTSTATUS SofWaveRtStopHdaStream(",1)[1].split("\n}",1)[0]
+assert "SOF_HDA_SD_CTL_DMA_START, 0" in stop
+reset = wave.split("NTSTATUS SofWaveRtResetHdaStream(",1)[1].split("\n}",1)[0]
+assert reset.index("SofWaveRtStopHdaStream") < reset.index("SOF_HDA_SD_CTL_DMA_RESET")
+assert reset.index("if (NT_SUCCESS(status))") < reset.index("SOF_HDA_ADSP_REG_SD_BDLPL")
+assert free.index("stopped = NT_SUCCESS(resetStatus)") < free.index("if (stopped)") < free.index("SofFreeDmaBuffer")
 assert "NTSTATUS status = streamObj->SetFormat(DataFormat)" in port
+
+# Execute the copier serializer with the wire declarations used by the driver.
+topo_h = (root/"src/driver/Topo.h").read_text()
+abi_h = (root/"include/sof/ipc4/header.h").read_text()
+def c_struct(source, name):
+    start = source.index("struct "+name+" {")
+    end = source.index("\n}",start)+2
+    return source[start:end]+";\n"
+
+wire = "#pragma pack(push,1)\n"
+for name in ("sof_ipc4_audio_format", "sof_ipc4_base_module_cfg"):
+    wire += c_struct(abi_h, name)
+for name in ("sof_ipc4_gtw_attributes","sof_copier_gateway_cfg","sof_ipc4_copier_data",
+             "sof_ipc4_alh_mapping","sof_ipc4_alh_configuration_blob"):
+    wire += c_struct(topo_h,name)
+wire += "#pragma pack(pop)\n"
+wire += topo_h[topo_h.index("typedef struct _SOF_COPIER_PARAMS {"):
+               topo_h.index("/**\n * @struct _SOF_PIPELINE_DESC")]
+defines = "\n".join(line for line in topo_h.splitlines() if line.startswith((
+    "#define SOF_IPC4_NODE_", "#define SOF_IPC4_GTW_", "#define SOF_IPC4_COPIER_DEFAULT_",
+    "#define SOF_IPC4_TYPE_LSB_INTEGER")))
+serializer = topo[topo.index("VOID SofIpc4BuildAudioFormat("):topo.index("VOID SofIpc4BuildDefaultStereoFormat(")]
+serializer += helper + "NTSTATUS SofIpc4BuildCopierConfig(" + copier + "\n}\n"
+copier_test = r'''
+int main(void) {
+    unsigned char blob[] = {0,0,0,0,0x78,0x56,0x34,0x12};
+    UCHAR bytes[128];
+    struct sof_ipc4_copier_data *data=(struct sof_ipc4_copier_data*)bytes;
+    SOF_COPIER_PARAMS params={0};
+    ULONG result=32;
+    params.NodeType=SOF_IPC4_GTW_SSP_OUT;
+    params.NodeIndex=SOF_IPC4_NODE_INDEX_INTEL_SSP(1);
+    params.AudioFormat=(SOF_AUDIO_FORMAT_PARAMS){48000,32,24,2,0,0xffffff10u,1};
+    memset(bytes,0xa5,sizeof(bytes));
+    assert(SofIpc4BuildCopierConfig(&params,bytes,sizeof(bytes),&result)==STATUS_DEVICE_CONFIGURATION_ERROR);
+    assert(!result && bytes[0]==0xa5);
+    params.GatewayConfig=blob;
+    params.GatewayConfigBytes=sizeof(blob)-1u;
+    assert(SofIpc4BuildCopierConfig(&params,bytes,sizeof(bytes),&result)==STATUS_INVALID_BUFFER_SIZE);
+    assert(!result && bytes[0]==0xa5);
+    params.GatewayConfigBytes=sizeof(blob);
+    assert(SofIpc4BuildCopierConfig(&params,bytes,sizeof(*data),&result)==STATUS_BUFFER_TOO_SMALL);
+    assert(!result && bytes[0]==0xa5);
+    assert(SofIpc4BuildCopierConfig(&params,bytes,sizeof(bytes),&result)==STATUS_SUCCESS);
+    assert(result==sizeof(*data)+4u && data->gtw_cfg.node_id==0xc10u);
+    assert(data->gtw_cfg.config_length==2u && memcmp(data->gtw_cfg.config_data,blob,sizeof(blob))==0);
+    params.NodeType=SOF_IPC4_GTW_SSP_IN;
+    assert(SofIpc4BuildCopierConfig(&params,bytes,sizeof(bytes),&result)==STATUS_SUCCESS);
+    assert(data->gtw_cfg.node_id==0xd10u);
+    params.NodeType=SOF_IPC4_GTW_DMIC;
+    params.NodeIndex=SOF_IPC4_NODE_INDEX_INTEL_DMIC(1u);
+    assert(SofIpc4BuildCopierConfig(&params,bytes,sizeof(bytes),&result)==STATUS_SUCCESS);
+    assert(data->gtw_cfg.node_id==0xb01u);
+    params.NodeType=SOF_IPC4_GTW_ALH_IN;
+    params.NodeIndex=4u;
+    params.AlhStreamId=4u;
+    params.GatewayConfig=NULL;
+    params.GatewayConfigBytes=0u;
+    assert(SofIpc4BuildCopierConfig(&params,bytes,sizeof(bytes),&result)==STATUS_SUCCESS);
+    assert(data->gtw_cfg.node_id==0x1104u && data->gtw_cfg.config_length==4u);
+    params.NodeType=SOF_IPC4_GTW_ALH_OUT;
+    params.NodeIndex=3u;
+    params.AlhStreamId=3u;
+    assert(SofIpc4BuildCopierConfig(&params,bytes,sizeof(bytes),&result)==STATUS_SUCCESS);
+    assert(data->gtw_cfg.node_id==0x1003u);
+    params.NodeType=2u;
+    assert(SofIpc4BuildCopierConfig(&params,bytes,sizeof(bytes),&result)==STATUS_INVALID_PARAMETER);
+    return 0;
+}
+'''
+shim = r'''
+#include <string.h>
+typedef unsigned char UCHAR, BOOLEAN;
+typedef void VOID, *PVOID;
+typedef SOF_AUDIO_FORMAT_PARAMS *PSOF_AUDIO_FORMAT_PARAMS;
+#define FALSE 0
+#define TRUE 1
+#define STATUS_DEVICE_CONFIGURATION_ERROR (-2)
+#define STATUS_INVALID_BUFFER_SIZE (-3)
+#define STATUS_BUFFER_TOO_SMALL (-4)
+#define PJ_IPC4_MAX_MAILBOX_PAYLOAD 4096u
+#define NT_SUCCESS(status) ((status)>=0)
+#define _In_
+#define _Out_
+#define _Out_writes_bytes_(n)
+#define RtlZeroMemory(p,n) memset((p),0,(n))
+#define RtlCopyMemory(d,s,n) memcpy((d),(s),(n))
+'''
+with tempfile.TemporaryDirectory(prefix="pj_copier_") as tmp:
+    test = Path(tmp)/"test.c"
+    exe = Path(tmp)/("test.exe" if os.name=="nt" else "test")
+    test.write_text(fixture+shim+defines+"\n"+wire+serializer+copier_test)
+    subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror","-pedantic",
+                    *shlex.split(os.environ.get("CFLAGS","")),str(test),"-o",str(exe)],
+                   check=True,timeout=40)
+    subprocess.run([str(exe)],check=True,timeout=10)
+print("PASS: SSP/DMIC gateway blobs, literal direction encodings and guarded writes")

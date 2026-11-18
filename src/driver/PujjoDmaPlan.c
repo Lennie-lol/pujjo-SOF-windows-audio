@@ -31,6 +31,35 @@ int pj_dma_plan_pair(PJ_DWORD low, PJ_DWORD high, PJ_DWORD total,
     *out = plan;
     return 1;
 }
+
+int pj_dma_period_count(PJ_DWORD low, PJ_DWORD high, PJ_DWORD total,
+                        PJ_DWORD period, PJ_DWORD *count)
+{
+    PJ_DWORD periods, last_low, last_high;
+    if (!count || total > PJ_DMA_MAX_BYTES || (low & 127u) ||
+        period < 128u || (period & 127u) || total % period)
+        return 0;
+    periods = total / period;
+    if (periods < 2u || periods > PJ_DMA_MAX_PERIODS ||
+        !add_offset(low, high, total - 1u, &last_low, &last_high))
+        return 0;
+    *count = periods;
+    return 1;
+}
+
+int pj_dma_period_segment(PJ_DWORD low, PJ_DWORD high, PJ_DWORD total,
+                          PJ_DWORD period, PJ_DWORD index, pj_dma_segment *out)
+{
+    PJ_DWORD count;
+    pj_dma_segment segment;
+    if (!out || !pj_dma_period_count(low, high, total, period, &count) ||
+        index >= count ||
+        !add_offset(low, high, index * period, &segment.low, &segment.high))
+        return 0;
+    segment.length = period;
+    *out = segment;
+    return 1;
+}
 int pj_pcm_period(PJ_DWORD rate, PJ_DWORD channels, PJ_DWORD bits,
                   PJ_DWORD valid_bits, PJ_DWORD period_ms,
                   PJ_DWORD ring_bytes, PJ_DWORD *out_bytes)
@@ -68,4 +97,25 @@ int pj_hda_stream_slot(PJ_DWORD captures, PJ_DWORD playbacks, PJ_DWORD capture,
     if (offset>bar_bytes || bar_bytes-offset<0x20u) return 0;
     *index=resolved;
     return 1;
+}
+
+int pj_pcm_notification_ring(PJ_DWORD rate, PJ_DWORD channels, PJ_DWORD bits,
+    PJ_DWORD valid_bits, PJ_DWORD requested, PJ_DWORD *ring_bytes, PJ_DWORD *period_ms)
+{
+    PJ_DWORD frame, ms;
+    if (!ring_bytes || !period_ms || !requested || requested > PJ_DMA_MAX_BYTES ||
+        rate < 8000u || rate > 192000u || channels < 1u || channels > 8u ||
+        (bits != 16u && bits != 32u) || !valid_bits || valid_bits > bits)
+        return 0;
+    frame = channels * (bits / 8u);
+    for (ms = 1u; ms <= 1000u; ++ms) {
+        PJ_DWORD frames_ms = rate * ms;
+        PJ_DWORD period = frames_ms / 1000u * frame;
+        if (frames_ms % 1000u || (period & 127u) || period * 2u < requested)
+            continue;
+        *ring_bytes = period * 2u;
+        *period_ms = ms;
+        return 1;
+    }
+    return 0;
 }

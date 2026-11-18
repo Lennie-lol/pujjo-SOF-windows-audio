@@ -52,9 +52,18 @@ assert "Restore DONE even for a BUSY-only IRQ" in dpc
 print("PASS: single DPC consumer, acknowledged readiness, fault wakeup and bounded boot wait")
 
 device=(root/"src/driver/Device.c").read_text()
+driver=(root/"src/driver/Driver.c").read_text()
+assert "EvtDeviceD0EntryPostInterruptsEnabled = SofEvtDeviceD0Entry;" in driver
+assert "EvtDeviceD0ExitPreInterruptsDisabled  = SofEvtDeviceD0Exit;" in driver
+assert "interruptConfig.AutomaticSerialization = FALSE;" in driver
 d0=device.split("NTSTATUS\nSofEvtDeviceD0Entry(",1)[1].split("\n/**",1)[0]
 assert d0.index("if (ipcFaulted ||") < d0.index("SofStartFirmwareBoot(ctx, NULL)")
-assert d0.index("return bootStatus;") < d0.index("WdfTimerStart(")
+assert d0.index("return bootStatus;") < d0.index("SofRegisterPortClsSubdevices(") < d0.index("WdfTimerStart(")
+assert d0.index("if (!NT_SUCCESS(portStatus))") < d0.index("return NT_SUCCESS(powerStatus) ? portStatus : powerStatus;")
+assert "SofSdwEnumerateChildren(" not in device and "SofHdaSendVerb(" not in device
+assert "SofVerifyAdlNIpc4Candidate(rawFw, rawFwSize)" in boot
+assert boot.index("SofVerifyAdlNIpc4Candidate(rawFw, rawFwSize)") < boot.index("SofAllocateDmaBuffer(")
+assert boot.index("SofQueryBootedFirmwareVersion(Ctx, &fwInfo)") < boot.index("return STATUS_SUCCESS;")
 assert d0.count("ipcFaulted = ctx->IpcFaulted || ctx->FwState != SOF_FW_BOOT_COMPLETE;") == 1
 assert d0.index("return STATUS_DEVICE_NOT_READY;",d0.index("bootStatus =")) < d0.index("WdfTimerStart(")
 assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)" in d0
@@ -164,5 +173,9 @@ with tempfile.TemporaryDirectory(prefix='pj_cavs_core_') as d:
                     *shlex.split(os.environ.get('CFLAGS','')),str(src),'-o',str(exe)],check=True,timeout=60)
     subprocess.run([str(exe)],check=True,timeout=10)
 core_start=boot.split('/* Match the bundled cAVS reference:',1)[1].split('/* Wait for ROM IPC ACK',1)[0]
-assert core_start.index('SofCavsCoreTransition(Ctx, HDA_DSP_ADSPCS_SPA_MASK(1)') < core_start.index('SofCavsCoreTransition(Ctx, reset, 0') < core_start.index('SofCavsCoreTransition(Ctx, stall, 0')
+assert core_start.index('SofCavsCoreTransition(Ctx, reset, 0') < core_start.index('SofCavsCoreTransition(Ctx, stall, 0')
+assert boot.index('SofStartIccmaxDma(Ctx, &iccmax)') < boot.index('SofCavsCoreTransition(Ctx, HDA_DSP_ADSPCS_SPA_MASK(1)') < boot.index('SofDspWrite32(bar4, Ctx->HwDesc->HipcIdr, ipcHdr)')
+assert boot.index('SofStopIccmaxDma(Ctx, &iccmax)') < boot.index('KeWaitForSingleObject(&Ctx->FwReadyEvent')
+iccmax=loader.split('static NTSTATUS SofStopIccmaxDma(',1)[1].split('static NTSTATUS SofQueryBootedFirmwareVersion',1)[0]
+assert iccmax.index('if (attempt == 500u) return STATUS_IO_TIMEOUT;') < iccmax.index('Dma->Published = FALSE;') < iccmax.index('SofFreeDmaBuffer(')
 print('PASS: cAVS register transitions reject timeout, missing acknowledgement, and disappearing MMIO')

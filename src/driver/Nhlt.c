@@ -8,27 +8,18 @@
  *  - Validates NHLT signature ('NHLT' / 0x544C484E) and length fields.
  *  - Parses array of endpoint descriptors (DMIC, SSP/I2S, and SoundWire).
  *  - Discovers DMIC microphone array geometry, channel counts, and supported formats.
- *  - Queries ACPI firmware tables via ZwQuerySystemInformation (SystemFirmwareTableInformation).
+ *  - Queries ACPI firmware tables through the Windows firmware-table API.
  * Copyright 2026 The SOF Authors
  */
 
 #include "Nhlt.h"
 
 #ifdef _KERNEL_MODE
+#include <aux_klib.h>
 #define SOF_NHLT_TAG 'TLHN'
-
-#define SystemFirmwareTableInformation 76
-
-NTSYSAPI
-NTSTATUS
-NTAPI
-ZwQuerySystemInformation(
-    _In_ ULONG SystemInformationClass,
-    _Inout_ PVOID SystemInformation,
-    _In_ ULONG SystemInformationLength,
-    _Out_opt_ PULONG ReturnLength
-);
 #endif
+
+#define SOF_NHLT_MAX_TABLE_BYTES (1024u * 1024u)
 
 /**
  * @brief Parses an in-memory ACPI NHLT table and extracts all audio endpoint metadata.
@@ -39,11 +30,9 @@ ZwQuerySystemInformation(
  * @return STATUS_SUCCESS on success; STATUS_NOT_FOUND if signature doesn't match;
  *         STATUS_BUFFER_TOO_SMALL or STATUS_INVALID_PARAMETER on malformed table.
  */
-NTSTATUS SofNhltParse(
-    _In_reads_bytes_(NhltSize) const void *NhltBuffer,
-    _In_ size_t NhltSize,
-    _Out_ PSOF_NHLT_INFO Info
-)
+static NTSTATUS SofNhltWalk(const void *NhltBuffer, size_t NhltSize,
+                            PSOF_NHLT_INFO Info, SOF_NHLT_VISITOR Visitor,
+                            void *Context)
 {
     const ACPI_NHLT_HEADER *hdr;
     const UCHAR *curr;
@@ -54,15 +43,14 @@ NTSTATUS SofNhltParse(
     ULONG byteIndex;
     UCHAR checksum = 0;
 
-    if (!Info) return STATUS_INVALID_PARAMETER;
-    RtlZeroMemory(Info, sizeof(*Info));
     if (!NhltBuffer) return STATUS_INVALID_PARAMETER;
     RtlZeroMemory(&parsed, sizeof(parsed));
     if (NhltSize < sizeof(ACPI_NHLT_HEADER) + 1)
         return STATUS_BUFFER_TOO_SMALL;
     hdr = (const ACPI_NHLT_HEADER *)NhltBuffer;
     if (hdr->Signature != NHLT_ACPI_SIGNATURE) return STATUS_NOT_FOUND;
-    if (hdr->Length > NhltSize || hdr->Length < sizeof(ACPI_NHLT_HEADER) + 1)
+    if (hdr->Length > NhltSize || hdr->Length > SOF_NHLT_MAX_TABLE_BYTES ||
+        hdr->Length < sizeof(ACPI_NHLT_HEADER) + 1)
         return STATUS_INVALID_PARAMETER;
     /* ACPI checksum covers the declared table only. A checksum is not trust. */
     for (byteIndex = 0; byteIndex < hdr->Length; ++byteIndex)
@@ -77,8 +65,8 @@ NTSTATUS SofNhltParse(
     for (epIndex = 0; epIndex < endpointCount; ++epIndex) {
         const NHLT_ENDPOINT_DESCRIPTOR *ep;
         const UCHAR *cfg;
-        const UCHAR *epEnd;
-        ULONG epLen, capSize, formatIndex;
+        const UCHAR *epEnd, *endpointConfig;
+        ULONG epLen, capSize, endpointBytes, formatIndex;
         UCHAR formatCount;
         ULONG sampleRate = 0, channels = 0, bitDepth = 0;
 
@@ -98,9 +86,13 @@ NTSTATUS SofNhltParse(
         RtlCopyMemory(&capSize, cfg, sizeof(capSize));
         cfg += sizeof(ULONG);
         if (capSize > (size_t)(epEnd - cfg)) return STATUS_INVALID_PARAMETER;
-        cfg += capSize;
+        endpointConfig = cfg;
+        endpointBytes = capSize;
+        cfg += endpointBytes;
         if (cfg == epEnd) return STATUS_INVALID_PARAMETER;
         formatCount = *cfg++;
+        if (Visitor)
+            Visitor(Context, ep, endpointConfig, endpointBytes, NULL, NULL, 0);
         for (formatIndex = 0; formatIndex < formatCount; ++formatIndex) {
             WAVEFORMATEXTENSIBLE wfe;
             if ((size_t)(epEnd - cfg) < sizeof(wfe) + sizeof(ULONG))
@@ -110,6 +102,8 @@ NTSTATUS SofNhltParse(
             RtlCopyMemory(&capSize, cfg, sizeof(capSize));
             cfg += sizeof(ULONG);
             if (capSize > (size_t)(epEnd - cfg)) return STATUS_INVALID_PARAMETER;
+            if (Visitor)
+                Visitor(Context, ep, endpointConfig, endpointBytes, &wfe, cfg, capSize);
             cfg += capSize;
             if (formatIndex == 0) {
                 sampleRate = wfe.Format.nSamplesPerSec;
@@ -126,6 +120,8 @@ NTSTATUS SofNhltParse(
                 parsed.Dmic.ChannelCount = channels;
                 parsed.Dmic.SampleRate = sampleRate;
                 parsed.Dmic.BitDepth = bitDepth;
+                if (endpointBytes >= 3u && endpointConfig[1] == 1u)
+                    parsed.Dmic.ArrayType = endpointConfig[2] & 0x0fu;
             }
             break;
         case NHLT_LINK_SSP:
@@ -161,7 +157,124 @@ NTSTATUS SofNhltParse(
         curr += epLen;
     }
     parsed.IsValid = TRUE;
-    *Info = parsed;
+    if (Info) *Info = parsed;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS SofNhltParse(
+    _In_reads_bytes_(NhltSize) const void *NhltBuffer,
+    _In_ size_t NhltSize,
+    _Out_ PSOF_NHLT_INFO Info
+)
+{
+    if (!Info) return STATUS_INVALID_PARAMETER;
+    RtlZeroMemory(Info, sizeof(*Info));
+    return SofNhltWalk(NhltBuffer, NhltSize, Info, NULL, NULL);
+}
+
+NTSTATUS SofNhltEnumerate(
+    _In_reads_bytes_(NhltSize) const void *NhltBuffer,
+    _In_ size_t NhltSize,
+    _In_ SOF_NHLT_VISITOR Visitor,
+    _In_opt_ void *Context
+)
+{
+    NTSTATUS status;
+
+    if (!Visitor) return STATUS_INVALID_PARAMETER;
+    /* Validate the entire input before exposing even its first record. */
+    status = SofNhltWalk(NhltBuffer, NhltSize, NULL, NULL, NULL);
+    if (!NT_SUCCESS(status)) return status;
+    return SofNhltWalk(NhltBuffer, NhltSize, NULL, Visitor, Context);
+}
+
+typedef struct _SOF_NHLT_MATCH {
+    const SOF_NHLT_CONFIG_KEY *Key;
+    const NHLT_ENDPOINT_DESCRIPTOR *Endpoint;
+    const UCHAR *EndpointConfig;
+    ULONG EndpointBytes;
+    WAVEFORMATEXTENSIBLE Format;
+    const UCHAR *Config;
+    ULONG ConfigBytes;
+    BOOLEAN Conflict;
+} SOF_NHLT_MATCH;
+
+static void SofNhltMatchPcm(
+    _In_opt_ void *Context,
+    _In_ const NHLT_ENDPOINT_DESCRIPTOR *Endpoint,
+    _In_reads_bytes_(EndpointBytes) const UCHAR *EndpointConfig,
+    _In_ ULONG EndpointBytes,
+    _In_opt_ const WAVEFORMATEXTENSIBLE *Format,
+    _In_reads_bytes_opt_(ConfigBytes) const UCHAR *Config,
+    _In_ ULONG ConfigBytes
+)
+{
+    /* KSDATAFORMAT_SUBTYPE_PCM, serialized in the NHLT wave format. */
+    static const UCHAR pcm[] = {
+        1, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xAA, 0, 0x38, 0x9B, 0x71
+    };
+    SOF_NHLT_MATCH *match = (SOF_NHLT_MATCH *)Context;
+    const SOF_NHLT_CONFIG_KEY *key = match->Key;
+
+    if (!Format || Endpoint->LinkType != key->LinkType ||
+        Endpoint->VirtualBusId != key->VirtualBusId ||
+        Endpoint->Direction != key->Direction || Endpoint->DeviceType != key->DeviceType ||
+        Format->Format.wFormatTag != 0xfffeu || Format->Format.cbSize != 22u ||
+        !RtlEqualMemory(&Format->SubFormat, pcm, sizeof(pcm)) ||
+        Format->Format.nSamplesPerSec != key->SampleRate ||
+        Format->Format.nChannels != key->Channels ||
+        Format->Format.wBitsPerSample != key->ContainerBits ||
+        Format->Samples.wValidBitsPerSample != key->ValidBits)
+        return;
+
+    if (match->Endpoint) {
+        /* Ignore the enclosing descriptor length, which may include other
+         * formats. Compare the endpoint identity and both configuration blobs. */
+        if (!RtlEqualMemory(&match->Endpoint->LinkType, &Endpoint->LinkType,
+                            sizeof(*Endpoint) - sizeof(Endpoint->Length)) ||
+            !RtlEqualMemory(&match->Format, Format, sizeof(*Format)) ||
+            match->EndpointBytes != EndpointBytes || match->ConfigBytes != ConfigBytes ||
+            !RtlEqualMemory(match->EndpointConfig, EndpointConfig, EndpointBytes) ||
+            !RtlEqualMemory(match->Config, Config, ConfigBytes))
+            match->Conflict = TRUE;
+        return;
+    }
+
+    match->Endpoint = Endpoint;
+    match->EndpointConfig = EndpointConfig;
+    match->EndpointBytes = EndpointBytes;
+    match->Format = *Format;
+    match->Config = Config;
+    match->ConfigBytes = ConfigBytes;
+}
+
+NTSTATUS SofNhltCopyConfiguration(
+    _In_reads_bytes_(NhltSize) const void *NhltBuffer,
+    _In_ size_t NhltSize,
+    _In_ const SOF_NHLT_CONFIG_KEY *Key,
+    _Out_writes_bytes_opt_(Capacity) UCHAR *Config,
+    _In_ ULONG Capacity,
+    _Out_ PULONG ConfigBytes
+)
+{
+    SOF_NHLT_MATCH match = {0};
+    NTSTATUS status;
+
+    if (!ConfigBytes) return STATUS_INVALID_PARAMETER;
+    *ConfigBytes = 0;
+    if (!Key || (!Config && Capacity) || !Key->SampleRate || !Key->Channels ||
+        !Key->ValidBits || Key->ValidBits > Key->ContainerBits)
+        return STATUS_INVALID_PARAMETER;
+
+    match.Key = Key;
+    status = SofNhltEnumerate(NhltBuffer, NhltSize, SofNhltMatchPcm, &match);
+    if (!NT_SUCCESS(status)) return status;
+    if (match.Conflict) return STATUS_OBJECT_NAME_COLLISION;
+    if (!match.Endpoint || !match.ConfigBytes) return STATUS_NOT_FOUND;
+
+    *ConfigBytes = match.ConfigBytes;
+    if (Capacity < match.ConfigBytes) return STATUS_BUFFER_TOO_SMALL;
+    RtlCopyMemory(Config, match.Config, match.ConfigBytes);
     return STATUS_SUCCESS;
 }
 
@@ -179,82 +292,38 @@ NTSTATUS SofNhltQueryAcpiTable(
 
 #ifdef _KERNEL_MODE
     {
-        SYSTEM_FIRMWARE_TABLE_INFORMATION queryInfo = {0};
-        PSYSTEM_FIRMWARE_TABLE_INFORMATION pTableInfo;
-        ULONG querySize;
-        ULONG tableSize;
-        ULONG retLen = 0;
-        NTSTATUS status;
+        ULONG needed = 0, actual = 0;
+        PVOID buffer;
+        NTSTATUS status = AuxKlibInitialize();
+        if (!NT_SUCCESS(status)) return status;
 
-        queryInfo.ProviderSignature = ACPI_PROVIDER_SIGNATURE; /* 'ACPI' */
-        queryInfo.Action = SystemFirmwareTable_Get;
-        queryInfo.TableID = NHLT_ACPI_SIGNATURE; /* 'NHLT' */
-        queryInfo.TableBufferLength = 0;
-
-        /* First query to determine buffer size */
-        status = ZwQuerySystemInformation(
-            SystemFirmwareTableInformation,
-            &queryInfo,
-            sizeof(queryInfo),
-            &retLen
-        );
-
-        tableSize = queryInfo.TableBufferLength;
-        if (tableSize == 0) {
-            tableSize = retLen;
-        }
-
-        if (tableSize == 0) {
-            return STATUS_NOT_FOUND;
-        }
-
-        /* Bound allocation and prevent integer overflow. */
-        if (tableSize > 1024u * 1024u) return STATUS_INVALID_PARAMETER;
-        querySize = sizeof(SYSTEM_FIRMWARE_TABLE_INFORMATION) + tableSize;
-        pTableInfo = (PSYSTEM_FIRMWARE_TABLE_INFORMATION)ExAllocatePool2(
-            POOL_FLAG_NON_PAGED,
-            querySize,
-            SOF_NHLT_TAG
-        );
-        if (pTableInfo == NULL) {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        RtlZeroMemory(pTableInfo, querySize);
-        pTableInfo->ProviderSignature = ACPI_PROVIDER_SIGNATURE;
-        pTableInfo->Action = SystemFirmwareTable_Get;
-        pTableInfo->TableID = NHLT_ACPI_SIGNATURE;
-        pTableInfo->TableBufferLength = tableSize;
-
-        status = ZwQuerySystemInformation(
-            SystemFirmwareTableInformation,
-            pTableInfo,
-            querySize,
-            &retLen
-        );
-
-        if (!NT_SUCCESS(status)) {
-            ExFreePoolWithTag(pTableInfo, SOF_NHLT_TAG);
+        status = AuxKlibGetSystemFirmwareTable(ACPI_PROVIDER_SIGNATURE,
+            NHLT_ACPI_SIGNATURE, NULL, 0, &needed);
+        if (!NT_SUCCESS(status) && status != STATUS_BUFFER_TOO_SMALL)
             return status;
-        }
+        if (needed == 0) return STATUS_NOT_FOUND;
+        if (needed > SOF_NHLT_MAX_TABLE_BYTES) return STATUS_INVALID_BUFFER_SIZE;
 
-        if (pTableInfo->TableBufferLength == 0 ||
-            pTableInfo->TableBufferLength > tableSize) {
-            ExFreePoolWithTag(pTableInfo, SOF_NHLT_TAG);
-            return STATUS_INVALID_PARAMETER;
+        buffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, needed, SOF_NHLT_TAG);
+        if (!buffer) return STATUS_INSUFFICIENT_RESOURCES;
+        status = AuxKlibGetSystemFirmwareTable(ACPI_PROVIDER_SIGNATURE,
+            NHLT_ACPI_SIGNATURE, buffer, needed, &actual);
+        if (!NT_SUCCESS(status) || actual == 0 || actual > needed) {
+            ExFreePoolWithTag(buffer, SOF_NHLT_TAG);
+            return NT_SUCCESS(status) ? STATUS_INVALID_BUFFER_SIZE : status;
         }
-        *NhltBufferOut = pTableInfo->TableBuffer;
-        *NhltSizeOut = pTableInfo->TableBufferLength;
+        *NhltBufferOut = buffer;
+        *NhltSizeOut = actual;
         return STATUS_SUCCESS;
     }
 #else
     {
         /* User-mode implementation via GetSystemFirmwareTable */
-        DWORD needed = GetSystemFirmwareTable('ACPI', 'NHLT', NULL, 0);
+        DWORD needed = GetSystemFirmwareTable(ACPI_PROVIDER_SIGNATURE, NHLT_ACPI_SIGNATURE, NULL, 0);
         PVOID buffer;
         DWORD readBytes;
 
-        if (needed == 0 || needed > 1024u * 1024u) {
+        if (needed == 0 || needed > SOF_NHLT_MAX_TABLE_BYTES) {
             return STATUS_NOT_FOUND;
         }
 
@@ -263,7 +332,7 @@ NTSTATUS SofNhltQueryAcpiTable(
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
-        readBytes = GetSystemFirmwareTable('ACPI', 'NHLT', buffer, needed);
+        readBytes = GetSystemFirmwareTable(ACPI_PROVIDER_SIGNATURE, NHLT_ACPI_SIGNATURE, buffer, needed);
         if (readBytes == 0 || readBytes > needed) {
             free(buffer);
             return STATUS_NOT_FOUND;
@@ -285,12 +354,7 @@ VOID SofNhltFreeAcpiTable(
     }
 
 #ifdef _KERNEL_MODE
-    {
-        /* Buffer is offset within SYSTEM_FIRMWARE_TABLE_INFORMATION */
-        PSYSTEM_FIRMWARE_TABLE_INFORMATION pTableInfo =
-            CONTAINING_RECORD(NhltBuffer, SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer);
-        ExFreePoolWithTag(pTableInfo, SOF_NHLT_TAG);
-    }
+    ExFreePoolWithTag(NhltBuffer, SOF_NHLT_TAG);
 #else
     free(NhltBuffer);
 #endif
