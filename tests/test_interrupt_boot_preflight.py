@@ -55,7 +55,19 @@ device=(root/"src/driver/Device.c").read_text()
 d0=device.split("NTSTATUS\nSofEvtDeviceD0Entry(",1)[1].split("\n/**",1)[0]
 assert d0.index("if (ipcFaulted ||") < d0.index("SofIpcEnableInterrupts(ctx)")
 assert d0.index("return bootStatus;") < d0.index("WdfTimerStart(")
-assert d0.count("ipcFaulted = ctx->IpcFaulted || ctx->FwState != SOF_FW_BOOT_COMPLETE;") == 2
+assert d0.count("ipcFaulted = ctx->IpcFaulted || ctx->FwState != SOF_FW_BOOT_COMPLETE;") == 1
 assert d0.index("return STATUS_DEVICE_NOT_READY;",d0.index("bootStatus =")) < d0.index("WdfTimerStart(")
 assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)" in d0
 print("PASS: D0 entry fails before starting timers when firmware is not ready")
+
+# D0 must not run speculative audio graphs or reuse an unverified retained DSP.
+assert "initialFwState != SOF_FW_BOOT_NOT_STARTED" in d0
+assert "PreviousState != WdfPowerDeviceD3Final" in d0
+assert d0.index("!ctx->HardwarePrepared") < d0.index("SofIpcEnableInterrupts(ctx)")
+assert d0.index("ipcFaulted = ctx->IpcFaulted || ctx->FwState != SOF_FW_BOOT_COMPLETE;") < d0.index("ctx->CurrentPowerState = PowerDeviceD0;")
+for forbidden in ("SofIpc4CreateHdmiPipeline(", "SofIpc4CreatePlaybackPipeline(",
+                  "SofIpc4FreeInstanceId(", "SofHdaInitCodec(", "SofHdaInitDisplayCodec(",
+                  "MTL_DSP2CXCTL_PRIMARY_CORE", "SofHdaSetD0i3(", "SofUaolInit("):
+    assert forbidden not in d0, forbidden
+assert "All on-demand pipelines verified" not in d0
+print("PASS: cold boot ownership and no speculative audio activation on D0 entry")
