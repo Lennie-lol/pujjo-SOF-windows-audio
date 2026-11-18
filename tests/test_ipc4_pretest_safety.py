@@ -33,3 +33,26 @@ for name,register in (("SofReadFwStatus","FwStatusReg"),("SofReadRomStatus","Rom
     assert body.index("pj_ipc4_mmio_span_valid") < body.index("SofDspRead32")
     assert "Ctx->HwDesc->"+register+", 4u" in body
 print("PASS: hardware doorbell ownership and DSP status register bounds")
+
+# Crash collection must not perform file I/O at elevated IRQL or read an
+# unverified BAR range. Information omitted from a dump must not be fabricated.
+dump=ipc.split("VOID\nSofDspDumpCore(",1)[1].split("\n/**",1)[0]
+assert dump.index("KeAreAllApcsDisabled()") < dump.index("SofDspRead32")
+assert dump.index("pj_ipc4_mmio_span_valid") < dump.index("SofDspRead32")
+assert "Ctx->HwDesc->RomStatusReg, 32u" in dump
+assert "Ctx->HwDesc->MailboxUplinkOffset, 4096u" in dump
+assert "Ctx->HwDesc->MailboxDownlinkOffset, 4096u" in dump
+assert "hdr->DeviceId = Ctx->DeviceId;" in dump
+assert "hdr->VendorId = Ctx->VendorId;" in dump
+assert "debugWinOffset + debugWinSize" not in dump
+assert "ULONG debugWinSize = 0;" in dump
+drain=ipc.split("VOID\nSofIpc4DrainFwLogs(",1)[1].split("\n/**",1)[0]
+assert drain.index("pj_ipc4_mmio_span_valid(Ctx->Bar4Length, debugWinOffset, 65536u)") < drain.index("SofDspRead32")
+assert "if (slotOffset != 0u) return;" in drain
+assert "if (!slotOffset) return;" in drain
+assert "if (dspWritePtr >= logBufSize || hostReadPtr >= logBufSize) return;" in drain
+assert "consumed = bytesToRead;" in drain
+assert "hostReadPtr = (hostReadPtr + consumed) % logBufSize;" in drain
+assert "SofDspWrite32(sramBase, slotOffset, hostReadPtr);" in drain
+assert "SofDspWrite32(sramBase, slotOffset, dspWritePtr);" not in drain
+print("PASS: bounded diagnostic snapshots and trace cursor integrity")
