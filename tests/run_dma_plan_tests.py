@@ -129,3 +129,15 @@ copier=topo.split("NTSTATUS SofIpc4BuildCopierConfig(",1)[1].split("\n}",1)[0]
 assert copier.index("totalSize += sizeof(struct sof_ipc4_alh_configuration_blob)") < copier.index("if (MaxBuffer < totalSize)") < copier.index("RtlZeroMemory(CopierBuffer, totalSize)")
 assert "chunkBytes = 384" not in copier and "chunkBytes = 384" not in gain
 print("PASS: IPC4 frame-aligned copier/gain geometry and bounded ALH blob")
+
+# WaveRT lifecycle must not publish RUN or free notification context early.
+state=wave.split("NTSTATUS SofWaveRtSetState(",1)[1].split("\n}",1)[0]
+run=state.split("case KSSTATE_RUN:",1)[1].split("case KSSTATE_PAUSE:",1)[0]
+assert run.index("status = SofIpc4SetPipelineState") < run.index("if (!NT_SUCCESS(status)) goto run_failed;",run.index("status = SofIpc4SetPipelineState")) < run.index("Stream->State = KSSTATE_RUN;") < run.index("KeSetTimerEx")
+rollback=state.split("run_failed:",1)[1]
+assert "SofWaveRtStopHdaStream(Stream)" in rollback and "SofWaveRtStopLinkStream(Stream)" in rollback
+assert "Stream->IsActive = FALSE;" in rollback and "Stream->State = KSSTATE_STOP;" in rollback
+free=wave.split("NTSTATUS SofWaveRtFreeStream(",1)[1].split("\n}",1)[0]
+assert free.index("KeCancelTimer") < free.index("KeRemoveQueueDpc") < free.index("KeFlushQueuedDpcs") < free.index("ExFreePoolWithTag")
+assert free.index("if (NT_SUCCESS(deleteStatus))") < free.index("SofIpc4FreeInstanceId")
+print("PASS: WaveRT lifecycle ordering and failed deletion ownership guards")
