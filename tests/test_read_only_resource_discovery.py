@@ -15,3 +15,17 @@ assert "SofIpcInitialize(ctx)" in prep
 assert "no CRST writes" in prep
 assert "ctx->Bar0Length < SOF_HDA_WAKESTS + sizeof(USHORT)" in prep
 print("PASS: PCI/HDA resource discovery is read-only and checks codec status bounds")
+
+# Diagnostic reporting must not open an SPB or GPIO target in default builds.
+peripheral=(Path(__file__).resolve().parents[1]/"src/driver/peripheral/PujjoPeripheralKmdf.c").read_text()
+match=peripheral.split("static BOOLEAN PjHardwareIdMatches(",1)[1].split("\n}",1)[0]
+assert "ids[total - 1] != 0 || ids[total - 2] != 0" in match
+assert "matched = TRUE;" in match and "return TRUE;" not in match
+assert match.index("if (ids[pos++] != 0) return FALSE;") < match.index("return matched;")
+prepare=peripheral.split("NTSTATUS PjEvtPrepareHardware(",1)[1].split("\n}",1)[0]
+assert "Resource policy rejected:" in prepare and "Resource policy accepted:" in prepare
+assert "connection class=" in prepare
+assert prepare.index("if (result != PJ_POLICY_OK)") < prepare.index("ctx->Evidence = summary;") < prepare.index("Pj5682sSpbOpen(")
+assert prepare.index("#if defined(PJ_TARGET_CODEC) && defined(PJ5682S_ENABLE_READONLY_PROBE)") < prepare.index("Pj5682sSpbOpen(")
+assert "Pj1019" not in prepare
+print("PASS: peripheral diagnostics report translated resources without default activation")

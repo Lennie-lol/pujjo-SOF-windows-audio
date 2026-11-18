@@ -41,6 +41,7 @@ static BOOLEAN PjHardwareIdMatches(WDFDEVICE Device)
     WCHAR ids[256] = {0};
     ULONG bytes = 0, total, pos = 0;
     NTSTATUS status;
+    BOOLEAN matched = FALSE;
     UNICODE_STRING expected1, expected2, found;
 #ifdef PJ_TARGET_CODEC
     RtlInitUnicodeString(&expected1, L"ACPI\\RTL5682");
@@ -55,6 +56,8 @@ static BOOLEAN PjHardwareIdMatches(WDFDEVICE Device)
         bytes > sizeof(ids) || (bytes % sizeof(WCHAR)) != 0)
         return FALSE;
     total = bytes / sizeof(WCHAR);
+    /* Validate the complete MULTI_SZ, not merely its first matching entry. */
+    if (ids[total - 1] != 0 || ids[total - 2] != 0) return FALSE;
     while (pos < total && ids[pos]) {
         ULONG end = pos;
         while (end < total && ids[end]) ++end;
@@ -64,10 +67,14 @@ static BOOLEAN PjHardwareIdMatches(WDFDEVICE Device)
         found.MaximumLength = found.Length;
         if (RtlEqualUnicodeString(&found, &expected1, TRUE) ||
             RtlEqualUnicodeString(&found, &expected2, TRUE))
-            return TRUE;
+            matched = TRUE;
         pos = end + 1;
     }
-    return FALSE;
+    /* Allow trailing NUL padding, but no hidden strings after termination. */
+    while (pos < total) {
+        if (ids[pos++] != 0) return FALSE;
+    }
+    return matched;
 }
 
 EVT_WDF_DRIVER_DEVICE_ADD PjEvtDeviceAdd;
@@ -126,11 +133,17 @@ NTSTATUS PjEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw,
     RtlZeroMemory(&ctx->Evidence, sizeof(ctx->Evidence));
     ctx->ResourceEvidenceValid = FALSE;
     /* Board guard uses SMBIOS Google + Pujjo/Pujjo1e, must fail closed. */
-    if (!PujjoBoardIdentityMatches() || !PjHardwareIdMatches(Device))
+    if (!PujjoBoardIdentityMatches() || !PjHardwareIdMatches(Device)) {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "[PujjoProbe] Board or peripheral hardware ID rejected\n");
         return STATUS_NOT_SUPPORTED;
+    }
     n = WdfCmResourceListGetCount(Translated);
-    if (n == 0 || n > PJ_MAX_RESOURCES)
+    if (n == 0 || n > PJ_MAX_RESOURCES) {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "[PujjoProbe] Invalid translated resource count: %lu\n", n);
         return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
     RtlZeroMemory(items, sizeof(items));
     for (i = 0; i < n; ++i) {
         PCM_PARTIAL_RESOURCE_DESCRIPTOR d =
@@ -139,6 +152,8 @@ NTSTATUS PjEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw,
         items[i].kind = PJ_RES_OTHER;
         if (d->Type == CmResourceTypeInterrupt) {
             items[i].kind = PJ_RES_INTERRUPT;
+            DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+                "[PujjoProbe] Resource %lu: interrupt flags=0x%x\n", i, (ULONG)d->Flags);
         } else if (d->Type == CmResourceTypeConnection) {
             items[i].id_low = d->u.Connection.IdLowPart;
             items[i].id_high = d->u.Connection.IdHighPart;
@@ -149,6 +164,11 @@ NTSTATUS PjEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw,
                      d->u.Connection.Type == CM_RESOURCE_CONNECTION_TYPE_GPIO_IO)
                 items[i].kind = PJ_RES_GPIO_IO;
             else items[i].kind = PJ_RES_UNKNOWN_CONNECTION;
+            /* These values are opaque connection IDs, not pin/address data. */
+            DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+                "[PujjoProbe] Resource %lu: connection class=%u type=%u id=%08lx:%08lx\n",
+                i, (ULONG)d->u.Connection.Class, (ULONG)d->u.Connection.Type,
+                (ULONG)items[i].id_high, (ULONG)items[i].id_low);
         }
     }
 #ifdef PJ_TARGET_CODEC
@@ -156,7 +176,14 @@ NTSTATUS PjEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw,
 #else
     result = pj_validate_resources(PJ_PROBE_AMP, items, n, &summary);
 #endif
-    if (result != PJ_POLICY_OK) return STATUS_DEVICE_CONFIGURATION_ERROR;
+    if (result != PJ_POLICY_OK) {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "[PujjoProbe] Resource policy rejected: %u\n", (ULONG)result);
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+        "[PujjoProbe] Resource policy accepted: I2C=%lu GPIO=%lu IRQ=%lu\n",
+        (ULONG)summary.i2c_count, (ULONG)summary.gpio_count, (ULONG)summary.interrupt_count);
     ctx->Evidence = summary;
     ctx->ResourceEvidenceValid = TRUE;
 #if defined(PJ_TARGET_CODEC) && defined(PJ5682S_ENABLE_READONLY_PROBE)
@@ -168,7 +195,12 @@ NTSTATUS PjEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw,
          * where Windows reports the device powered. NEVER writes. */
         status=Pj5682sSpbOpen(Device, summary.connection_low,
                               summary.connection_high, &ctx->Spb);
-        if (!NT_SUCCESS(status)) { ctx->ResourceEvidenceValid=FALSE; return status; }
+        if (!NT_SUCCESS(status)) {
+            DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+                "[PujjoProbe] SPB open failed: 0x%08lx\n", (ULONG)status);
+            ctx->ResourceEvidenceValid=FALSE;
+            return status;
+        }
         Pj5682sSpbBindCallbacks(&ctx->Spb, &bus);
         if (pj5682s_bind(&ctx->Codec, &bus)!=PJ5682S_OK) {
             pj5682s_unbind(&ctx->Codec);
@@ -202,6 +234,9 @@ NTSTATUS PjEvtD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
     result=pj5682s_identify(&ctx->Codec);
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, result==PJ5682S_OK ? DPFLTR_INFO_LEVEL : DPFLTR_ERROR_LEVEL,
+        "[PujjoProbe] RT5682S identity status=%ld verified=0x%04x\n",
+        (LONG)result, (ULONG)ctx->Codec.verified_id);
     if (result!=PJ5682S_OK) (void)Pj5682sSpbSetPower(&ctx->Spb, FALSE);
     return result==PJ5682S_OK ? STATUS_SUCCESS : STATUS_DEVICE_CONFIGURATION_ERROR;
 }
