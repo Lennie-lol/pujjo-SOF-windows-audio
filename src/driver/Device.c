@@ -661,6 +661,21 @@ SofEvtDeviceD0Entry(
                "[SOF] EvtDeviceD0Entry: Entering D0 from State %d\n",
                PreviousState);
 
+    KIRQL ipcIrql;
+    SOF_FW_BOOT_STATE initialFwState;
+    BOOLEAN ipcFaulted;
+
+    KeAcquireSpinLock(&ctx->IpcLock, &ipcIrql);
+    initialFwState = ctx->FwState;
+    ipcFaulted = ctx->IpcFaulted;
+    KeReleaseSpinLock(&ctx->IpcLock, ipcIrql);
+    /* A faulted or in-progress session cannot be treated as a retained DSP.
+     * Recovery requires a separately reviewed reset and quiescence path. */
+    if (ipcFaulted ||
+        (initialFwState != SOF_FW_BOOT_NOT_STARTED &&
+         initialFwState != SOF_FW_BOOT_COMPLETE))
+        return STATUS_DEVICE_NOT_READY;
+
     ctx->CurrentPowerState = PowerDeviceD0;
 
     /* Wake hardware from D0i3 if entering from a low-power state */
@@ -672,7 +687,7 @@ SofEvtDeviceD0Entry(
     SofIpcEnableInterrupts(ctx);
 
     /* Check if initial cold boot or waking from low-power state */
-    BOOLEAN isInitialBoot = (ctx->FwState == SOF_FW_BOOT_NOT_STARTED);
+    BOOLEAN isInitialBoot = (initialFwState == SOF_FW_BOOT_NOT_STARTED);
     BOOLEAN dspNeedsBoot = isInitialBoot;
 
     if (!isInitialBoot && ctx->Bar4VirtualAddress && ctx->HwDesc) {
@@ -707,7 +722,19 @@ SofEvtDeviceD0Entry(
         }
 
         bootStatus = SofStartFirmwareBoot(ctx, NULL);
-        if (NT_SUCCESS(bootStatus) && ctx->FwState == SOF_FW_BOOT_COMPLETE) {
+        if (!NT_SUCCESS(bootStatus)) {
+            SofLogBreadcrumb("[Power] D0 entry aborted: firmware boot failed.\n");
+            SofIpcDisableInterrupts(ctx);
+            return bootStatus;
+        }
+        KeAcquireSpinLock(&ctx->IpcLock, &ipcIrql);
+        ipcFaulted = ctx->IpcFaulted || ctx->FwState != SOF_FW_BOOT_COMPLETE;
+        KeReleaseSpinLock(&ctx->IpcLock, ipcIrql);
+        if (ipcFaulted) {
+            SofIpcDisableInterrupts(ctx);
+            return STATUS_DEVICE_NOT_READY;
+        }
+        {
             SOF_AUDIO_FORMAT_PARAMS fmt;
             ULONG hostInst, gainInst, daiInst;
 
@@ -791,6 +818,14 @@ SofEvtDeviceD0Entry(
             }
         }
     } else {
+        /* ROM/power evidence alone does not establish a usable IPC session. */
+        KeAcquireSpinLock(&ctx->IpcLock, &ipcIrql);
+        ipcFaulted = ctx->IpcFaulted || ctx->FwState != SOF_FW_BOOT_COMPLETE;
+        KeReleaseSpinLock(&ctx->IpcLock, ipcIrql);
+        if (ipcFaulted) {
+            SofIpcDisableInterrupts(ctx);
+            return STATUS_DEVICE_NOT_READY;
+        }
         /* DSP retained power across sleep: ensure HDA codec power state is restored to D0 */
         if (ctx->HdaCodecPresent) {
             ULONG dummy;
