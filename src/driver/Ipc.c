@@ -125,7 +125,8 @@ SofIpcEnableInterrupts(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
-    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u))
         return;
 
     if (Ctx->HwDesc->IsAce) {
@@ -134,7 +135,17 @@ SofIpcEnableInterrupts(
          * Read Interrupt IP Pointer (MTL_HFINTIPPTR) to determine the base offset
          * of the top-level interrupt controller block within DSP BAR4 MMIO space.
          */
-        ULONG hfintipptr = SofDspRead32(Ctx->Bar4VirtualAddress, MTL_HFINTIPPTR) & MTL_HFINTIPPTR_PTR_MASK;
+        ULONG rawPtr;
+        ULONG hfintipptr;
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_HFINTIPPTR, 4u) ||
+            !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_DSP_REG_HfHIPCIE, 4u))
+            return;
+        rawPtr = SofDspRead32(Ctx->Bar4VirtualAddress, MTL_HFINTIPPTR);
+        if (rawPtr == 0xFFFFFFFFu)
+            return;
+        hfintipptr = rawPtr & MTL_HFINTIPPTR_PTR_MASK;
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, hfintipptr, 4u))
+            return;
 
         /*
          * ACE Interrupt Architecture Level 1 Enable:
@@ -184,7 +195,8 @@ SofIpcDisableInterrupts(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
-    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u))
         return;
 
     /*
@@ -198,7 +210,18 @@ SofIpcDisableInterrupts(
 
     if (Ctx->HwDesc->IsAce) {
         /* Read Interrupt IP Pointer to locate top-level IRQ block */
-        ULONG hfintipptr = SofDspRead32(Ctx->Bar4VirtualAddress, MTL_HFINTIPPTR) & MTL_HFINTIPPTR_PTR_MASK;
+        ULONG rawPtr;
+        ULONG hfintipptr;
+        /* Keep channel interrupts masked even if the ACE hierarchy is invalid. */
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_HFINTIPPTR, 4u) ||
+            !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_DSP_REG_HfHIPCIE, 4u))
+            return;
+        rawPtr = SofDspRead32(Ctx->Bar4VirtualAddress, MTL_HFINTIPPTR);
+        if (rawPtr == 0xFFFFFFFFu)
+            return;
+        hfintipptr = rawPtr & MTL_HFINTIPPTR_PTR_MASK;
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, hfintipptr, 4u))
+            return;
 
         /* Disable Host IPC interrupt in second-level HfHIPCIE */
         SofDspUpdateBits(Ctx->Bar4VirtualAddress,
@@ -553,6 +576,8 @@ SofIpcIsrCheck(
      * descriptor fails closed without acknowledging another device's IRQ. */
     if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdr, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIda, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdd, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTda, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u))
         return FALSE;
 
@@ -564,7 +589,10 @@ SofIpcIsrCheck(
                                     Ctx->HwDesc->IntIpPtrReg, 4u))
             return FALSE;
         ptr = SofDspRead32(Ctx->Bar4VirtualAddress,
-                           Ctx->HwDesc->IntIpPtrReg) & MTL_HFINTIPPTR_PTR_MASK;
+                           Ctx->HwDesc->IntIpPtrReg);
+        if (ptr == 0xFFFFFFFFu)
+            return FALSE;
+        ptr &= MTL_HFINTIPPTR_PTR_MASK;
         /* Check before addition so even hostile firmware offsets cannot wrap. */
         if (ptr > Ctx->Bar4Length ||
             MTL_DSP_IRQSTS > Ctx->Bar4Length - ptr ||
@@ -581,6 +609,9 @@ SofIpcIsrCheck(
     /* Check whether DSP raised an incoming message (TDR BUSY) or acknowledged our command (IDA DONE) */
     tdr = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTdr);
     ida = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcIda);
+    /* All-ones doorbell reads can mean an unavailable PCI device, not an IRQ. */
+    if (tdr == 0xFFFFFFFFu || ida == 0xFFFFFFFFu)
+        return FALSE;
 
     if ((tdr & Ctx->HwDesc->HipcTdrBusy) || (ida & Ctx->HwDesc->HipcIdaDone)) {
         /*
@@ -635,6 +666,9 @@ SofIpcDpcHandler(
      * 1. Check if DSP completed our previous host-initiated request (ACK / DONE in IDA)
      */
     ida = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcIda);
+    tdr = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTdr);
+    if (tdr == 0xFFFFFFFFu || ida == 0xFFFFFFFFu)
+        return;
     if (ida & Ctx->HwDesc->HipcIdaDone) {
         /* Mask DONE in HipcCtl */
         SofDspUpdateBits(Ctx->Bar4VirtualAddress,
@@ -669,7 +703,7 @@ SofIpcDpcHandler(
     /*
      * 2. Check if DSP sent an incoming message (Reply or Notification in TDR)
      */
-    tdr = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTdr);
+    /* Use the checked snapshot above; new pending messages can raise another IRQ. */
     if (tdr & Ctx->HwDesc->HipcTdrBusy) {
         ULONG tdd = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTdd);
         ULONG primary = tdr & 0x7FFFFFFF;
