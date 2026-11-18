@@ -37,5 +37,12 @@ read=transport.split("static int Pj5682sSpbRead(",1)[1].split("\n}",1)[0]
 for register in ("PJ5682S_DEVICE_ID_REGISTER","PJ5682S_VENDOR_ID_REGISTER","PJ5682S_VERSION_REGISTER"):
     assert read.index(register) < read.index("WdfIoTargetSendIoctlSynchronously")
 assert "tx[0] != 0" in read and "txLen!=2" in read
-assert "transferred == txLen + rxLen" in read
+# Both transport status and exact byte count must be checked before publishing.
+assert "SpbTransferDirectionFromDevice, 0, observed, (ULONG)sizeof(observed)" in read
+guard = "if (!NT_SUCCESS(status) || transferred != txLen + rxLen)"
+assert read.index("WdfIoTargetSendIoctlSynchronously") < read.index(guard)
+failure = read.split(guard, 1)[1].split("}", 1)[0]
+assert "return -1;" in failure and "WdfWaitLockRelease(state->Lock);" in failure
+assert read.index(guard) < read.index("rx[0] = observed[0];") < read.index("rx[1] = observed[1];")
+assert read.count("rx[0] =") == 1 and read.count("rx[1] =") == 1
 print("PASS: Windows SPB transport restricts physical transactions to identity reads")
