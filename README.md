@@ -1,10 +1,13 @@
 # Pujjo SOF Windows Audio Driver
 
 **Experimental open-source Windows 11 audio driver development for Google Pujjo / Pujjo1e Chromebooks**  
-**Build milestone (2026-11-17):** GitHub Actions #10 on `main` passed the WDK
-Debug and Release builds plus portable regressions. Windows 11 VM Debug and
-Release builds also passed. See [PREINSTALL_READINESS.md](PREINSTALL_READINESS.md)
-for the remaining blockers. No version bump.
+**Development update (2026-11-18):** The source-only project has passed
+Microsoft WDK Debug/Release and portable regression runs on GitHub Actions.
+The Windows 11 VM independently validated commit `d990314c` (Debug and
+Release). Subsequent CI milestones cover IPC4 guards, NHLT resource parsing,
+DMA geometry, interrupt bounds, read-only discovery, and failed BAR rollback.
+See [PREINSTALL_READINESS.md](PREINSTALL_READINESS.md) for the current
+limitations, specific CI provenance, and blockers. No version bump.
 
 **Current source version:** `v0.0.17` · **Status:** source-only / development · **License:** see [`LICENSE`](LICENSE)
 

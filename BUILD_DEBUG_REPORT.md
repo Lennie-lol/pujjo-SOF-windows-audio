@@ -1,4 +1,10 @@
-# Windows build debugging — v0.0.17 (no version bump)
+# Windows build debugging — v0.0.17 (historical report; no version bump)
+
+> **Historical debugging snapshot only (GitHub Actions run #4).** The findings
+> below describe the failing build at the time they were written, not the
+> current GitHub access or WDK status. Later Debug, Release and portable CI
+> have succeeded; see [PREINSTALL_READINESS.md](PREINSTALL_READINESS.md)
+> for explicitly verified runs. None verifies live Chromebook audio.
 
 ## Outcome
 

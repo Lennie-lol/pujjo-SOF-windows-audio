@@ -4,12 +4,18 @@
 
 **Not installable. Not hardware verified. No working speaker or microphone audio.**
 
-The `main` revision `d990314c` passed Microsoft WDK Debug and Release compilation
-on GitHub Actions run #10 and separately passed the Windows 11 VM build checks
-(reported in user-provided `RESULTS.txt`). This proves only that the source
-builds and that the unsigned intermediate artifacts are present. It does not
-establish functional device initialization, a valid installable driver package,
-or real SOF firmware boot.
+The Windows 11 VM independently passed Debug/Release and eight static tests
+at commit `d990314c`, reported in user-provided `RESULTS.txt`. GitHub Actions
+also passed all three jobs at `main` in [run #22](https://github.com/Lennie-lol/pujjo-SOF-windows-audio/actions/runs/44271833015)
+(commit `3ad0653e`) and tested the later combined read-only discovery and
+BAR rollback changes at [run #24](https://github.com/Lennie-lol/pujjo-SOF-windows-audio/actions/runs/44272395075)
+(commit `0cb3d5e3`, **38/38 offline commands, Debug and Release all passed**).
+Those combined changes were then merged to `main` at `58fad987`.
+Check the newest `main` workflow result separately; a past successful run
+does not establish a subsequent commit's CI status.
+
+This evidence proves compilation, not functional device initialization, a
+valid installable driver package, real SOF firmware boot, or audio playback.
 
 The *portable host-only* IPC4 boot state model added after that build has no
 PCI, DSP, DMA, I2C, GPIO, WDF or hardware backend. Its mock events and
@@ -76,3 +82,30 @@ provide the Chromebook's PnP or ACPI evidence.
 EXE.** A double-click installer is just a deployment wrapper, not a substitute
 for the requirements above. Never disable Windows driver signing/integrity
 controls as a shortcut.
+
+## Hardware-free development completed after the original VM build
+
+- Source-only IPC4 framing, transaction-state and FW_READY gating; these are
+  not a verified DSP doorbell or ROM protocol implementation.
+- NHLT parser bounds/checksum tests; no fabricated SoundWire device fallback.
+- DMA segmentation/PCM geometry and negative-path tests; no physical DMA
+  engine execution or IOMMU/MDL ownership validation.
+- Fail-closed reply ownership, MMIO range checks and timeout handling;
+  no verified interrupt ownership/ack ordering or PnP race resolution.
+- Read-only PnP PCI/HDA resource discovery; premature PCI BME/MSE,
+  postprocessing/PIE and HDA reset writes removed from discovery.
+- MMIO BAR rollback when PrepareHardware fails; source-only checks do
+  not exercise all WDF failure/power-state interleavings.
+- WDK-linked sources and portable test suites, both Debug and Release CI.
+
+## Actual remaining gate
+
+Some remaining work **cannot** be completed or certified offline. Before
+any installable driver can honestly be claimed, the exact Pujjo rev3 needs
+read-only firmware/PnP/ACPI resource evidence, authenticated firmware and
+topology compatibility, a validated ROM/IPC4/DMA/interrupt and power-state
+backend, SSP/headset/microphone routing, codec/amp configuration, Windows
+audio endpoint registration, signing and reversible installation. These
+steps depend on measured hardware behavior and may require further source
+changes after initial read-only diagnostics. An installer must not be
+created merely because the regression suite is green.
