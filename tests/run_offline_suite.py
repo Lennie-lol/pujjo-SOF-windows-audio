@@ -24,6 +24,7 @@ SUITES=[
  'tests/test_ipc4_evidence_collector_static.py',
  'tests/test_ipc4_pretest_safety.py','tests/run_dma_plan_tests.py',
  'tests/test_interrupt_boot_preflight.py',
+ 'tests/test_read_only_resource_discovery.py',
 ]
 def main():
     p=argparse.ArgumentParser();p.add_argument('--logs',default='validation-v0.0.17/final')

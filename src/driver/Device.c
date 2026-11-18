@@ -117,18 +117,11 @@ VOID SofDiscoverHdaCaps(
 
         if (capId == SOF_HDA_PP_CAP_ID) {
             Ctx->PpCapOffset = capOffset;
-            if (capOffset + SOF_HDA_REG_PP_PPCTL + sizeof(ULONG) <= Ctx->Bar0Length) {
-                /*
-                 * Enable Post-Processing Capability:
-                 * - GPROCEN (bit 30): Global Processing Enable connects DMA engines to DSP.
-                 * - PIE (bit 31): Processing Interrupt Enable allows DSP DMA completions.
-                 */
-                writel(readl(bar0 + capOffset + SOF_HDA_REG_PP_PPCTL) | (SOF_HDA_PPCTL_GPROCEN | SOF_HDA_PPCTL_PIE),
-                       bar0 + capOffset + SOF_HDA_REG_PP_PPCTL);
-                DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                           "[SOF] Discovered PP capability at 0x%x (GPROCEN enabled)\n", capOffset);
-                SofLogBreadcrumb("[CAP] Discovered PP capability (GPROCEN enabled)\n");
-            }
+            /* Discovery only: enabling GPROCEN/PIE is an activation action,
+             * not a side effect of reading HDA capability descriptors. */
+            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
+                       "[SOF] Discovered PP capability at 0x%x (read-only)\n", capOffset);
+            SofLogBreadcrumb("[CAP] Discovered PP capability; not activated\n");
         } else if (capId == SOF_HDA_SPIB_CAP_ID) {
             Ctx->SpbCapOffset = capOffset;
             DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
@@ -189,8 +182,8 @@ SofEvtDevicePrepareHardware(
     SofLogBreadcrumb("[7] SofEvtDevicePrepareHardware entered!\n");
 
     /*
-     * Identify hardware by reading PCI Vendor & Device ID via Standard Bus Interface.
-     * Ensures Bus Master Enable (bit 2) and Memory Space Enable (bit 1) are active.
+     * Identify hardware using a read-only PCI Standard Bus Interface query.
+     * Do not change BME, MSE, or any PCI configuration while discovering.
      */
     if (NT_SUCCESS(WdfFdoQueryForInterface(Device,
                                            &GUID_BUS_INTERFACE_STANDARD,
@@ -209,17 +202,12 @@ SofEvtDevicePrepareHardware(
             ctx->DeviceId = pciConfig.DeviceID;
             ctx->RevisionId = pciConfig.RevisionID;
 
-            /* Ensure Bus Master Enable (bit 2) and Memory Space Enable (bit 1) are set */
-            if ((pciConfig.Command & 0x0006) != 0x0006) {
-                USHORT newCmd = pciConfig.Command | 0x0006;
-                busInterface.SetBusData(busInterface.Context,
-                                        PCI_WHICHSPACE_CONFIG,
-                                        &newCmd,
-                                        FIELD_OFFSET(PCI_COMMON_CONFIG, Command),
-                                        sizeof(USHORT));
-                DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                           "[SOF] PCI Command updated: 0x%04x -> 0x%04x (BME & MSE enabled)\n",
-                           pciConfig.Command, newCmd);
+            /* Windows PCI/PnP owns command register policy. Never turn
+             * on DMA bus mastering or memory decoding during discovery. */
+            if ((pciConfig.Command & 0x0006u) != 0x0006u) {
+                DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL,
+                           "[SOF] PCI MSE/BME not enabled (command=0x%04x); no change made\n",
+                           pciConfig.Command);
             }
         }
         busInterface.InterfaceDereference(busInterface.Context);
@@ -291,23 +279,21 @@ SofEvtDevicePrepareHardware(
         }
     }
 
-    /* Discover HD-A controller capabilities (PP, SPIB) and enable GPROCEN */
+    /* Discover HD-A controller capabilities without activating DSP processing */
     SofDiscoverHdaCaps(ctx);
 
     /*
-     * Check HDA Codec wake/status to detect presence of external codec & display codec.
-     * If Immediate Command Busy (ICB) is stuck from a previous session, cycle GCTL.CRST.
+     * Read codec wake/status without resetting HDA link or DSP state.
+     * Recovery from stuck Immediate Command Busy (ICB) must be a separate
+     * validated hardware operation, never part of PnP discovery.
      */
     if (ctx->Bar0VirtualAddress) {
-        USHORT ics = readw((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_REG_ICS);
-        if (ics & SOF_HDA_ICS_ICB) {
-            ULONG gctl = readl((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_GCTL);
-            writel(gctl & ~SOF_HDA_GCTL_RESET, (PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_GCTL);
-            KeStallExecutionProcessor(200);
-            writel(gctl | SOF_HDA_GCTL_RESET, (PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_GCTL);
-            KeStallExecutionProcessor(1000);
-            SofLogBreadcrumb("[HDA] Cycled GCTL.CRST to clear stuck ICB\n");
-        }
+        /* The caller is still in resource discovery: no CRST writes. */
+        if (ctx->Bar0Length < SOF_HDA_WAKESTS + sizeof(USHORT) ||
+            ctx->Bar0Length < SOF_HDA_REG_ICS + sizeof(USHORT))
+            return STATUS_INVALID_BUFFER_SIZE;
+        if (readw((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_REG_ICS) & SOF_HDA_ICS_ICB)
+            SofLogBreadcrumb("[HDA] ICB busy during read-only discovery (no reset)\n");
 
         USHORT wakests = readw((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_WAKESTS);
         ctx->HdaCodecPresent = (wakests & SOF_HDA_WAKESTS_SDIN0) ? TRUE : FALSE;
