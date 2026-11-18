@@ -224,6 +224,10 @@ typedef struct _SOF_DEVICE_CONTEXT {
     KEVENT              FwReadyEvent;
     /** @brief TRUE if host currently has an in-flight command pending completion. */
     BOOLEAN             IpcTxBusy;
+    /* IpcLock protects ownership through reply consumption. No reuse on timeout. */
+    BOOLEAN             IpcReplyReady;
+    BOOLEAN             IpcFaulted;
+    ULONG               IpcRequestPrimary;
     /** @brief Cached reply header structure from completed transaction. */
     SOF_IPC_MESSAGE     PendingReply;
     /** @brief Buffer receiving large payload data from DSP mailbox. */

@@ -162,7 +162,7 @@ VOID SofIpcDpcHandler(
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
  * @param[in]     Msg Pointer to the IPC message to transmit.
- * @param[out]    Reply Optional pointer to receive the reply headers and payload.
+ * @param[in,out] Reply Optional zero-initialized header-only reply (Payload and PayloadSize must be zero).
  * @param[in]     TimeoutMs Timeout duration in milliseconds.
  * @return STATUS_SUCCESS on successful ACK and zero status; STATUS_IO_TIMEOUT on timeout;
  *         STATUS_DEVICE_BUSY if transmitter is locked; STATUS_UNSUCCESSFUL on FW error status.

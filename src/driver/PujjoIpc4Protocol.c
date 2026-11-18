@@ -91,3 +91,9 @@ pj_ipc4_status pj_ipc4_encode(const pj_ipc4_packet *packet,
     *written=PJ_IPC4_HEADER_BYTES+packet->payload_bytes;
     return PJ_IPC4_VALID;
 }
+
+int pj_ipc4_mmio_span_valid(PJ_DWORD mapped_bytes, PJ_DWORD offset, PJ_DWORD bytes)
+{
+    return bytes != 0u && (offset & 3u) == 0u && (bytes & 3u) == 0u &&
+           offset <= mapped_bytes && bytes <= mapped_bytes - offset;
+}
