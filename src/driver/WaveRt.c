@@ -383,12 +383,25 @@ NTSTATUS SofWaveRtFreeStream(
     _In_ PSOF_WAVERT_STREAM Stream
 )
 {
+    NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS deleteStatus = STATUS_SUCCESS;
     if (Stream == NULL) {
         return STATUS_SUCCESS;
     }
 
-    /* Stop stream and reset pipeline */
-    SofWaveRtSetState(Stream, KSSTATE_STOP);
+#ifdef _KERNEL_MODE
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return STATUS_INVALID_DEVICE_STATE;
+#endif
+    /* Stop stream and reset pipeline. Cancel regardless of registered events
+     * and drain queued/running notification DPCs before freeing their context. */
+    status = SofWaveRtSetState(Stream, KSSTATE_STOP);
+    Stream->IsActive = FALSE;
+#ifdef _KERNEL_MODE
+    KeCancelTimer(&Stream->NotificationTimer);
+    KeRemoveQueueDpc(&Stream->NotificationDpc);
+    KeFlushQueuedDpcs();
+#endif
 
     /* Cache stream volume and mute back into device context */
     if (Stream->DeviceContext != NULL && Stream->EndpointType < SOF_ENDPOINT_COUNT) {
@@ -422,8 +435,12 @@ NTSTATUS SofWaveRtFreeStream(
             }
         }
 
+        if (Stream->HostCopierInstance != 0xFFFFFFFF)
+            deleteStatus = SofIpc4DeletePipeline(Stream->DeviceContext, Stream->PipelineId);
+        /* Keep DSP IDs reserved if deletion failed; uncertain ownership must
+         * never be recycled to another pipeline. */
+        if (NT_SUCCESS(deleteStatus)) {
         if (Stream->HostCopierInstance != 0xFFFFFFFF) {
-            SofIpc4DeletePipeline(Stream->DeviceContext, Stream->PipelineId);
             SofIpc4FreeInstanceId(Stream->DeviceContext, SOF_IPC4_MOD_ID_COPIER, Stream->HostCopierInstance);
             Stream->HostCopierInstance = 0xFFFFFFFF;
         }
@@ -435,6 +452,7 @@ NTSTATUS SofWaveRtFreeStream(
             SofIpc4FreeInstanceId(Stream->DeviceContext, SOF_IPC4_MOD_ID_COPIER, Stream->DaiCopierInstance);
             Stream->DaiCopierInstance = 0xFFFFFFFF;
         }
+        }
 
 #ifdef _KERNEL_MODE
         KeStallExecutionProcessor(500);
@@ -442,10 +460,6 @@ NTSTATUS SofWaveRtFreeStream(
     }
 
 #ifdef _KERNEL_MODE
-    if (Stream->NotificationEvents[0] != NULL) {
-        KeCancelTimer(&Stream->NotificationTimer);
-    }
-
     if (Stream->Bdl != NULL) {
         MmFreeContiguousMemory(Stream->Bdl);
         Stream->Bdl = NULL;
@@ -467,7 +481,7 @@ NTSTATUS SofWaveRtFreeStream(
     free(Stream);
 #endif
 
-    return STATUS_SUCCESS;
+    return NT_SUCCESS(status) ? deleteStatus : status;
 }
 
 /**
@@ -501,6 +515,14 @@ NTSTATUS SofWaveRtSetState(
         return STATUS_INVALID_PARAMETER;
     }
 
+#ifdef _KERNEL_MODE
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return STATUS_INVALID_DEVICE_STATE;
+#endif
+    if (NewState == KSSTATE_RUN && (!Stream->IsActive ||
+        Stream->HostCopierInstance == 0xFFFFFFFF || !Stream->DeviceContext))
+        return STATUS_DEVICE_NOT_READY;
+
     if (Stream->State == NewState) {
         return STATUS_SUCCESS;
     }
@@ -519,10 +541,12 @@ NTSTATUS SofWaveRtSetState(
 
         /* Start Codec Converter (DAC or ADC) */
         if (Stream->DeviceContext != NULL && Stream->DeviceContext->HdaCodecPresent && Stream->EndpointType == SOF_ENDPOINT_HDA_ANALOG) {
-            SofHdaStartConverter(Stream->DeviceContext, 0, Stream->IsCapture, Stream->StreamTag);
+            status = SofHdaStartConverter(Stream->DeviceContext, 0, Stream->IsCapture, Stream->StreamTag);
+            if (!NT_SUCCESS(status)) goto run_failed;
         } else if (Stream->DeviceContext != NULL && Stream->DeviceContext->IDispCodecPresent && Stream->EndpointType >= SOF_ENDPOINT_HDMI_1 && Stream->EndpointType <= SOF_ENDPOINT_HDMI_3) {
             ULONG hdmiLink = 1 + (Stream->EndpointType - SOF_ENDPOINT_HDMI_1);
-            SofHdaStartDisplayConverter(Stream->DeviceContext, 2, hdmiLink, Stream->StreamTag, &Stream->Format);
+            status = SofHdaStartDisplayConverter(Stream->DeviceContext, 2, hdmiLink, Stream->StreamTag, &Stream->Format);
+            if (!NT_SUCCESS(status)) goto run_failed;
         }
 
         /* Start Link Stream DMA (PPLC) and HDA Stream Engine */
@@ -538,13 +562,12 @@ NTSTATUS SofWaveRtSetState(
                     status, Stream->StreamIndex, Stream->PipelineId);
                 SofLogBreadcrumb(bmsg);
             }
-        } else {
-            /* Zero out buffer on run for silence / 0s */
-            if (Stream->KernelBuffer != NULL && Stream->BufferSizeBytes > 0) {
-                RtlZeroMemory(Stream->KernelBuffer, Stream->BufferSizeBytes);
-            }
         }
 
+        if (!NT_SUCCESS(status)) goto run_failed;
+
+        /* Publish RUN only after all checked start operations succeed. */
+        Stream->State = KSSTATE_RUN;
 #ifdef _KERNEL_MODE
         /* Start periodic notification timer */
         {
@@ -553,7 +576,6 @@ NTSTATUS SofWaveRtSetState(
             KeSetTimerEx(&Stream->NotificationTimer, dueTime, Stream->PeriodMs, &Stream->NotificationDpc);
         }
 #endif
-        Stream->State = KSSTATE_RUN;
         break;
 
     case KSSTATE_PAUSE:
@@ -578,7 +600,8 @@ NTSTATUS SofWaveRtSetState(
             ULONG hdmiLink = 1 + (Stream->EndpointType - SOF_ENDPOINT_HDMI_1);
             SofHdaStopDisplayConverter(Stream->DeviceContext, 2, hdmiLink);
         }
-        Stream->State = KSSTATE_PAUSE;
+        Stream->State = NT_SUCCESS(status) ? KSSTATE_PAUSE : KSSTATE_STOP;
+        if (!NT_SUCCESS(status)) Stream->IsActive = FALSE;
         break;
 
     case KSSTATE_STOP:
@@ -605,7 +628,8 @@ NTSTATUS SofWaveRtSetState(
             ULONG hdmiLink = 1 + (Stream->EndpointType - SOF_ENDPOINT_HDMI_1);
             SofHdaStopDisplayConverter(Stream->DeviceContext, 2, hdmiLink);
         }
-        Stream->State = NewState;
+        Stream->State = NT_SUCCESS(status) ? NewState : KSSTATE_STOP;
+        if (!NT_SUCCESS(status)) Stream->IsActive = FALSE;
         break;
 
     default:
@@ -613,6 +637,22 @@ NTSTATUS SofWaveRtSetState(
         break;
     }
 
+    return status;
+
+run_failed:
+    /* Do not arm notifications or report RUN after a failed converter/IPC
+     * command. Halt any DMA started in this attempt and require recreation. */
+    SofWaveRtStopHdaStream(Stream);
+    SofWaveRtStopLinkStream(Stream);
+    if (Stream->DeviceContext->HdaCodecPresent && Stream->EndpointType == SOF_ENDPOINT_HDA_ANALOG)
+        (void)SofHdaStopConverter(Stream->DeviceContext, 0, Stream->IsCapture);
+    else if (Stream->DeviceContext->IDispCodecPresent &&
+             Stream->EndpointType >= SOF_ENDPOINT_HDMI_1 && Stream->EndpointType <= SOF_ENDPOINT_HDMI_3) {
+        ULONG hdmiLink = 1 + (Stream->EndpointType - SOF_ENDPOINT_HDMI_1);
+        (void)SofHdaStopDisplayConverter(Stream->DeviceContext, 2, hdmiLink);
+    }
+    Stream->IsActive = FALSE;
+    Stream->State = KSSTATE_STOP;
     return status;
 }
 
