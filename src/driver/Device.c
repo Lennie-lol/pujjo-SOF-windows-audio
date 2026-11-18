@@ -71,88 +71,68 @@ static VOID SofUnmapFailedPreparedBars(_Inout_ PSOF_DEVICE_CONTEXT Ctx)
  *
  * @param[in,out] Ctx Pointer to device extension context.
  */
-VOID SofDiscoverHdaCaps(
+static NTSTATUS SofDiscoverHdaCaps(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
     PUCHAR bar0;
-    ULONG offset;
-    ULONG count = 0;
-    ULONG gcap;
+    ULONG offset, count = 0, i, cap, id;
+    ULONG visited[SOF_HDA_MAX_CAPS];
+    ULONG pp = 0, spb = 0, ml = 0;
+    USHORT gcap;
 
-    if (!Ctx || !Ctx->Bar0VirtualAddress || Ctx->Bar0Length < 0x80)
-        return;
+    if (!Ctx) return STATUS_INVALID_PARAMETER;
+    /* Invalidate previous results even if the next mapping is unavailable. */
+    Ctx->PpCapOffset = Ctx->SpbCapOffset = Ctx->MlCapOffset = 0;
+    Ctx->NumCaptureStreams = Ctx->NumPlaybackStreams = 0;
+    if (!Ctx->Bar0VirtualAddress || Ctx->Bar0Length < 0x80u)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
 
     bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
-    Ctx->PpCapOffset = 0;
-    Ctx->SpbCapOffset = 0;
-
-    /*
-     * Read Global Capabilities Register (GCAP, BAR0 offset 0x00):
-     * Bits 8..11:  Number of Input/Capture Stream Descriptors.
-     * Bits 12..15: Number of Output/Playback Stream Descriptors.
-     */
-    gcap = readl(bar0 + SOF_HDA_GCAP);
-    Ctx->NumCaptureStreams = (gcap >> 8) & 0x0F;
-    Ctx->NumPlaybackStreams = (gcap >> 12) & 0x0F;
-
-    /* Zero means no reported streams. Never manufacture hardware counts. */
-
-    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-               "[SOF] GCAP=0x%08x: NumCapture=%u, NumPlayback=%u\n",
-               gcap, Ctx->NumCaptureStreams, Ctx->NumPlaybackStreams);
-
-    /*
-     * Read Lower Link Capabilities Header (LLCH) at BAR0 offset 0x14 (16-bit offset pointer).
-     * Points to the first entry of the capability linked list.
-     */
+    /* GCAP is a 16-bit register, not the neighboring version bytes. */
+    gcap = readw(bar0 + SOF_HDA_GCAP);
+    if (gcap == 0xFFFFu) return STATUS_DEVICE_NOT_READY;
     offset = readw(bar0 + SOF_HDA_LLCH);
 
-    if (offset == 0 || offset == 0xFFFF || offset >= Ctx->Bar0Length) {
-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                   "[SOF] No HDA extended capabilities list (LLCH=0x%x)\n", offset);
-        return;
-    }
-
-    /* Walk the capability linked list up to SOF_HDA_MAX_CAPS hops */
-    while (count++ <= SOF_HDA_MAX_CAPS && offset != 0 && offset != 0xFFFF) {
-        ULONG capOffset = offset & SOF_HDA_CAP_NEXT_MASK;
-        ULONG cap;
-        ULONG capId;
-
-        if (capOffset + sizeof(ULONG) > Ctx->Bar0Length) {
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL,
-                       "[SOF] Capability offset 0x%x exceeds BAR0 length 0x%llx\n",
-                       capOffset, (unsigned long long)Ctx->Bar0Length);
-            break;
+    /* An empty list is legitimate; a malformed list is not. Publish results
+     * only after the entire bounded chain has been validated. */
+    while (offset != 0) {
+        if (count >= SOF_HDA_MAX_CAPS || offset == 0xFFFFu ||
+            (offset & 3u) != 0 || offset < 0x80u ||
+            offset > Ctx->Bar0Length - sizeof(ULONG))
+            return STATUS_DEVICE_CONFIGURATION_ERROR;
+        for (i = 0; i < count; ++i) {
+            if (visited[i] == offset)
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
         }
-
-        cap = readl(bar0 + capOffset);
-        capId = (cap & SOF_HDA_CAP_ID_MASK) >> SOF_HDA_CAP_ID_OFF;
-
-        if (capId == SOF_HDA_PP_CAP_ID) {
-            Ctx->PpCapOffset = capOffset;
-            /* Discovery only: enabling GPROCEN/PIE is an activation action,
-             * not a side effect of reading HDA capability descriptors. */
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] Discovered PP capability at 0x%x (read-only)\n", capOffset);
-            SofLogBreadcrumb("[CAP] Discovered PP capability; not activated\n");
-        } else if (capId == SOF_HDA_SPIB_CAP_ID) {
-            Ctx->SpbCapOffset = capOffset;
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] Discovered SPIB capability at 0x%x\n", capOffset);
-            SofLogBreadcrumb("[CAP] Discovered SPIB capability\n");
-        } else if (capId == SOF_HDA_ML_CAP_ID) {
-            Ctx->MlCapOffset = capOffset;
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] Discovered ML capability at 0x%x\n", capOffset);
-            SofLogBreadcrumb("[CAP] Discovered ML capability\n");
+        visited[count++] = offset;
+        cap = readl(bar0 + offset);
+        if (cap == 0xFFFFFFFFu) return STATUS_DEVICE_NOT_READY;
+        if (cap == 0) return STATUS_DEVICE_CONFIGURATION_ERROR;
+        id = (cap & SOF_HDA_CAP_ID_MASK) >> SOF_HDA_CAP_ID_OFF;
+        if (id == SOF_HDA_PP_CAP_ID) {
+            if (pp || Ctx->Bar0Length - offset < SOF_HDA_REG_PP_PPCTL + sizeof(ULONG))
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+            pp = offset;
+        } else if (id == SOF_HDA_SPIB_CAP_ID) {
+            if (spb || Ctx->Bar0Length - offset < SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL + sizeof(ULONG))
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+            spb = offset;
+        } else if (id == SOF_HDA_ML_CAP_ID) {
+            if (ml) return STATUS_DEVICE_CONFIGURATION_ERROR;
+            ml = offset;
         }
-
         offset = cap & SOF_HDA_CAP_NEXT_MASK;
-        if (offset == capOffset || offset >= Ctx->Bar0Length)
-            break;
     }
+    Ctx->NumCaptureStreams = (gcap >> 8) & 0x0Fu;
+    Ctx->NumPlaybackStreams = (gcap >> 12) & 0x0Fu;
+    Ctx->PpCapOffset = pp;
+    Ctx->SpbCapOffset = spb;
+    Ctx->MlCapOffset = ml;
+    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
+               "[SOF] GCAP=0x%04x PP=0x%x SPIB=0x%x ML=0x%x (read-only)\n",
+               (ULONG)gcap, pp, spb, ml);
+    return STATUS_SUCCESS;
 }
 
 /**
@@ -303,7 +283,8 @@ SofEvtDevicePrepareHardware(
     }
 
     /* Discover HD-A controller capabilities without activating DSP processing */
-    SofDiscoverHdaCaps(ctx);
+    status = SofDiscoverHdaCaps(ctx);
+    if (!NT_SUCCESS(status)) goto PreparationFailed;
 
     /*
      * Read codec wake/status without resetting HDA link or DSP state.
