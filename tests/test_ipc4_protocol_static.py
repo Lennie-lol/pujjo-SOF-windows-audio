@@ -77,7 +77,12 @@ allocator=topo.split('NTSTATUS SofIpc4AllocInstanceId(',1)[1].split('VOID SofIpc
 assert '*OutInstanceId = 0xFFFFFFFFu;' in allocator
 assert 'if (!mask) return STATUS_NOT_SUPPORTED;' in allocator
 assert allocator.index('KeAcquireSpinLock') < allocator.index('*mask |=') < allocator.index('KeReleaseSpinLock')
+topo_header=(root/'src/driver/Topo.h').read_text()
 for name in ('Ssp','Dmic'):
+    symbol='NTSTATUS SofIpc4Create'+name+'Pipeline('
+    for interface in (topo,topo_header):
+        signature=interface.split(symbol,1)[1].split('\n)',1)[0]
+        assert '_In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,' in signature
     body=topo.split('NTSTATUS SofIpc4Create'+name+'Pipeline(',1)[1].split('\n}',1)[0]
     assert 'return SofIpc4CreateNhltPipeline(' in body
 for name in ('Playback','Capture','Hdmi','Nhlt','Alh'):

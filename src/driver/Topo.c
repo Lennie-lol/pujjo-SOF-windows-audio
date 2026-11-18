@@ -1265,7 +1265,7 @@ NTSTATUS SofIpc4CreateSspPipeline(
     _In_ ULONG StreamTag,
     _In_ ULONG SspPort,
     _In_ BOOLEAN IsCapture,
-    _In_ const SOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -1279,7 +1279,7 @@ NTSTATUS SofIpc4CreateDmicPipeline(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
-    _In_ const SOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
