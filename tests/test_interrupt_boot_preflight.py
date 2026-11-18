@@ -18,4 +18,19 @@ assert loader.index("Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS") < loader.index("ct
 assert "-community.ri" not in loader and "Falling back to community firmware" not in loader
 assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)" in loader
 assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)" in (root/"src/driver/Device.c").read_text()
-print("PASS: bounded ISR register accesses, gated FW_READY and no unreviewed firmware retry")
+# Check both interrupt control paths, not just runtime dispatch.
+for name in ("SofIpcEnableInterrupts", "SofIpcDisableInterrupts"):
+    body=ipc.split("VOID\n"+name+"(",1)[1].split("\n/**",1)[0]
+    assert "if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||" in body
+    assert body.index("HipcCtl, 4u") < body.index("SofDspUpdateBits(")
+    assert body.index("MTL_HFINTIPPTR, 4u") < body.index("rawPtr = SofDspRead32")
+    assert body.index("MTL_DSP_REG_HfHIPCIE, 4u") < body.index("rawPtr = SofDspRead32")
+    assert body.index("rawPtr == 0xFFFFFFFFu") < body.index("hfintipptr = rawPtr &")
+    assert body.index("hfintipptr, 4u") < body.index("                         hfintipptr,")
+# The ISR must validate all registers its DPC will need before masking.
+for body in (isr, dpc):
+    for register in ("HipcIda", "HipcTdr", "HipcTdd", "HipcTda", "HipcCtl"):
+        assert body.index(register+", 4u") < body.index("SofDspRead32(")
+    assert body.index("tdr == 0xFFFFFFFFu || ida == 0xFFFFFFFFu") < body.index("SofDspUpdateBits(")
+assert isr.index("ptr == 0xFFFFFFFFu") < isr.index("ptr &= MTL_HFINTIPPTR_PTR_MASK")
+print("PASS: bounded interrupt control and dispatch, unavailable-device doorbells, gated FW_READY and no unreviewed firmware retry")
