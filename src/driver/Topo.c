@@ -72,6 +72,25 @@ VOID SofIpc4BuildDefaultStereoFormat(
     OutParams->ChannelConfig = SOF_IPC4_CHANNEL_CONFIG_STEREO;
 }
 
+/* IPC4 buffers are whole PCM frames. Round fractional 1ms frame counts up
+ * (44.1kHz needs 45 frames), never substitute an unrelated stereo format.
+ * Bound each input before multiplication and reject unsupported interleaving. */
+static NTSTATUS SofIpc4ComputeChunkBytes(
+    const SOF_AUDIO_FORMAT_PARAMS *Fmt, PULONG Bytes)
+{
+    ULONG frames;
+    if (!Fmt || !Bytes || Fmt->SamplingFrequency < 8000u ||
+        Fmt->SamplingFrequency > 192000u ||
+        Fmt->ChannelsCount < 1u || Fmt->ChannelsCount > 8u ||
+        (Fmt->BitDepth != 16u && Fmt->BitDepth != 24u && Fmt->BitDepth != 32u) ||
+        Fmt->ValidBitDepth == 0u || Fmt->ValidBitDepth > Fmt->BitDepth ||
+        Fmt->InterleavingStyle != SOF_IPC4_CHANNELS_INTERLEAVED)
+        return STATUS_INVALID_PARAMETER;
+    frames = (Fmt->SamplingFrequency + 999u) / 1000u;
+    *Bytes = frames * Fmt->ChannelsCount * (Fmt->BitDepth / 8u);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS SofIpc4BuildCopierConfig(
     _In_ const PSOF_COPIER_PARAMS Params,
     _Out_writes_bytes_(MaxBuffer) PVOID CopierBuffer,
@@ -84,11 +103,17 @@ NTSTATUS SofIpc4BuildCopierConfig(
     ULONG totalSize;
     ULONG chunkBytes;
 
-    /* struct sof_ipc4_copier_data already contains config_data[1] for gtw attributes */
+    if (!OutLength) return STATUS_INVALID_PARAMETER;
+    *OutLength = 0;
+    if (!Params || !CopierBuffer || Params->NodeIndex > 255u ||
+        !NT_SUCCESS(SofIpc4ComputeChunkBytes(&Params->AudioFormat, &chunkBytes)))
+        return STATUS_INVALID_PARAMETER;
+
+    /* Check the whole variable-length blob before touching caller memory. */
     totalSize = sizeof(struct sof_ipc4_copier_data);
-    if (MaxBuffer < totalSize) {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
+    if (Params->NodeType == SOF_IPC4_GTW_ALH)
+        totalSize += sizeof(struct sof_ipc4_alh_configuration_blob) - sizeof(uint32_t);
+    if (MaxBuffer < totalSize) return STATUS_BUFFER_TOO_SMALL;
 
     RtlZeroMemory(CopierBuffer, totalSize);
     copier = (struct sof_ipc4_copier_data *)CopierBuffer;
@@ -97,13 +122,6 @@ NTSTATUS SofIpc4BuildCopierConfig(
     SofIpc4BuildAudioFormat(&Params->AudioFormat, &copier->base_config.audio_fmt);
     copier->out_format = copier->base_config.audio_fmt;
 
-    /* Calculate 1ms chunk size for ibs/obs (e.g. 384 bytes for 48kHz stereo 32-bit) */
-    chunkBytes = (Params->AudioFormat.SamplingFrequency *
-                  Params->AudioFormat.ChannelsCount *
-                  (Params->AudioFormat.BitDepth / 8)) / 1000;
-    if (chunkBytes == 0) {
-        chunkBytes = 384;
-    }
     copier->base_config.ibs = chunkBytes;
     copier->base_config.obs = chunkBytes;
     copier->base_config.cpc = SOF_IPC4_COPIER_DEFAULT_CPC; /* 7363 from manifest */
@@ -117,10 +135,6 @@ NTSTATUS SofIpc4BuildCopierConfig(
 
     if (Params->NodeType == SOF_IPC4_GTW_ALH) {
         struct sof_ipc4_alh_configuration_blob *alhBlob;
-        totalSize = sizeof(struct sof_ipc4_copier_data) + sizeof(struct sof_ipc4_alh_configuration_blob) - sizeof(uint32_t);
-        if (MaxBuffer < totalSize) {
-            return STATUS_BUFFER_TOO_SMALL;
-        }
         copier->gtw_cfg.config_length = sizeof(struct sof_ipc4_alh_configuration_blob) / sizeof(uint32_t);
         alhBlob = (struct sof_ipc4_alh_configuration_blob *)copier->gtw_cfg.config_data;
         alhBlob->gw_attr.lp_buffer_alloc = 0;
@@ -128,7 +142,7 @@ NTSTATUS SofIpc4BuildCopierConfig(
         alhBlob->gw_attr.rsvd = 0;
         alhBlob->count = 1;
         alhBlob->mapping[0].alh_id = Params->AlhStreamId;
-        alhBlob->mapping[0].channel_mask = (1 << Params->AudioFormat.ChannelsCount) - 1;
+        alhBlob->mapping[0].channel_mask = (1u << Params->AudioFormat.ChannelsCount) - 1u;
     } else {
         copier->gtw_cfg.config_length = sizeof(struct sof_ipc4_gtw_attributes) / sizeof(uint32_t);
 
@@ -143,8 +157,8 @@ NTSTATUS SofIpc4BuildCopierConfig(
     return STATUS_SUCCESS;
 }
 
-NTSTATUS SofIpc4BuildGainConfig(
-    _In_ ULONG Channels,
+static NTSTATUS SofIpc4BuildGainConfigForFormat(
+    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
     _In_ ULONG InitVal,
     _Out_writes_bytes_(MaxBuffer) PVOID GainBuffer,
     _In_ ULONG MaxBuffer,
@@ -153,9 +167,12 @@ NTSTATUS SofIpc4BuildGainConfig(
 {
     struct sof_ipc4_gain_data *gain;
     ULONG totalSize;
-    SOF_AUDIO_FORMAT_PARAMS fmtParams;
     ULONG chunkBytes;
 
+    if (!OutLength) return STATUS_INVALID_PARAMETER;
+    *OutLength = 0;
+    if (!GainBuffer || !NT_SUCCESS(SofIpc4ComputeChunkBytes(Fmt, &chunkBytes)))
+        return STATUS_INVALID_PARAMETER;
     totalSize = sizeof(struct sof_ipc4_gain_data);
     if (MaxBuffer < totalSize) {
         return STATUS_BUFFER_TOO_SMALL;
@@ -164,16 +181,8 @@ NTSTATUS SofIpc4BuildGainConfig(
     RtlZeroMemory(GainBuffer, totalSize);
     gain = (struct sof_ipc4_gain_data *)GainBuffer;
 
-    SofIpc4BuildDefaultStereoFormat(48000, 32, &fmtParams);
-    fmtParams.ChannelsCount = Channels;
-    SofIpc4BuildAudioFormat(&fmtParams, &gain->base_config.audio_fmt);
+    SofIpc4BuildAudioFormat(Fmt, &gain->base_config.audio_fmt);
 
-    chunkBytes = (fmtParams.SamplingFrequency *
-                  fmtParams.ChannelsCount *
-                  (fmtParams.BitDepth / 8)) / 1000;
-    if (chunkBytes == 0) {
-        chunkBytes = 384;
-    }
     gain->base_config.ibs = chunkBytes;
     gain->base_config.obs = chunkBytes;
     gain->base_config.cpc = SOF_IPC4_GAIN_DEFAULT_CPC; /* 1000 from manifest */
@@ -187,6 +196,34 @@ NTSTATUS SofIpc4BuildGainConfig(
 
     *OutLength = totalSize;
     return STATUS_SUCCESS;
+}
+
+/* Compatibility entry point for existing callers requesting a default
+ * 48kHz/32-bit format. Pipeline builders use the negotiated stream format. */
+NTSTATUS SofIpc4BuildGainConfig(
+    _In_ ULONG Channels,
+    _In_ ULONG InitVal,
+    _Out_writes_bytes_(MaxBuffer) PVOID GainBuffer,
+    _In_ ULONG MaxBuffer,
+    _Out_ PULONG OutLength
+)
+{
+    SOF_AUDIO_FORMAT_PARAMS fmt;
+    SofIpc4BuildDefaultStereoFormat(48000, 32, &fmt);
+    fmt.ChannelsCount = Channels;
+    switch (Channels) {
+    case 1: fmt.ChannelMap = SOF_IPC4_CH_MAP_MONO;
+            fmt.ChannelConfig = SOF_IPC4_CHANNEL_CONFIG_MONO; break;
+    case 2: break;
+    case 4: fmt.ChannelMap = SOF_IPC4_CH_MAP_QUAD;
+            fmt.ChannelConfig = SOF_IPC4_CHANNEL_CONFIG_QUATRO; break;
+    case 6: fmt.ChannelMap = SOF_IPC4_CH_MAP_5_1;
+            fmt.ChannelConfig = SOF_IPC4_CHANNEL_CONFIG_5_POINT_1; break;
+    case 8: fmt.ChannelMap = SOF_IPC4_CH_MAP_7_1;
+            fmt.ChannelConfig = SOF_IPC4_CHANNEL_CONFIG_7_POINT_1; break;
+    default: if (OutLength) *OutLength = 0; return STATUS_INVALID_PARAMETER;
+    }
+    return SofIpc4BuildGainConfigForFormat(&fmt, InitVal, GainBuffer, MaxBuffer, OutLength);
 }
 
 #ifdef _KERNEL_MODE
@@ -687,7 +724,7 @@ NTSTATUS SofIpc4CreatePlaybackPipeline(
     SofLogBreadcrumb("[15-P2] Init Host Copier succeeded\n");
 
     /* 3. Instantiate Gain Module with 0 dB */
-    status = SofIpc4BuildGainConfig(Fmt->ChannelsCount, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+    status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
     if (!NT_SUCCESS(status)) goto cleanup;
 
     status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
@@ -819,7 +856,7 @@ NTSTATUS SofIpc4CreateCapturePipeline(
     SofLogBreadcrumb("[16-C2] Init DAI Copier succeeded\n");
 
     /* 3. Instantiate Gain Module with 0 dB */
-    status = SofIpc4BuildGainConfig(Fmt->ChannelsCount, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+    status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
     if (!NT_SUCCESS(status)) goto cleanup;
 
     status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
@@ -950,7 +987,7 @@ NTSTATUS SofIpc4CreateHdmiPipeline(
     }
 
     /* 3. Instantiate Gain Module with 0 dB */
-    status = SofIpc4BuildGainConfig(Fmt->ChannelsCount, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+    status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
     if (!NT_SUCCESS(status)) goto cleanup;
 
     status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
@@ -1062,7 +1099,7 @@ NTSTATUS SofIpc4CreateSspPipeline(
         status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, hostInst, PipelineId, 0, copierBuffer, copierLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
-        status = SofIpc4BuildGainConfig(Fmt->ChannelsCount, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+        status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
         status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
@@ -1095,7 +1132,7 @@ NTSTATUS SofIpc4CreateSspPipeline(
         status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, sspInst, PipelineId, 0, copierBuffer, copierLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
-        status = SofIpc4BuildGainConfig(Fmt->ChannelsCount, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+        status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
         status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
@@ -1191,7 +1228,7 @@ NTSTATUS SofIpc4CreateDmicPipeline(
     status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, dmicInst, PipelineId, 0, copierBuffer, copierLen);
     if (!NT_SUCCESS(status)) goto cleanup;
 
-    status = SofIpc4BuildGainConfig(Fmt->ChannelsCount, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+    status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
     if (!NT_SUCCESS(status)) goto cleanup;
 
     status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
@@ -1303,7 +1340,7 @@ NTSTATUS SofIpc4CreateAlhPipeline(
         status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, hostInst, PipelineId, 0, copierBuffer, copierLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
-        status = SofIpc4BuildGainConfig(Fmt->ChannelsCount, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+        status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
         status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
@@ -1339,7 +1376,7 @@ NTSTATUS SofIpc4CreateAlhPipeline(
         status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, alhInst, PipelineId, 0, copierBuffer, copierLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
-        status = SofIpc4BuildGainConfig(Fmt->ChannelsCount, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+        status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
         status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
