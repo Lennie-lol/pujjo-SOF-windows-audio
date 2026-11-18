@@ -651,6 +651,8 @@ SofIpcDpcHandler(
     ULONG ida;
     ULONG tdr;
     BOOLEAN signalReply = FALSE;
+    BOOLEAN bootReady = FALSE;
+    BOOLEAN bootFault = FALSE;
 
     if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
         return;
@@ -745,17 +747,9 @@ SofIpcDpcHandler(
                        "[SOF] IPC Notification: Type %u (0x%08x|0x%08x)\n",
                        notifyType, primary, extension);
 
-            if (pj_ipc4_is_fw_ready(primary) &&
-                Ctx->FwState == SOF_FW_BOOT_IN_PROGRESS) {
-                /* Firmware initialization complete and scheduler running */
-                char bmsg[128];
-                RtlStringCbPrintfA(bmsg, sizeof(bmsg),
-                    "[13] *** DSP FIRMWARE BOOT COMPLETED (FW_READY: 0x%08x|0x%08x) ***\n",
-                    primary, extension);
-                SofLogBreadcrumb(bmsg);
-                DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "%s", bmsg);
-                Ctx->FwState = SOF_FW_BOOT_COMPLETE;
-                KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
+            if (pj_ipc4_is_fw_ready(primary)) {
+                /* Publish readiness only after acknowledging the notification. */
+                bootReady = TRUE;
             } else if (pj_ipc4_is_notification(primary) &&
                        notifyType == SOF_IPC4_NOTIFY_EXCEPTION_CAUGHT) {
                 /* Firmware panic/exception caught by base FW */
@@ -773,6 +767,7 @@ SofIpcDpcHandler(
                     Ctx->FwState = SOF_FW_BOOT_FAILED;
                     KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
                     signalReply = TRUE;
+                    bootFault = TRUE;
                 }
             } else if (pj_ipc4_is_notification(primary) &&
                        notifyType == SOF_IPC4_NOTIFY_LOG_BUFFER_STATUS) {
@@ -822,7 +817,26 @@ SofIpcDpcHandler(
                          Ctx->HwDesc->HipcCtlBusy,
                          Ctx->HwDesc->HipcCtlBusy);
     }
-    /* Acknowledge device notification before waking the sender. */
+    /* The ISR masks both sources. Restore DONE even for a BUSY-only IRQ. */
+    SofDspUpdateBits(Ctx->Bar4VirtualAddress,
+                     Ctx->HwDesc->HipcCtl,
+                     Ctx->HwDesc->HipcCtlDone,
+                     Ctx->HwDesc->HipcCtlDone);
+
+    /* Acknowledge device notification before publishing boot/reply completion. */
+    if (bootReady || bootFault) {
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+        if (bootReady && !Ctx->IpcFaulted &&
+            Ctx->FwState == SOF_FW_BOOT_IN_PROGRESS) {
+            Ctx->FwState = SOF_FW_BOOT_COMPLETE;
+            KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
+        } else if (bootFault) {
+            /* Wake the loader promptly; the fault state is already latched. */
+            KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
+        }
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+    }
     if (signalReply) {
         KIRQL oldIrql;
         KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
@@ -897,7 +911,7 @@ SofIpcSendMessage(
 
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
 
-    if (Ctx->IpcFaulted) {
+    if (Ctx->IpcFaulted || Ctx->FwState != SOF_FW_BOOT_COMPLETE) {
         KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
         return STATUS_DEVICE_NOT_READY;
     }
