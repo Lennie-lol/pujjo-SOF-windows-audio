@@ -2882,19 +2882,12 @@ SofSdwEnumerateChildren(
         return STATUS_SUCCESS;
     }
 
-    if (Ctx->NhltInfo.SdwEndpointsCount == 0) {
-        SofLogBreadcrumb("[SDW] NHLT has 0 SDW endpoints; applying ALC722 Single-Lane configuration...\n");
-        Ctx->NhltInfo.SdwEndpoints[0].LinkIndex = 0;
-        Ctx->NhltInfo.SdwEndpoints[0].VendorId = 0x025D; /* Realtek */
-        Ctx->NhltInfo.SdwEndpoints[0].DeviceId = 0x0722; /* ALC722 */
-        Ctx->NhltInfo.SdwEndpoints[0].DeviceType = 1;
-        Ctx->NhltInfo.SdwEndpoints[0].Direction = 0;     /* Full-duplex audio peripheral */
-        Ctx->NhltInfo.SdwEndpoints[0].ChannelCount = 2;
-        Ctx->NhltInfo.SdwEndpoints[0].SampleRate = 48000;
-        Ctx->NhltInfo.SdwEndpoints[0].BitDepth = 24;
-
-        Ctx->NhltInfo.SdwEndpointsCount = 1;
+    if (!Ctx->NhltInfo.IsValid || Ctx->NhltInfo.SdwEndpointsCount == 0) {
+        SofLogBreadcrumb("[SDW] No verified NHLT SoundWire endpoints; no child PDOs\n");
+        return STATUS_SUCCESS;
     }
+    if (Ctx->NhltInfo.SdwEndpointsCount > SOF_MAX_SDW_ENDPOINTS)
+        return STATUS_INVALID_PARAMETER;
 
     SofLogBreadcrumb("[SDW] Discovered SoundWire endpoints - enumerating child PDOs...\n");
 
@@ -2903,10 +2896,13 @@ SofSdwEnumerateChildren(
         PSOF_NHLT_SDW_ENDPOINT ep = &Ctx->NhltInfo.SdwEndpoints[i];
         ULONG linkIdx = ep->LinkIndex;
         ULONG periphId = 1;
-        ULONG vId = ep->VendorId ? ep->VendorId : 0x025D;
-        ULONG dId = ep->DeviceId ? ep->DeviceId : 0x0722;
+        ULONG vId = ep->VendorId;
+        ULONG dId = ep->DeviceId;
         ULONG j;
         BOOLEAN duplicate = FALSE;
+
+        if (!ep->Present || vId == 0 || dId == 0)
+            continue;
 
         for (j = 0; j < Ctx->SdwChildCount; j++) {
             PSOF_SDW_CHILD_CONTEXT existingCtx = SofSdwGetChildContext(Ctx->SdwChildDevices[j]);

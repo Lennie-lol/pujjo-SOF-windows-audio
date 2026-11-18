@@ -349,7 +349,11 @@ SofEvtDevicePrepareHardware(
         ULONG nhltSize = 0;
         NTSTATUS nhltStatus = SofNhltQueryAcpiTable(&nhltBuffer, &nhltSize);
         if (NT_SUCCESS(nhltStatus) && nhltBuffer != NULL) {
-            SofNhltParse(nhltBuffer, nhltSize, &ctx->NhltInfo);
+            nhltStatus = SofNhltParse(nhltBuffer, nhltSize, &ctx->NhltInfo);
+            if (!NT_SUCCESS(nhltStatus)) {
+                RtlZeroMemory(&ctx->NhltInfo, sizeof(ctx->NhltInfo));
+                SofLogBreadcrumb("[NHLT] Invalid table; no endpoint evidence accepted\n");
+            }
             RtlStringCbPrintfA(msg, sizeof(msg),
                 "[10] ACPI NHLT parsed: Endpoints=%u (DMIC=%u ch=%u, SSP=%u, SDW=%u)\n",
                 ctx->NhltInfo.TotalEndpoints,
@@ -368,9 +372,9 @@ SofEvtDevicePrepareHardware(
                        ctx->NhltInfo.SdwEndpointsCount);
             SofNhltFreeAcpiTable(nhltBuffer);
         } else {
-            SofLogBreadcrumb("[10] ACPI NHLT table not present (using standard HDA+DMIC topology)\n");
+            SofLogBreadcrumb("[10] ACPI NHLT table not present (no endpoint evidence)\n");
             DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] ACPI NHLT table not found; defaulting to standard HDA+DMIC topology.\n");
+                       "[SOF] ACPI NHLT table not found; no endpoint evidence.\n");
         }
     }
 
