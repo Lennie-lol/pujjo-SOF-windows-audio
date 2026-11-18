@@ -23,7 +23,9 @@ assert 'PCI\\VEN_1022&DEV_' not in inf
 
 device = (src / 'Device.c').read_text()
 assert 'PujjoBoardIdentityMatches()' in device
-assert device.index('PujjoBoardIdentityMatches()') < device.index('/* Ensure Bus Master Enable')
+assert device.index('PujjoBoardIdentityMatches()') < device.index('WdfFdoQueryForInterface')
+assert 'busInterface.SetBusData(' not in device
+assert 'PCI Command updated:' not in device
 assert 'ctx->VendorId != 0x8086 || ctx->DeviceId != 0x54C8' in device
 assert 'SofIpc4CreateSspPipeline(ctx, 4, 4, 2' not in device
 wave = (src / 'WaveRt.c').read_text()
