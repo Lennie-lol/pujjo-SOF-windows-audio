@@ -406,11 +406,10 @@ SofEvtDevicePrepareHardware(
 
     /*
      * Query PortCls configuration from driver parameters registry.
-     * Default: PortCls enabled out-of-the-box (EnablePortCls = 1).
-     * Can be explicitly disabled via registry: EnablePortCls = 0.
+     * Missing settings leave optional endpoints and offload disabled.
      */
-    ULONG armedTesting = 1;
-    ULONG enablePortCls = 1;
+    ULONG armedTesting = 0;
+    ULONG enablePortCls = 0;
     WDFKEY paramKey = NULL;
     NTSTATUS regStatus = WdfDriverOpenParametersRegistryKey(
         WdfGetDriver(),
@@ -422,7 +421,7 @@ SofEvtDevicePrepareHardware(
         UNICODE_STRING valArmed;
         UNICODE_STRING valPortCls;
         UNICODE_STRING valUsbOffload;
-        ULONG enableUsbOffload = 1;
+        ULONG enableUsbOffload = 0;
         RtlInitUnicodeString(&valArmed, L"ArmedTesting");
         RtlInitUnicodeString(&valPortCls, L"EnablePortCls");
         RtlInitUnicodeString(&valUsbOffload, L"EnableUsbOffload");
@@ -432,7 +431,7 @@ SofEvtDevicePrepareHardware(
         ctx->EnableUsbOffload = enableUsbOffload;
         WdfRegistryClose(paramKey);
     } else {
-        ctx->EnableUsbOffload = 1;
+        ctx->EnableUsbOffload = 0;
     }
 
     ctx->ArmedTesting = armedTesting;
