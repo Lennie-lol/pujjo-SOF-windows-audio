@@ -46,3 +46,24 @@ assert '((Msg->PayloadSize + 3u) & ~3u) > Ctx->HwDesc->MailboxDownlinkSize' in i
 assert 'WRITE_REGISTER_ULONG((PULONG)(mailbox + offset), word)' in ipc
 assert 'p[5]' not in ipc and 'rb[5]' not in ipc
 print('PASS: existing IPC sender validates sizes and no longer reads extra log words')
+
+# The Windows topology entry points must use the same encoders exercised by
+# portable tests, and propagate transport errors rather than pretend success.
+topo=(root/'src/driver/Topo.c').read_text()
+helper=topo.split('static NTSTATUS SofIpc4SendGraphPacket(',1)[1].split('#endif',1)[0]
+assert 'if (!Ctx) return STATUS_INVALID_PARAMETER;' in helper
+assert helper.index('Result != PJ_IPC4_VALID') < helper.index('msg.Primary = Packet->primary')
+assert 'return SofIpcSendMessage(Ctx, &msg, NULL, 500);' in helper
+for function,encoder in (
+    ('SofIpc4CreatePipeline','pj_ipc4_pipeline_create('),
+    ('SofIpc4DeletePipeline','pj_ipc4_pipeline_delete('),
+    ('SofIpc4SetPipelineState','pj_ipc4_pipeline_state('),
+    ('SofIpc4InitModuleInstance','pj_ipc4_module_init('),
+    ('SofIpc4BindModules','pj_ipc4_module_link(1u,'),
+    ('SofIpc4UnbindModules','pj_ipc4_module_link(0u,'),
+):
+    body=topo.split('NTSTATUS '+function+'(',1)[1].split('#else',1)[0]
+    assert '#ifdef _KERNEL_MODE' in body
+    assert body.index(encoder) < body.index('return SofIpc4SendGraphPacket(Ctx, result, &packet);')
+    assert 'return STATUS_SUCCESS' not in body
+print('PASS: WDK graph commands use tested encoders and propagate real transport status')
