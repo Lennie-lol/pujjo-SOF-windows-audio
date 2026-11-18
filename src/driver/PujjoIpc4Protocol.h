@@ -42,6 +42,21 @@ int pj_ipc4_is_reply(PJ_DWORD primary);
 int pj_ipc4_is_notification(PJ_DWORD primary);
 int pj_ipc4_is_fw_ready(PJ_DWORD primary);
 int pj_ipc4_reply_matches(PJ_DWORD request, PJ_DWORD reply);
+/* IPC4 pipeline/module command builders. Header fields follow the bundled
+ * dual BSD/GPL Intel IPC4 header; no transport or hardware access.
+ * Module-init payload must be caller-owned, firmware-specific and DWORD aligned
+ * in length. Output is unchanged on failure. These do not allocate DSP IDs. */
+pj_ipc4_status pj_ipc4_pipeline_create(PJ_DWORD id, PJ_DWORD priority,
+    PJ_DWORD memory_pages, PJ_DWORD core, PJ_DWORD low_power, pj_ipc4_packet *out);
+pj_ipc4_status pj_ipc4_pipeline_delete(PJ_DWORD id, pj_ipc4_packet *out);
+pj_ipc4_status pj_ipc4_pipeline_state(PJ_DWORD id, PJ_DWORD state, pj_ipc4_packet *out);
+pj_ipc4_status pj_ipc4_module_init(PJ_DWORD module, PJ_DWORD instance,
+    PJ_DWORD pipeline, PJ_DWORD core, PJ_DWORD domain,
+    const PJ_BYTE *payload, PJ_SIZE bytes, pj_ipc4_packet *out);
+pj_ipc4_status pj_ipc4_module_link(PJ_DWORD bind, PJ_DWORD src_module,
+    PJ_DWORD src_instance, PJ_DWORD src_queue, PJ_DWORD dst_module,
+    PJ_DWORD dst_instance, PJ_DWORD dst_queue, pj_ipc4_packet *out);
+
 /* DWORD-aligned span inside an already mapped MMIO window; no I/O. */
 int pj_ipc4_mmio_span_valid(PJ_DWORD mapped_bytes, PJ_DWORD offset, PJ_DWORD bytes);
 #ifdef __cplusplus
