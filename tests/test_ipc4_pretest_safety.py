@@ -21,3 +21,15 @@ assert "KeGetCurrentIrql() != PASSIVE_LEVEL" in send
 logger = (root / "src/driver/Driver.c").read_text().split("void SofLogBreadcrumb(", 1)[1]
 assert logger.index("KeAreAllApcsDisabled()") < logger.index("ZwCreateFile(")
 print("PASS: header-only response contract, mapped range checks, reply ownership and timeout fault latch")
+
+# Hardware busy must be checked while holding the software transmit lock and
+# before touching either the mailbox or extension/primary registers.
+assert send.index("KeAcquireSpinLock(&Ctx->IpcLock") < send.index("hostDoorbell = SofDspRead32") < send.index("Ctx->IpcTxBusy = TRUE;") < send.index("WRITE_REGISTER_ULONG")
+assert send.index("hostDoorbell == 0xFFFFFFFFu") < send.index("hostDoorbell & Ctx->HwDesc->HipcIdrBusy")
+assert "Ctx->IpcFaulted = TRUE;" in send.split("if (hostDoorbell == 0xFFFFFFFFu)",1)[1].split("}",1)[0]
+for name,register in (("SofReadFwStatus","FwStatusReg"),("SofReadRomStatus","RomStatusReg")):
+    body=ipc.split("ULONG\n"+name+"(",1)[1].split("\n}",1)[0]
+    assert "!Ctx ||" in body
+    assert body.index("pj_ipc4_mmio_span_valid") < body.index("SofDspRead32")
+    assert "Ctx->HwDesc->"+register+", 4u" in body
+print("PASS: hardware doorbell ownership and DSP status register bounds")
