@@ -978,7 +978,8 @@ static NTSTATUS PropertyHandler_VolumeLevel(
 
         LONG volDb = 0;
         if (stream != NULL) {
-            SofWaveRtGetVolume(stream, channel, &volDb);
+            NTSTATUS status = SofWaveRtGetVolume(stream, channel, &volDb);
+            if (!NT_SUCCESS(status)) return status;
         } else if (devCtx != NULL) {
             ULONG ep = devCtx->HdaCodecPresent ? SOF_ENDPOINT_HDA_ANALOG : SOF_ENDPOINT_HDMI_1;
             ULONG chIdx = (channel == 1) ? 1 : 0;
@@ -1004,8 +1005,12 @@ static NTSTATUS PropertyHandler_VolumeLevel(
         }
 
         LONG volDb = *(PLONG)PropertyRequest->Value;
+        if (channel != -1 && channel != 0 && channel != 1) return STATUS_INVALID_PARAMETER;
+        if (volDb < SOF_VOLUME_MIN_DB_UNITS) volDb = SOF_VOLUME_MIN_DB_UNITS;
+        if (volDb > SOF_VOLUME_MAX_DB_UNITS) volDb = SOF_VOLUME_MAX_DB_UNITS;
         if (stream != NULL) {
-            SofWaveRtSetVolume(stream, channel, volDb);
+            NTSTATUS status = SofWaveRtSetVolume(stream, channel, volDb);
+            if (!NT_SUCCESS(status)) return status;
         } else if (devCtx != NULL) {
             ULONG ep = devCtx->HdaCodecPresent ? SOF_ENDPOINT_HDA_ANALOG : SOF_ENDPOINT_HDMI_1;
             if (channel == 0 || channel == -1) {
@@ -1079,7 +1084,8 @@ static NTSTATUS PropertyHandler_Mute(
 
         BOOLEAN isMuted = FALSE;
         if (stream != NULL) {
-            SofWaveRtGetMute(stream, &isMuted);
+            NTSTATUS status = SofWaveRtGetMute(stream, &isMuted);
+            if (!NT_SUCCESS(status)) return status;
         } else if (devCtx != NULL) {
             ULONG ep = devCtx->HdaCodecPresent ? SOF_ENDPOINT_HDA_ANALOG : SOF_ENDPOINT_HDMI_1;
             isMuted = devCtx->DefaultMute[ep];
@@ -1107,7 +1113,8 @@ static NTSTATUS PropertyHandler_Mute(
         BOOLEAN isMuted = (muteVal != FALSE);
 
         if (stream != NULL) {
-            SofWaveRtSetMute(stream, isMuted);
+            NTSTATUS status = SofWaveRtSetMute(stream, isMuted);
+            if (!NT_SUCCESS(status)) return status;
         } else if (devCtx != NULL) {
             ULONG ep = devCtx->HdaCodecPresent ? SOF_ENDPOINT_HDA_ANALOG : SOF_ENDPOINT_HDMI_1;
             devCtx->DefaultMute[ep] = isMuted;

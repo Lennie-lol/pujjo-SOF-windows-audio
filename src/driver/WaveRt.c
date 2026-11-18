@@ -91,6 +91,39 @@ static VOID SofWaveRtTimerDpc(
  * @param[out] StreamOut       Receives allocated SOF_WAVERT_STREAM pointer.
  * @return STATUS_SUCCESS on success, or an NTSTATUS failure code.
  */
+/* Cached controls are published only after acknowledged gain commands.
+ * Two-channel independent levels are supported; other formats use master gain.
+ * Caller serializes stream controls and lifetime. No hardware gate is lifted. */
+static NTSTATUS SofWaveRtApplyCachedGain(PSOF_WAVERT_STREAM Stream, BOOLEAN Mute)
+{
+    NTSTATUS status;
+    if (!Stream || !Stream->DeviceContext || Stream->GainInstance == 0xFFFFFFFFu)
+        return STATUS_DEVICE_NOT_READY;
+    if (Mute)
+        return SofIpc4SetMute(Stream->DeviceContext, Stream->GainInstance,
+            SOF_IPC4_GAIN_ALL_CHANNELS_MASK, TRUE, 0);
+    if (Stream->VolumeLevelDb[0] == Stream->VolumeLevelDb[1])
+        return SofIpc4SetVolumeLevel(Stream->DeviceContext, Stream->GainInstance,
+            SOF_IPC4_GAIN_ALL_CHANNELS_MASK, Stream->VolumeLevelDb[0]);
+    if (Stream->Format.ChannelsCount == 1u)
+        return SofIpc4SetVolumeLevel(Stream->DeviceContext, Stream->GainInstance,
+            SOF_IPC4_GAIN_ALL_CHANNELS_MASK, Stream->VolumeLevelDb[0]);
+    if (Stream->Format.ChannelsCount != 2u)
+        return STATUS_NOT_SUPPORTED;
+    status = SofIpc4SetVolumeLevel(Stream->DeviceContext, Stream->GainInstance,
+        0u, Stream->VolumeLevelDb[0]);
+    if (NT_SUCCESS(status))
+        status = SofIpc4SetVolumeLevel(Stream->DeviceContext, Stream->GainInstance,
+            1u, Stream->VolumeLevelDb[1]);
+    if (!NT_SUCCESS(status)) {
+        /* Best effort only: an IPC fault can prevent even this rollback.
+         * Propagate the original error rather than claiming hardware mute. */
+        (void)SofIpc4SetMute(Stream->DeviceContext, Stream->GainInstance,
+            SOF_IPC4_GAIN_ALL_CHANNELS_MASK, TRUE, 0);
+    }
+    return status;
+}
+
 NTSTATUS SofWaveRtCreateStream(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ SOF_ENDPOINT_TYPE EndpointType,
@@ -342,17 +375,12 @@ NTSTATUS SofWaveRtCreateStream(
         return status;
     }
 
-    /* Apply cached volume and mute to newly instantiated Gain module */
-    if (stream->GainInstance != 0xFFFFFFFF) {
-        if (stream->MasterMute) {
-            SofIpc4SetMute(Ctx, stream->GainInstance, SOF_IPC4_GAIN_ALL_CHANNELS_MASK, TRUE, 0);
-        } else if (stream->VolumeLevelDb[0] != 0 || stream->VolumeLevelDb[1] != 0) {
-            if (stream->VolumeLevelDb[0] == stream->VolumeLevelDb[1]) {
-                SofIpc4SetVolumeLevel(Ctx, stream->GainInstance, SOF_IPC4_GAIN_ALL_CHANNELS_MASK, stream->VolumeLevelDb[0]);
-            } else {
-                SofIpc4SetVolumeLevel(Ctx, stream->GainInstance, 0, stream->VolumeLevelDb[0]);
-                SofIpc4SetVolumeLevel(Ctx, stream->GainInstance, 1, stream->VolumeLevelDb[1]);
-            }
+    /* Do not configure or publish a stream when requested initial gain failed. */
+    if (stream->GainInstance != 0xFFFFFFFFu) {
+        status = SofWaveRtApplyCachedGain(stream, stream->MasterMute);
+        if (!NT_SUCCESS(status)) {
+            SofWaveRtFreeStream(stream);
+            return status;
         }
     }
 
@@ -1176,7 +1204,8 @@ NTSTATUS SofWaveRtSetVolume(
     NTSTATUS status = STATUS_SUCCESS;
     ULONG chMask;
 
-    if (Stream == NULL) {
+    if (Stream == NULL || (Channel != -1 && Channel != 0 && Channel != 1) ||
+        (Channel == 1 && Stream->Format.ChannelsCount < 2u)) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -1188,23 +1217,16 @@ NTSTATUS SofWaveRtSetVolume(
         VolumeDb = SOF_VOLUME_MIN_DB_UNITS;
     }
 
-    if (Channel == 0) {
-        Stream->VolumeLevelDb[0] = VolumeDb;
-        chMask = 0;
-    } else if (Channel == 1) {
-        Stream->VolumeLevelDb[1] = VolumeDb;
-        chMask = 1;
-    } else {
-        /* Master / all channels */
-        Stream->VolumeLevelDb[0] = VolumeDb;
-        Stream->VolumeLevelDb[1] = VolumeDb;
-        chMask = SOF_IPC4_GAIN_ALL_CHANNELS_MASK;
-    }
-
-    /* If stream is active and not muted, send IPC4 to Gain module */
-    if (Stream->IsActive && !Stream->MasterMute && Stream->GainInstance != 0xFFFFFFFF) {
+    chMask = Channel == -1 ? SOF_IPC4_GAIN_ALL_CHANNELS_MASK : (ULONG)Channel;
+    /* If unmuted, firmware must acknowledge before accepting the new value. */
+    if (Stream->IsActive && !Stream->MasterMute) {
+        if (!Stream->DeviceContext || Stream->GainInstance == 0xFFFFFFFFu)
+            return STATUS_DEVICE_NOT_READY;
         status = SofIpc4SetVolumeLevel(Stream->DeviceContext, Stream->GainInstance, chMask, VolumeDb);
+        if (!NT_SUCCESS(status)) return status;
     }
+    if (Channel == 0 || Channel == -1) Stream->VolumeLevelDb[0] = VolumeDb;
+    if (Channel == 1 || Channel == -1) Stream->VolumeLevelDb[1] = VolumeDb;
 
     /* Update cached default in DeviceContext */
     if (Stream->DeviceContext != NULL && Stream->EndpointType < SOF_ENDPOINT_COUNT) {
@@ -1233,7 +1255,9 @@ NTSTATUS SofWaveRtGetVolume(
     _Out_ PLONG VolumeDbOut
 )
 {
-    if (Stream == NULL || VolumeDbOut == NULL) {
+    if (Stream == NULL || VolumeDbOut == NULL ||
+        (Channel != -1 && Channel != 0 && Channel != 1) ||
+        (Channel == 1 && Stream->Format.ChannelsCount < 2u)) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -1264,16 +1288,13 @@ NTSTATUS SofWaveRtSetMute(
         return STATUS_INVALID_PARAMETER;
     }
 
+    if (Stream->IsActive) {
+        status = SofWaveRtApplyCachedGain(Stream, Mute);
+        if (!NT_SUCCESS(status)) return status;
+    }
     Stream->MasterMute = Mute;
     Stream->IsMuted[0] = Mute;
     Stream->IsMuted[1] = Mute;
-
-    /* If stream is active, send IPC4 to Gain module */
-    if (Stream->IsActive && Stream->GainInstance != 0xFFFFFFFF) {
-        LONG targetDb = Stream->VolumeLevelDb[0];
-        status = SofIpc4SetMute(Stream->DeviceContext, Stream->GainInstance,
-                                SOF_IPC4_GAIN_ALL_CHANNELS_MASK, Mute, targetDb);
-    }
 
     /* Update cached default in DeviceContext */
     if (Stream->DeviceContext != NULL && Stream->EndpointType < SOF_ENDPOINT_COUNT) {

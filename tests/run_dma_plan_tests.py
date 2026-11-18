@@ -152,3 +152,19 @@ assert configure.count("for (timeout = 0; timeout < 500u; ++timeout)")==2
 assert configure.index("if (timeout == 500u) return STATUS_IO_TIMEOUT;") < configure.index("/* Only decouple")
 assert configure.index("if (timeout == 500u || (ctl & SOF_HDA_SD_CTL_DMA_START))") < configure.index("SOF_HDA_ADSP_REG_SD_BDLPL")
 print("PASS: code loader BAR preflight and required reset acknowledgment")
+
+# A failed gain request must not publish a successful control or stream.
+apply=wave.split("static NTSTATUS SofWaveRtApplyCachedGain(",1)[1].split("\n}",1)[0]
+assert "Stream->Format.ChannelsCount != 2u" in apply
+assert "1u, Stream->VolumeLevelDb[1]" in apply
+assert apply.index("if (!NT_SUCCESS(status))") < apply.index("(void)SofIpc4SetMute")
+create=wave.split("NTSTATUS SofWaveRtCreateStream(",1)[1].split("\n}",1)[0]
+assert create.index("status = SofWaveRtApplyCachedGain") < create.index("SofWaveRtConfigureHdaStream(stream)") < create.index("stream->IsActive = TRUE;")
+volume=wave.split("NTSTATUS SofWaveRtSetVolume(",1)[1].split("\n}",1)[0]
+assert volume.index("if (!NT_SUCCESS(status)) return status;") < volume.index("Stream->VolumeLevelDb[0] = VolumeDb;")
+mute=wave.split("NTSTATUS SofWaveRtSetMute(",1)[1].split("\n}",1)[0]
+assert mute.index("if (!NT_SUCCESS(status)) return status;") < mute.index("Stream->MasterMute = Mute;")
+port=(root/"src/driver/PortClsAdapter.cpp").read_text()
+for call in ("SofWaveRtGetVolume","SofWaveRtSetVolume","SofWaveRtGetMute","SofWaveRtSetMute"):
+    assert "NTSTATUS status = "+call+"(" in port
+print("PASS: gain error propagation, per-channel restoration and control publication")
