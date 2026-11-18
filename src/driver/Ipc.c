@@ -1190,7 +1190,8 @@ SofIpc4EnableFwLogs(
 )
 {
     SOF_IPC_MESSAGE msg;
-    SOF_IPC_MESSAGE reply;
+    pj_ipc4_packet packet = {0};
+    pj_ipc4_status encoded;
     NTSTATUS status;
     LARGE_INTEGER sysTime;
     UINT64 usTime;
@@ -1206,6 +1207,12 @@ SofIpc4EnableFwLogs(
         return STATUS_DEVICE_NOT_READY;
     }
 
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || KeAreAllApcsDisabled())
+        return STATUS_INVALID_DEVICE_STATE;
+    /* A debug window must be established independently of trace commands. */
+    if (!Ctx->DebugWindowOffset || !pj_ipc4_mmio_span_valid(Ctx->Bar4Length,
+            Ctx->DebugWindowOffset, 65536u))
+        return STATUS_NOT_SUPPORTED;
     if (Ctx->FwState != SOF_FW_BOOT_COMPLETE) {
         return STATUS_DEVICE_NOT_READY;
     }
@@ -1215,20 +1222,20 @@ SofIpc4EnableFwLogs(
     usTime = (UINT64)(sysTime.QuadPart / 10); /* Convert 100ns units to microseconds */
 
     RtlZeroMemory(&msg, sizeof(msg));
-    RtlZeroMemory(&reply, sizeof(reply));
+    encoded = pj_ipc4_large_config_set(SOF_IPC4_MOD_INIT_BASEFW_MOD_ID,
+        SOF_IPC4_MOD_INIT_BASEFW_INSTANCE_ID, SOF_IPC4_FW_PARAM_SYSTEM_TIME,
+        (const PJ_BYTE *)&usTime, sizeof(usTime), &packet);
+    if (encoded != PJ_IPC4_VALID) return STATUS_INVALID_PARAMETER;
+    msg.Primary = packet.primary;
+    msg.Extension = packet.extension;
+    msg.Payload = (PVOID)packet.payload;
+    msg.PayloadSize = (ULONG)packet.payload_bytes;
 
-    msg.Primary = SOF_IPC4_MSG_TARGET(SOF_IPC4_MODULE_MSG) |
-                  SOF_IPC4_MSG_DIR(SOF_IPC4_MSG_REQUEST) |
-                  SOF_IPC4_MOD_ID(SOF_IPC4_MOD_INIT_BASEFW_MOD_ID) |
-                  SOF_IPC4_MOD_INSTANCE(SOF_IPC4_MOD_INIT_BASEFW_INSTANCE_ID);
-    msg.Extension = SOF_IPC4_MOD_EXT_MSG_PARAM_ID(SOF_IPC4_FW_PARAM_SYSTEM_TIME);
-    msg.Payload = &usTime;
-    msg.PayloadSize = sizeof(usTime);
-
-    status = SofIpcSendMessage(Ctx, &msg, &reply, 500);
+    status = SofIpcSendMessage(Ctx, &msg, NULL, 500);
     if (!NT_SUCCESS(status)) {
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL,
                    "[SOF] Warning: Failed to sync system time with FW (0x%08x)\n", status);
+        return status;
     }
 
     /* 2. Configure log priorities and enable FW logs (SOF_IPC4_FW_PARAM_ENABLE_LOGS = 6) */
@@ -1240,17 +1247,16 @@ SofIpc4EnableFwLogs(
     logState.LogsPrioritiesMask[0] = 0x000001ef;
 
     RtlZeroMemory(&msg, sizeof(msg));
-    RtlZeroMemory(&reply, sizeof(reply));
+    encoded = pj_ipc4_large_config_set(SOF_IPC4_MOD_INIT_BASEFW_MOD_ID,
+        SOF_IPC4_MOD_INIT_BASEFW_INSTANCE_ID, SOF_IPC4_FW_PARAM_ENABLE_LOGS,
+        (const PJ_BYTE *)&logState, sizeof(logState), &packet);
+    if (encoded != PJ_IPC4_VALID) return STATUS_INVALID_PARAMETER;
+    msg.Primary = packet.primary;
+    msg.Extension = packet.extension;
+    msg.Payload = (PVOID)packet.payload;
+    msg.PayloadSize = (ULONG)packet.payload_bytes;
 
-    msg.Primary = SOF_IPC4_MSG_TARGET(SOF_IPC4_MODULE_MSG) |
-                  SOF_IPC4_MSG_DIR(SOF_IPC4_MSG_REQUEST) |
-                  SOF_IPC4_MOD_ID(SOF_IPC4_MOD_INIT_BASEFW_MOD_ID) |
-                  SOF_IPC4_MOD_INSTANCE(SOF_IPC4_MOD_INIT_BASEFW_INSTANCE_ID);
-    msg.Extension = SOF_IPC4_MOD_EXT_MSG_PARAM_ID(SOF_IPC4_FW_PARAM_ENABLE_LOGS);
-    msg.Payload = &logState;
-    msg.PayloadSize = sizeof(logState);
-
-    status = SofIpcSendMessage(Ctx, &msg, &reply, 500);
+    status = SofIpcSendMessage(Ctx, &msg, NULL, 500);
     if (NT_SUCCESS(status)) {
         Ctx->FwLogInitialized = TRUE;
         SofLogBreadcrumb("[SOF] DSP Firmware Zephyr logging enabled successfully\n");

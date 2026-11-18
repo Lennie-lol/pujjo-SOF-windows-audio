@@ -56,3 +56,12 @@ assert "hostReadPtr = (hostReadPtr + consumed) % logBufSize;" in drain
 assert "SofDspWrite32(sramBase, slotOffset, hostReadPtr);" in drain
 assert "SofDspWrite32(sramBase, slotOffset, dspWritePtr);" not in drain
 print("PASS: bounded diagnostic snapshots and trace cursor integrity")
+
+# Single-block trace configuration must use the correct IPC message type.
+enable=ipc.split("NTSTATUS\nSofIpc4EnableFwLogs(",1)[1]
+assert enable.count("encoded = pj_ipc4_large_config_set(")==2
+assert enable.count("SofIpcSendMessage(Ctx, &msg, NULL, 500)")==2
+assert enable.index("!Ctx->DebugWindowOffset") < enable.index("pj_ipc4_large_config_set")
+assert enable.index("return status;",enable.index("Failed to sync system time")) < enable.index("SOF_IPC4_FW_PARAM_ENABLE_LOGS")
+assert "msg.Extension = packet.extension;" in enable
+print("PASS: trace configuration uses checked single-block commands")

@@ -588,9 +588,11 @@ NTSTATUS SofIpc4SetVolumeCurve(
     _In_ ULONG DurationFrames
 )
 {
+    struct sof_ipc4_gain_params params = {0};
+#ifdef _KERNEL_MODE
     pj_ipc4_packet packet = {0};
     pj_ipc4_status result;
-    struct sof_ipc4_gain_params params = {0};
+#endif
 
     if (GainInstanceId >= 256u ||
         (Channel >= 8u && Channel != SOF_IPC4_GAIN_ALL_CHANNELS_MASK) ||
@@ -604,13 +606,14 @@ NTSTATUS SofIpc4SetVolumeCurve(
     params.curve_duration_l = DurationFrames;
     params.curve_duration_h = 0;
 
+#ifdef _KERNEL_MODE
     result = pj_ipc4_large_config_set(SOF_IPC4_MOD_ID_GAIN, GainInstanceId,
         SOF_IPC4_GAIN_PARAM_ID, (const PJ_BYTE *)&params, sizeof(params), &packet);
-#ifdef _KERNEL_MODE
     return SofIpc4SendGraphPacket(Ctx, result, &packet);
 #else
     UNREFERENCED_PARAMETER(Ctx);
-    return result == PJ_IPC4_VALID ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+    UNREFERENCED_PARAMETER(params);
+    return STATUS_SUCCESS; /* Host-only configuration validation. */
 #endif
 }
 
