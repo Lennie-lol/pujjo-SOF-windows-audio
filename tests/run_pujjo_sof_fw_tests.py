@@ -14,3 +14,11 @@ with tempfile.TemporaryDirectory(prefix='pujjo_sof_policy_') as d:
                     str(root/'tests/test_pujjo_sof_fw_policy.c'),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True,timeout=10)
 print('PASS: firmware candidate policy host tests')
+
+with tempfile.TemporaryDirectory(prefix='pujjo_catalog_') as d:
+    exe=Path(d)/('test.exe' if os.name=='nt' else 'test')
+    subprocess.run([cc,'-std=c11','-pedantic','-Wall','-Wextra','-Werror',
+                    '-Wconversion','-Wsign-conversion',
+                    str(root/'src/driver/PujjoFirmwareCatalog.c'),
+                    str(root/'tests/test_pujjo_firmware_catalog.c'),'-o',str(exe)],check=True,timeout=40)
+    subprocess.run([str(exe)],check=True,timeout=10)

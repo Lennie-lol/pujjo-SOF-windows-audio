@@ -63,9 +63,6 @@ static VOID SofWaveRtTimerDpc(
     UNREFERENCED_PARAMETER(SystemArgument2);
 
     if (stream != NULL && stream->State == KSSTATE_RUN) {
-        if (stream->BufferSizeBytes > 0 && stream->PeriodSizeBytes > 0) {
-            stream->LinearPositionBytes += stream->PeriodSizeBytes;
-        }
         SofWaveRtSignalNotification(stream);
     }
 }
@@ -91,6 +88,39 @@ static VOID SofWaveRtTimerDpc(
  * @param[out] StreamOut       Receives allocated SOF_WAVERT_STREAM pointer.
  * @return STATUS_SUCCESS on success, or an NTSTATUS failure code.
  */
+/* Cached controls are published only after acknowledged gain commands.
+ * Two-channel independent levels are supported; other formats use master gain.
+ * Caller serializes stream controls and lifetime. No hardware gate is lifted. */
+static NTSTATUS SofWaveRtApplyCachedGain(PSOF_WAVERT_STREAM Stream, BOOLEAN Mute)
+{
+    NTSTATUS status;
+    if (!Stream || !Stream->DeviceContext || Stream->GainInstance == 0xFFFFFFFFu)
+        return STATUS_DEVICE_NOT_READY;
+    if (Mute)
+        return SofIpc4SetMute(Stream->DeviceContext, Stream->GainInstance,
+            SOF_IPC4_GAIN_ALL_CHANNELS_MASK, TRUE, 0);
+    if (Stream->VolumeLevelDb[0] == Stream->VolumeLevelDb[1])
+        return SofIpc4SetVolumeLevel(Stream->DeviceContext, Stream->GainInstance,
+            SOF_IPC4_GAIN_ALL_CHANNELS_MASK, Stream->VolumeLevelDb[0]);
+    if (Stream->Format.ChannelsCount == 1u)
+        return SofIpc4SetVolumeLevel(Stream->DeviceContext, Stream->GainInstance,
+            SOF_IPC4_GAIN_ALL_CHANNELS_MASK, Stream->VolumeLevelDb[0]);
+    if (Stream->Format.ChannelsCount != 2u)
+        return STATUS_NOT_SUPPORTED;
+    status = SofIpc4SetVolumeLevel(Stream->DeviceContext, Stream->GainInstance,
+        0u, Stream->VolumeLevelDb[0]);
+    if (NT_SUCCESS(status))
+        status = SofIpc4SetVolumeLevel(Stream->DeviceContext, Stream->GainInstance,
+            1u, Stream->VolumeLevelDb[1]);
+    if (!NT_SUCCESS(status)) {
+        /* Best effort only: an IPC fault can prevent even this rollback.
+         * Propagate the original error rather than claiming hardware mute. */
+        (void)SofIpc4SetMute(Stream->DeviceContext, Stream->GainInstance,
+            SOF_IPC4_GAIN_ALL_CHANNELS_MASK, TRUE, 0);
+    }
+    return status;
+}
+
 NTSTATUS SofWaveRtCreateStream(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ SOF_ENDPOINT_TYPE EndpointType,
@@ -104,7 +134,9 @@ NTSTATUS SofWaveRtCreateStream(
 {
     PSOF_WAVERT_STREAM stream;
     NTSTATUS status;
+#ifndef _KERNEL_MODE
     ULONG bdlSize;
+#endif
     ULONG periodBytes;
 
     if (StreamOut == NULL) return STATUS_INVALID_PARAMETER;
@@ -197,71 +229,42 @@ NTSTATUS SofWaveRtCreateStream(
     /* 1. Allocate circular ring buffer */
 #ifdef _KERNEL_MODE
     {
-        PHYSICAL_ADDRESS maxAddr;
-        maxAddr.QuadPart = 0xFFFFFFFFFFFFFFFFULL;
-
-        stream->KernelBuffer = MmAllocateContiguousMemory(stream->BufferSizeBytes, maxAddr);
-        if (stream->KernelBuffer == NULL) {
-            maxAddr.QuadPart = 0xFFFFFFFFULL;
-            stream->KernelBuffer = MmAllocateContiguousMemory(stream->BufferSizeBytes, maxAddr);
+        pj_dma_plan plan;
+        /* PortCls can map whole pages. Keep every mapped byte within the
+         * zeroed ring allocation, including the padding of its last page. */
+        status = SofAllocateDmaBuffer(Ctx, (ULONG)ROUND_TO_PAGES(BufferSizeBytes),
+                                      &stream->RingAllocation);
+        if (NT_SUCCESS(status))
+            status = SofAllocateDmaBuffer(Ctx, PAGE_SIZE, &stream->BdlAllocation);
+        if (NT_SUCCESS(status)) {
+            stream->KernelBuffer = stream->RingAllocation.VirtualAddress;
+            stream->PhysicalAddress = stream->RingAllocation.PhysicalAddress;
+            stream->Bdl = (PSOF_INTEL_DSP_BDL)stream->BdlAllocation.VirtualAddress;
+            stream->BdlPhysicalAddress = stream->BdlAllocation.PhysicalAddress;
+            if (BYTE_OFFSET(stream->KernelBuffer) ||
+                (stream->BdlPhysicalAddress.LowPart & 127u) ||
+                !pj_dma_plan_pair(stream->PhysicalAddress.LowPart,
+                                  (ULONG)stream->PhysicalAddress.HighPart,
+                                  BufferSizeBytes, BufferSizeBytes / 2u, &plan))
+                status = STATUS_INVALID_BUFFER_SIZE;
         }
-        if (stream->KernelBuffer == NULL) {
-            char bmsg[128];
-            RtlStringCbPrintfA(bmsg, sizeof(bmsg), "[WaveRt] MmAllocateContiguousMemory(%u) FAILED\n", stream->BufferSizeBytes);
-            SofLogBreadcrumb(bmsg);
+        if (!NT_SUCCESS(status)) {
+            SofFreeDmaBuffer(Ctx, &stream->BdlAllocation);
+            SofFreeDmaBuffer(Ctx, &stream->RingAllocation);
             ExFreePoolWithTag(stream, SOF_DEVICE_TAG);
-            return STATUS_INSUFFICIENT_RESOURCES;
+            return status;
         }
-
-        RtlZeroMemory(stream->KernelBuffer, stream->BufferSizeBytes);
-        stream->PhysicalAddress = MmGetPhysicalAddress(stream->KernelBuffer);
-
-        /* 2. Allocate 4KB BDL */
-        bdlSize = 4096;
-        maxAddr.QuadPart = 0xFFFFFFFFFFFFFFFFULL;
-        stream->Bdl = (PSOF_INTEL_DSP_BDL)MmAllocateContiguousMemory(bdlSize, maxAddr);
-        if (stream->Bdl == NULL) {
-            maxAddr.QuadPart = 0xFFFFFFFFULL;
-            stream->Bdl = (PSOF_INTEL_DSP_BDL)MmAllocateContiguousMemory(bdlSize, maxAddr);
-        }
-        if (stream->Bdl == NULL) {
-            char bmsg[128];
-            RtlStringCbPrintfA(bmsg, sizeof(bmsg), "[WaveRt] MmAllocateContiguousMemory BDL FAILED\n");
-            SofLogBreadcrumb(bmsg);
-            MmFreeContiguousMemory(stream->KernelBuffer);
-            ExFreePoolWithTag(stream, SOF_DEVICE_TAG);
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        RtlZeroMemory(stream->Bdl, bdlSize);
-        stream->BdlPhysicalAddress = MmGetPhysicalAddress(stream->Bdl);
-
-        {
-            char bmsg[192];
-            RtlStringCbPrintfA(bmsg, sizeof(bmsg),
-                "[WaveRt] Buffer=%p (Phys=0x%llx, %u B), BDL=%p (Phys=0x%llx), StreamIndex=%u, Tag=%u\n",
-                stream->KernelBuffer, stream->PhysicalAddress.QuadPart, stream->BufferSizeBytes,
-                stream->Bdl, stream->BdlPhysicalAddress.QuadPart,
-                stream->StreamIndex, stream->StreamTag);
-            SofLogBreadcrumb(bmsg);
-        }
-
-        /*
-         * Populate 2 BDL entries for double buffering / circular period wrap:
-         * Entry 0: First half of ring buffer, IOC asserted.
-         * Entry 1: Second half of ring buffer, IOC asserted.
-         */
-        stream->Bdl[0].AddrLow = stream->PhysicalAddress.LowPart;
-        stream->Bdl[0].AddrHigh = stream->PhysicalAddress.HighPart;
-        stream->Bdl[0].Size = stream->BufferSizeBytes / 2;
+        stream->Bdl[0].AddrLow = plan.first.low;
+        stream->Bdl[0].AddrHigh = plan.first.high;
+        stream->Bdl[0].Size = plan.first.length;
         stream->Bdl[0].Ioc = 1;
-
-        stream->Bdl[1].AddrLow = (ULONG)(stream->PhysicalAddress.LowPart + (stream->BufferSizeBytes / 2));
-        stream->Bdl[1].AddrHigh = stream->PhysicalAddress.HighPart;
-        stream->Bdl[1].Size = stream->BufferSizeBytes / 2;
+        stream->Bdl[1].AddrLow = plan.second.low;
+        stream->Bdl[1].AddrHigh = plan.second.high;
+        stream->Bdl[1].Size = plan.second.length;
         stream->Bdl[1].Ioc = 1;
 
         /* Initialize timer and DPC for period notifications */
+        KeInitializeSpinLock(&stream->NotificationLock);
         KeInitializeDpc(&stream->NotificationDpc, SofWaveRtTimerDpc, stream);
         KeInitializeTimer(&stream->NotificationTimer);
     }
@@ -342,22 +345,20 @@ NTSTATUS SofWaveRtCreateStream(
         return status;
     }
 
-    /* Apply cached volume and mute to newly instantiated Gain module */
-    if (stream->GainInstance != 0xFFFFFFFF) {
-        if (stream->MasterMute) {
-            SofIpc4SetMute(Ctx, stream->GainInstance, SOF_IPC4_GAIN_ALL_CHANNELS_MASK, TRUE, 0);
-        } else if (stream->VolumeLevelDb[0] != 0 || stream->VolumeLevelDb[1] != 0) {
-            if (stream->VolumeLevelDb[0] == stream->VolumeLevelDb[1]) {
-                SofIpc4SetVolumeLevel(Ctx, stream->GainInstance, SOF_IPC4_GAIN_ALL_CHANNELS_MASK, stream->VolumeLevelDb[0]);
-            } else {
-                SofIpc4SetVolumeLevel(Ctx, stream->GainInstance, 0, stream->VolumeLevelDb[0]);
-                SofIpc4SetVolumeLevel(Ctx, stream->GainInstance, 1, stream->VolumeLevelDb[1]);
-            }
+    /* Do not configure or publish a stream when requested initial gain failed. */
+    if (stream->GainInstance != 0xFFFFFFFFu) {
+        status = SofWaveRtApplyCachedGain(stream, stream->MasterMute);
+        if (!NT_SUCCESS(status)) {
+            SofWaveRtFreeStream(stream);
+            return status;
         }
     }
 
     /* 4. Configure BAR0 HDA Stream Engine (if DSP pipeline instantiated) */
     if (stream->HostCopierInstance != 0xFFFFFFFF) {
+#ifdef _KERNEL_MODE
+        stream->DescriptorPublished = TRUE;
+#endif
         SofWaveRtConfigureHdaStream(stream);
 
         /* 5. Configure Link Stream Engine (PPLC) */
@@ -383,12 +384,25 @@ NTSTATUS SofWaveRtFreeStream(
     _In_ PSOF_WAVERT_STREAM Stream
 )
 {
+    NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS deleteStatus = STATUS_SUCCESS;
     if (Stream == NULL) {
         return STATUS_SUCCESS;
     }
 
-    /* Stop stream and reset pipeline */
-    SofWaveRtSetState(Stream, KSSTATE_STOP);
+#ifdef _KERNEL_MODE
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return STATUS_INVALID_DEVICE_STATE;
+#endif
+    /* Stop stream and reset pipeline. Cancel regardless of registered events
+     * and drain queued/running notification DPCs before freeing their context. */
+    status = SofWaveRtSetState(Stream, KSSTATE_STOP);
+    Stream->IsActive = FALSE;
+#ifdef _KERNEL_MODE
+    KeCancelTimer(&Stream->NotificationTimer);
+    KeRemoveQueueDpc(&Stream->NotificationDpc);
+    KeFlushQueuedDpcs();
+#endif
 
     /* Cache stream volume and mute back into device context */
     if (Stream->DeviceContext != NULL && Stream->EndpointType < SOF_ENDPOINT_COUNT) {
@@ -422,8 +436,12 @@ NTSTATUS SofWaveRtFreeStream(
             }
         }
 
+        if (Stream->HostCopierInstance != 0xFFFFFFFF)
+            deleteStatus = SofIpc4DeletePipeline(Stream->DeviceContext, Stream->PipelineId);
+        /* Keep DSP IDs reserved if deletion failed; uncertain ownership must
+         * never be recycled to another pipeline. */
+        if (NT_SUCCESS(deleteStatus)) {
         if (Stream->HostCopierInstance != 0xFFFFFFFF) {
-            SofIpc4DeletePipeline(Stream->DeviceContext, Stream->PipelineId);
             SofIpc4FreeInstanceId(Stream->DeviceContext, SOF_IPC4_MOD_ID_COPIER, Stream->HostCopierInstance);
             Stream->HostCopierInstance = 0xFFFFFFFF;
         }
@@ -435,6 +453,7 @@ NTSTATUS SofWaveRtFreeStream(
             SofIpc4FreeInstanceId(Stream->DeviceContext, SOF_IPC4_MOD_ID_COPIER, Stream->DaiCopierInstance);
             Stream->DaiCopierInstance = 0xFFFFFFFF;
         }
+        }
 
 #ifdef _KERNEL_MODE
         KeStallExecutionProcessor(500);
@@ -442,18 +461,27 @@ NTSTATUS SofWaveRtFreeStream(
     }
 
 #ifdef _KERNEL_MODE
-    if (Stream->NotificationEvents[0] != NULL) {
-        KeCancelTimer(&Stream->NotificationTimer);
+    BOOLEAN stopped = !Stream->DescriptorPublished;
+    PSOF_DEVICE_CONTEXT ctx = Stream->DeviceContext;
+    if (!stopped && ctx && ctx->Bar0VirtualAddress && Stream->StreamIndex < 30u) {
+        ULONG offset = SOF_HDA_STREAM_REG_OFFSET(Stream->StreamIndex);
+        if (offset <= ctx->Bar0Length && sizeof(ULONG) <= ctx->Bar0Length - offset) {
+            for (ULONG attempt = 0; attempt < 500u; ++attempt) {
+                ULONG ctl = readl((PUCHAR)ctx->Bar0VirtualAddress + offset);
+                if (ctl != MAXULONG && !(ctl & SOF_HDA_SD_CTL_DMA_START)) {
+                    stopped = TRUE;
+                    break;
+                }
+                KeStallExecutionProcessor(10);
+            }
+        }
     }
-
-    if (Stream->Bdl != NULL) {
-        MmFreeContiguousMemory(Stream->Bdl);
-        Stream->Bdl = NULL;
-    }
-
-    if (Stream->KernelBuffer != NULL) {
-        MmFreeContiguousMemory(Stream->KernelBuffer);
-        Stream->KernelBuffer = NULL;
+    if (stopped) {
+        SofFreeDmaBuffer(ctx, &Stream->BdlAllocation);
+        SofFreeDmaBuffer(ctx, &Stream->RingAllocation);
+    } else {
+        /* Keep both WDF children until device destruction. */
+        status = STATUS_DEVICE_NOT_READY;
     }
 
     ExFreePoolWithTag(Stream, SOF_DEVICE_TAG);
@@ -467,7 +495,7 @@ NTSTATUS SofWaveRtFreeStream(
     free(Stream);
 #endif
 
-    return STATUS_SUCCESS;
+    return NT_SUCCESS(status) ? deleteStatus : status;
 }
 
 /**
@@ -501,6 +529,14 @@ NTSTATUS SofWaveRtSetState(
         return STATUS_INVALID_PARAMETER;
     }
 
+#ifdef _KERNEL_MODE
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return STATUS_INVALID_DEVICE_STATE;
+#endif
+    if (NewState == KSSTATE_RUN && (!Stream->IsActive ||
+        Stream->HostCopierInstance == 0xFFFFFFFF || !Stream->DeviceContext))
+        return STATUS_DEVICE_NOT_READY;
+
     if (Stream->State == NewState) {
         return STATUS_SUCCESS;
     }
@@ -519,10 +555,12 @@ NTSTATUS SofWaveRtSetState(
 
         /* Start Codec Converter (DAC or ADC) */
         if (Stream->DeviceContext != NULL && Stream->DeviceContext->HdaCodecPresent && Stream->EndpointType == SOF_ENDPOINT_HDA_ANALOG) {
-            SofHdaStartConverter(Stream->DeviceContext, 0, Stream->IsCapture, Stream->StreamTag);
+            status = SofHdaStartConverter(Stream->DeviceContext, 0, Stream->IsCapture, Stream->StreamTag);
+            if (!NT_SUCCESS(status)) goto run_failed;
         } else if (Stream->DeviceContext != NULL && Stream->DeviceContext->IDispCodecPresent && Stream->EndpointType >= SOF_ENDPOINT_HDMI_1 && Stream->EndpointType <= SOF_ENDPOINT_HDMI_3) {
             ULONG hdmiLink = 1 + (Stream->EndpointType - SOF_ENDPOINT_HDMI_1);
-            SofHdaStartDisplayConverter(Stream->DeviceContext, 2, hdmiLink, Stream->StreamTag, &Stream->Format);
+            status = SofHdaStartDisplayConverter(Stream->DeviceContext, 2, hdmiLink, Stream->StreamTag, &Stream->Format);
+            if (!NT_SUCCESS(status)) goto run_failed;
         }
 
         /* Start Link Stream DMA (PPLC) and HDA Stream Engine */
@@ -538,13 +576,12 @@ NTSTATUS SofWaveRtSetState(
                     status, Stream->StreamIndex, Stream->PipelineId);
                 SofLogBreadcrumb(bmsg);
             }
-        } else {
-            /* Zero out buffer on run for silence / 0s */
-            if (Stream->KernelBuffer != NULL && Stream->BufferSizeBytes > 0) {
-                RtlZeroMemory(Stream->KernelBuffer, Stream->BufferSizeBytes);
-            }
         }
 
+        if (!NT_SUCCESS(status)) goto run_failed;
+
+        /* Publish RUN only after all checked start operations succeed. */
+        Stream->State = KSSTATE_RUN;
 #ifdef _KERNEL_MODE
         /* Start periodic notification timer */
         {
@@ -553,7 +590,6 @@ NTSTATUS SofWaveRtSetState(
             KeSetTimerEx(&Stream->NotificationTimer, dueTime, Stream->PeriodMs, &Stream->NotificationDpc);
         }
 #endif
-        Stream->State = KSSTATE_RUN;
         break;
 
     case KSSTATE_PAUSE:
@@ -578,7 +614,8 @@ NTSTATUS SofWaveRtSetState(
             ULONG hdmiLink = 1 + (Stream->EndpointType - SOF_ENDPOINT_HDMI_1);
             SofHdaStopDisplayConverter(Stream->DeviceContext, 2, hdmiLink);
         }
-        Stream->State = KSSTATE_PAUSE;
+        Stream->State = NT_SUCCESS(status) ? KSSTATE_PAUSE : KSSTATE_STOP;
+        if (!NT_SUCCESS(status)) Stream->IsActive = FALSE;
         break;
 
     case KSSTATE_STOP:
@@ -605,7 +642,8 @@ NTSTATUS SofWaveRtSetState(
             ULONG hdmiLink = 1 + (Stream->EndpointType - SOF_ENDPOINT_HDMI_1);
             SofHdaStopDisplayConverter(Stream->DeviceContext, 2, hdmiLink);
         }
-        Stream->State = NewState;
+        Stream->State = NT_SUCCESS(status) ? NewState : KSSTATE_STOP;
+        if (!NT_SUCCESS(status)) Stream->IsActive = FALSE;
         break;
 
     default:
@@ -613,6 +651,22 @@ NTSTATUS SofWaveRtSetState(
         break;
     }
 
+    return status;
+
+run_failed:
+    /* Do not arm notifications or report RUN after a failed converter/IPC
+     * command. Halt any DMA started in this attempt and require recreation. */
+    SofWaveRtStopHdaStream(Stream);
+    SofWaveRtStopLinkStream(Stream);
+    if (Stream->DeviceContext->HdaCodecPresent && Stream->EndpointType == SOF_ENDPOINT_HDA_ANALOG)
+        (void)SofHdaStopConverter(Stream->DeviceContext, 0, Stream->IsCapture);
+    else if (Stream->DeviceContext->IDispCodecPresent &&
+             Stream->EndpointType >= SOF_ENDPOINT_HDMI_1 && Stream->EndpointType <= SOF_ENDPOINT_HDMI_3) {
+        ULONG hdmiLink = 1 + (Stream->EndpointType - SOF_ENDPOINT_HDMI_1);
+        (void)SofHdaStopDisplayConverter(Stream->DeviceContext, 2, hdmiLink);
+    }
+    Stream->IsActive = FALSE;
+    Stream->State = KSSTATE_STOP;
     return status;
 }
 
@@ -632,11 +686,21 @@ NTSTATUS SofWaveRtGetPosition(
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (Stream->BufferSizeBytes > 0) {
-        *PositionBytes = Stream->LinearPositionBytes % Stream->BufferSizeBytes;
-    } else {
-        *PositionBytes = 0;
-    }
+#ifdef _KERNEL_MODE
+    PSOF_DEVICE_CONTEXT ctx = Stream->DeviceContext;
+    ULONG offset, position;
+    if (!ctx || !ctx->Bar0VirtualAddress || Stream->StreamIndex >= 30u)
+        return STATUS_DEVICE_NOT_READY;
+    offset = SOF_HDA_STREAM_REG_OFFSET(Stream->StreamIndex) + SOF_HDA_ADSP_REG_SD_LPIB;
+    if (offset > ctx->Bar0Length || sizeof(ULONG) > ctx->Bar0Length - offset)
+        return STATUS_INVALID_BUFFER_SIZE;
+    position = readl((PUCHAR)ctx->Bar0VirtualAddress + offset);
+    if (position >= Stream->BufferSizeBytes) return STATUS_DEVICE_NOT_READY;
+    *PositionBytes = position;
+#else
+    if (!Stream->BufferSizeBytes) return STATUS_INVALID_BUFFER_SIZE;
+    *PositionBytes = Stream->LinearPositionBytes % Stream->BufferSizeBytes;
+#endif
     return STATUS_SUCCESS;
 }
 
@@ -688,12 +752,22 @@ NTSTATUS SofWaveRtRegisterNotificationEvent(
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (Stream->NumNotificationEvents >= SOF_WAVERT_MAX_EVENTS) {
-        return STATUS_INSUFFICIENT_RESOURCES;
+    NTSTATUS status = STATUS_SUCCESS;
+#ifdef _KERNEL_MODE
+    KIRQL irql;
+    KeAcquireSpinLock(&Stream->NotificationLock, &irql);
+#endif
+    ULONG i;
+    for (i = 0; i < Stream->NumNotificationEvents; ++i)
+        if (Stream->NotificationEvents[i] == NotificationEvent) break;
+    if (i == Stream->NumNotificationEvents) {
+        if (i == SOF_WAVERT_MAX_EVENTS) status = STATUS_INSUFFICIENT_RESOURCES;
+        else Stream->NotificationEvents[Stream->NumNotificationEvents++] = NotificationEvent;
     }
-
-    Stream->NotificationEvents[Stream->NumNotificationEvents++] = NotificationEvent;
-    return STATUS_SUCCESS;
+#ifdef _KERNEL_MODE
+    KeReleaseSpinLock(&Stream->NotificationLock, irql);
+#endif
+    return status;
 }
 
 /**
@@ -714,17 +788,27 @@ NTSTATUS SofWaveRtUnregisterNotificationEvent(
         return STATUS_INVALID_PARAMETER;
     }
 
+    NTSTATUS status = STATUS_NOT_FOUND;
+#ifdef _KERNEL_MODE
+    KIRQL irql;
+    KeAcquireSpinLock(&Stream->NotificationLock, &irql);
+#endif
     for (i = 0; i < Stream->NumNotificationEvents; i++) {
         if (Stream->NotificationEvents[i] == NotificationEvent) {
             for (j = i; j < Stream->NumNotificationEvents - 1; j++) {
                 Stream->NotificationEvents[j] = Stream->NotificationEvents[j + 1];
             }
             Stream->NumNotificationEvents--;
-            return STATUS_SUCCESS;
+            Stream->NotificationEvents[Stream->NumNotificationEvents] = NULL;
+            status = STATUS_SUCCESS;
+            break;
         }
     }
 
-    return STATUS_NOT_FOUND;
+#ifdef _KERNEL_MODE
+    KeReleaseSpinLock(&Stream->NotificationLock, irql);
+#endif
+    return status;
 }
 
 /**
@@ -743,11 +827,14 @@ VOID SofWaveRtSignalNotification(
     }
 
 #ifdef _KERNEL_MODE
+    KIRQL irql;
+    KeAcquireSpinLock(&Stream->NotificationLock, &irql);
     for (i = 0; i < Stream->NumNotificationEvents; i++) {
         if (Stream->NotificationEvents[i] != NULL) {
             KeSetEvent((PKEVENT)Stream->NotificationEvents[i], 0, FALSE);
         }
     }
+    KeReleaseSpinLock(&Stream->NotificationLock, irql);
 #else
     UNREFERENCED_PARAMETER(i);
 #endif
@@ -1136,7 +1223,8 @@ NTSTATUS SofWaveRtSetVolume(
     NTSTATUS status = STATUS_SUCCESS;
     ULONG chMask;
 
-    if (Stream == NULL) {
+    if (Stream == NULL || (Channel != -1 && Channel != 0 && Channel != 1) ||
+        (Channel == 1 && Stream->Format.ChannelsCount < 2u)) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -1148,23 +1236,16 @@ NTSTATUS SofWaveRtSetVolume(
         VolumeDb = SOF_VOLUME_MIN_DB_UNITS;
     }
 
-    if (Channel == 0) {
-        Stream->VolumeLevelDb[0] = VolumeDb;
-        chMask = 0;
-    } else if (Channel == 1) {
-        Stream->VolumeLevelDb[1] = VolumeDb;
-        chMask = 1;
-    } else {
-        /* Master / all channels */
-        Stream->VolumeLevelDb[0] = VolumeDb;
-        Stream->VolumeLevelDb[1] = VolumeDb;
-        chMask = SOF_IPC4_GAIN_ALL_CHANNELS_MASK;
-    }
-
-    /* If stream is active and not muted, send IPC4 to Gain module */
-    if (Stream->IsActive && !Stream->MasterMute && Stream->GainInstance != 0xFFFFFFFF) {
+    chMask = Channel == -1 ? SOF_IPC4_GAIN_ALL_CHANNELS_MASK : (ULONG)Channel;
+    /* If unmuted, firmware must acknowledge before accepting the new value. */
+    if (Stream->IsActive && !Stream->MasterMute) {
+        if (!Stream->DeviceContext || Stream->GainInstance == 0xFFFFFFFFu)
+            return STATUS_DEVICE_NOT_READY;
         status = SofIpc4SetVolumeLevel(Stream->DeviceContext, Stream->GainInstance, chMask, VolumeDb);
+        if (!NT_SUCCESS(status)) return status;
     }
+    if (Channel == 0 || Channel == -1) Stream->VolumeLevelDb[0] = VolumeDb;
+    if (Channel == 1 || Channel == -1) Stream->VolumeLevelDb[1] = VolumeDb;
 
     /* Update cached default in DeviceContext */
     if (Stream->DeviceContext != NULL && Stream->EndpointType < SOF_ENDPOINT_COUNT) {
@@ -1193,7 +1274,9 @@ NTSTATUS SofWaveRtGetVolume(
     _Out_ PLONG VolumeDbOut
 )
 {
-    if (Stream == NULL || VolumeDbOut == NULL) {
+    if (Stream == NULL || VolumeDbOut == NULL ||
+        (Channel != -1 && Channel != 0 && Channel != 1) ||
+        (Channel == 1 && Stream->Format.ChannelsCount < 2u)) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -1224,16 +1307,13 @@ NTSTATUS SofWaveRtSetMute(
         return STATUS_INVALID_PARAMETER;
     }
 
+    if (Stream->IsActive) {
+        status = SofWaveRtApplyCachedGain(Stream, Mute);
+        if (!NT_SUCCESS(status)) return status;
+    }
     Stream->MasterMute = Mute;
     Stream->IsMuted[0] = Mute;
     Stream->IsMuted[1] = Mute;
-
-    /* If stream is active, send IPC4 to Gain module */
-    if (Stream->IsActive && Stream->GainInstance != 0xFFFFFFFF) {
-        LONG targetDb = Stream->VolumeLevelDb[0];
-        status = SofIpc4SetMute(Stream->DeviceContext, Stream->GainInstance,
-                                SOF_IPC4_GAIN_ALL_CHANNELS_MASK, Mute, targetDb);
-    }
 
     /* Update cached default in DeviceContext */
     if (Stream->DeviceContext != NULL && Stream->EndpointType < SOF_ENDPOINT_COUNT) {
@@ -1290,12 +1370,7 @@ NTSTATUS SofWaveRtGetPeakMeter(
         return STATUS_SUCCESS;
     }
 
-    /* When running and unmuted: return current volume level as peak */
-    if (Channel == 1) {
-        *PeakMeterDbOut = Stream->VolumeLevelDb[1];
-    } else {
-        *PeakMeterDbOut = Stream->VolumeLevelDb[0];
-    }
-
-    return STATUS_SUCCESS;
+    /* Active peak reporting requires a measured sample or DSP meter. */
+    UNREFERENCED_PARAMETER(Channel);
+    return STATUS_NOT_SUPPORTED;
 }

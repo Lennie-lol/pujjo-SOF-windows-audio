@@ -84,6 +84,7 @@ pj5682s_status pj5682s_identify(pj5682s_codec *c)
 pj5682s_status pj5682s_read_identity(pj5682s_codec *c,
                                       PJ_WORD reg, PJ_WORD *out)
 {
+    PJ_WORD observed;
     pj5682s_status s;
     if (!c || !out) return PJ5682S_BAD_ARGUMENT;
     if (c->state!=PJ5682S_IDENTIFIED)
@@ -92,14 +93,15 @@ pj5682s_status pj5682s_read_identity(pj5682s_codec *c,
     if (reg!=PJ5682S_DEVICE_ID_REGISTER &&
         reg!=PJ5682S_VENDOR_ID_REGISTER &&
         reg!=PJ5682S_VERSION_REGISTER) return PJ5682S_BAD_ARGUMENT;
-    s=read_raw(c, reg, out);
+    s=read_raw(c, reg, &observed);
     /* Device ID unexpectedly changes: treat identity as invalid permanently. */
     if (s==PJ5682S_OK && reg==PJ5682S_DEVICE_ID_REGISTER &&
-        *out!=PJ5682S_EXPECTED_DEVICE_ID) {
+        observed!=PJ5682S_EXPECTED_DEVICE_ID) {
         c->state=PJ5682S_FAILED;
         c->verified_id=0;
         return PJ5682S_WRONG_CHIP;
     }
+    if (s==PJ5682S_OK) *out=observed;
     return s;
 }
 

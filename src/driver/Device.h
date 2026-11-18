@@ -39,6 +39,7 @@ typedef struct _HDAUDIO_CONVERTER_FORMAT { USHORT ConverterFormat; } HDAUDIO_CON
 #endif
 #include <sof/sof_osal.h>
 #include "PciIds.h"
+#include "PujjoFirmwareCatalog.h"
 #include "Hw.h"
 #include "Ipc.h"
 #include "Nhlt.h"
@@ -166,6 +167,10 @@ typedef struct _SOF_DEVICE_CONTEXT {
     WDFINTERRUPT        WdfInterrupt;
 
     /** @brief WDF framework DMA enabler handle for scatter/gather mapping. */
+    pj_firmware_module CopierModule;
+    pj_firmware_module GainModule;
+    pj_firmware_config CopierConfig;
+    pj_firmware_config GainConfig;
     WDFDMAENABLER       DmaEnabler;
 
     /* PCI Identity */
@@ -318,6 +323,10 @@ typedef struct _SOF_DEVICE_CONTEXT {
     PVOID               PortEvents;
     /** @brief Periodic passive WDF timer for jack and display presence polling. */
     WDFTIMER            JackPollTimer;
+    volatile LONG       JackPolling;
+#ifdef _KERNEL_MODE
+    EX_RUNDOWN_REF      IpcRundown;
+#endif
     /** @brief Delayed passive WDF timer to confirm healthy boot and reset watchdog. */
     WDFTIMER            WatchdogHealthTimer;
 

@@ -4,12 +4,20 @@
 
 **Not installable. Not hardware verified. No working speaker or microphone audio.**
 
-The `main` revision `d990314c` passed Microsoft WDK Debug and Release compilation
-on GitHub Actions run #10 and separately passed the Windows 11 VM build checks
-(reported in user-provided `RESULTS.txt`). This proves only that the source
-builds and that the unsigned intermediate artifacts are present. It does not
-establish functional device initialization, a valid installable driver package,
-or real SOF firmware boot.
+The Windows 11 VM independently passed Debug/Release and eight static tests
+at commit `d990314c`, reported in user-provided `RESULTS.txt`. GitHub Actions
+also passed all three jobs at `main` in [run #22](https://github.com/Lennie-lol/pujjo-SOF-windows-audio/actions/runs/44271833015)
+(commit `3ad0653e`) and tested the later combined read-only discovery and
+BAR rollback changes at [run #24](https://github.com/Lennie-lol/pujjo-SOF-windows-audio/actions/runs/44272395075)
+(commit `0cb3d5e3`, **38/38 offline commands, Debug and Release all passed**).
+Those combined changes were then merged to `main` at `58fad987`.
+Check the newest `main` workflow result separately; a past successful run
+does not establish a subsequent commit's CI status.
+
+This evidence proves compilation, not functional device initialization, a
+valid installable driver package, real SOF firmware boot, or audio playback.
+
+The subsequent development revision `4831d721e1af3bbbcba6907474f4aed432c3704f` passed all three jobs in [run #69](https://github.com/Lennie-lol/pujjo-SOF-windows-audio/actions/runs/44368075960), including WDK Debug/Release and portable regressions. The consolidation retains that source tree (with documentation updates); the consolidation commit itself requires separate CI confirmation. No offline-only development ZIP or patch is included.
 
 The *portable host-only* IPC4 boot state model added after that build has no
 PCI, DSP, DMA, I2C, GPIO, WDF or hardware backend. Its mock events and
@@ -76,3 +84,57 @@ provide the Chromebook's PnP or ACPI evidence.
 EXE.** A double-click installer is just a deployment wrapper, not a substitute
 for the requirements above. Never disable Windows driver signing/integrity
 controls as a shortcut.
+
+## Hardware-free development completed after the original VM build
+
+- Source-only IPC4 framing, transaction-state and FW_READY gating; these are
+  not a verified DSP doorbell or ROM protocol implementation.
+- NHLT parser bounds/checksum tests; no fabricated SoundWire device fallback.
+- DMA segmentation/PCM geometry and negative-path tests; no physical DMA
+  engine execution or IOMMU/MDL ownership validation.
+- Fail-closed reply ownership, MMIO range checks and timeout handling;
+  no verified interrupt ownership/ack ordering or PnP race resolution.
+- Read-only PnP PCI/HDA resource discovery; premature PCI BME/MSE,
+  postprocessing/PIE and HDA reset writes removed from discovery.
+- MMIO BAR rollback when PrepareHardware fails; source-only checks do
+  not exercise all WDF failure/power-state interleavings.
+- WDK-linked sources and portable test suites, both Debug and Release CI.
+
+## Actual remaining gate
+
+Some remaining work **cannot** be completed or certified offline. Before
+any installable driver can honestly be claimed, the exact Pujjo rev3 needs
+read-only firmware/PnP/ACPI resource evidence, authenticated firmware and
+topology compatibility, a validated ROM/IPC4/DMA/interrupt and power-state
+backend, SSP/headset/microphone routing, codec/amp configuration, Windows
+audio endpoint registration, signing and reversible installation. These
+steps depend on measured hardware behavior and may require further source
+changes after initial read-only diagnostics. An installer must not be
+created merely because the regression suite is green.
+
+## Preparing a candidate package
+
+The Windows build produces an unsigned DSP driver, two independent peripheral
+probe drivers and a static library. The library is a build dependency. Each
+peripheral probe needs its own ACPI match and translated Resource Hub connection.
+The DSP must not claim either peripheral's resources. Keep the USB and SoundWire
+extension templates outside the Pujjo candidate pending matching device evidence.
+
+Before creating a signed test package:
+
+1. Export the device tree, hardware and compatible IDs, subsystem identifiers,
+   translated resources and current driver-store package names from the target.
+   Record the OS build and firmware version alongside the inventory.
+2. Identify the approved ADL-N IPC4 image, its provenance and digest, and
+   compare the module UUIDs, resource records, SSP formats and DMIC geometry.
+3. Review each INF match and service against the inventory. Validate the
+   staged INF files with the matching WDK InfVerif. Generate catalogs from
+   the final files, sign through the authorized signing process and verify
+   each catalog and its member hashes before distribution.
+4. Preserve the existing signed packages and prepare an independent recovery
+   boot path. Rehearse removal and restoration on a disposable Windows image.
+   Record the published INF names so rollback targets only the candidate.
+5. On the Chromebook begin with read-only inventory and identity checks.
+   Qualify interrupt shutdown and DMA stop before firmware execution.
+   Qualify capture before playback. Speaker activation also requires confirmed
+   SDB polarity, calibration behavior, mute sequencing and safe gain limits.

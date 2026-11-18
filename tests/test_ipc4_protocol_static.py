@@ -46,3 +46,48 @@ assert '((Msg->PayloadSize + 3u) & ~3u) > Ctx->HwDesc->MailboxDownlinkSize' in i
 assert 'WRITE_REGISTER_ULONG((PULONG)(mailbox + offset), word)' in ipc
 assert 'p[5]' not in ipc and 'rb[5]' not in ipc
 print('PASS: existing IPC sender validates sizes and no longer reads extra log words')
+
+# The Windows topology entry points must use the same encoders exercised by
+# portable tests, and propagate transport errors rather than pretend success.
+topo=(root/'src/driver/Topo.c').read_text()
+helper=topo.split('static NTSTATUS SofIpc4SendGraphPacket(',1)[1].split('#endif',1)[0]
+assert 'if (!Ctx) return STATUS_INVALID_PARAMETER;' in helper
+assert helper.index('Result != PJ_IPC4_VALID') < helper.index('msg.Primary = Packet->primary')
+assert 'return SofIpcSendMessage(Ctx, &msg, NULL, 500);' in helper
+for function,encoder in (
+    ('SofIpc4CreatePipeline','pj_ipc4_pipeline_create('),
+    ('SofIpc4DeletePipeline','pj_ipc4_pipeline_delete('),
+    ('SofIpc4SetPipelineState','pj_ipc4_pipeline_state('),
+    ('SofIpc4InitModuleInstance','pj_ipc4_module_init('),
+    ('SofIpc4BindModules','pj_ipc4_module_link(1u,'),
+    ('SofIpc4UnbindModules','pj_ipc4_module_link(0u,'),
+):
+    body=topo.split('NTSTATUS '+function+'(',1)[1].split('#else',1)[0]
+    assert '#ifdef _KERNEL_MODE' in body
+    assert body.index(encoder) < body.index('return SofIpc4SendGraphPacket(Ctx, result, &packet);')
+    assert 'return STATUS_SUCCESS' not in body
+print('PASS: WDK graph commands use tested encoders and propagate real transport status')
+
+# All graph constructors must reserve IDs explicitly and release them only
+# after firmware confirms deletion. Failed allocation must not return ID zero.
+allocator=topo.split('NTSTATUS SofIpc4AllocInstanceId(',1)[1].split('VOID SofIpc4FreeInstanceId(',1)[0]
+assert '*OutInstanceId = 0xFFFFFFFFu;' in allocator
+assert 'if (!mask) return STATUS_NOT_SUPPORTED;' in allocator
+assert allocator.index('KeAcquireSpinLock') < allocator.index('*mask |=') < allocator.index('KeReleaseSpinLock')
+for name in ('Playback','Capture','Hdmi','Ssp','Dmic','Alh'):
+    body=topo.split('NTSTATUS SofIpc4Create'+name+'Pipeline(',1)[1].split('\n}',1)[0]
+    assert body.count('status = SofIpc4AllocInstanceId(')==3
+    for part in body.split('status = SofIpc4AllocInstanceId(')[1:]:
+        assert part.split(';',1)[1].lstrip().startswith('if (!NT_SUCCESS(status)) goto cleanup;')
+    cleanup=body.split('cleanup:',1)[1]
+    assert cleanup.index('if (NT_SUCCESS(SofIpc4DeletePipeline') < cleanup.index('SofIpc4FreeInstanceId')
+    assert cleanup.count('SofIpc4FreeInstanceId(')==3
+print('PASS: module ID allocation failures and pipeline deletion ownership checks')
+
+# Gain commands share the tested single-block large config encoder.
+volume=topo.split('NTSTATUS SofIpc4SetVolumeCurve(',1)[1].split('\n}',1)[0]
+assert 'pj_ipc4_large_config_set(SofGraphWireId(Ctx, SOF_IPC4_MOD_ID_GAIN' in volume
+assert 'return SofIpc4SendGraphPacket(Ctx, result, &packet);' in volume
+assert 'GainInstanceId >= 256u' in volume
+assert 'VolumeLinear > SOF_IPC4_VOLUME_ZERO_DB' in volume
+print('PASS: gain configuration uses checked IPC4 single-block command')

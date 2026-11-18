@@ -102,15 +102,9 @@ public:
     }
 
     ~CMiniportWaveRTStreamSof() {
-        if (m_PowerRefHeld && m_DevCtx != NULL && m_DevCtx->WdfDevice != NULL) {
+        if (m_Stream) FreeBufferWithNotification(m_Stream->Mdl, m_Stream->BufferSizeBytes);
+        if (m_PowerRefHeld && m_DevCtx && m_DevCtx->WdfDevice)
             WdfDeviceResumeIdle(m_DevCtx->WdfDevice);
-            m_PowerRefHeld = FALSE;
-            SofLogBreadcrumb("[Power] Stream released power reference in destructor (Idle allowed)\n");
-        }
-        if (m_Stream != NULL) {
-            SofWaveRtFreeStream(m_Stream);
-            m_Stream = NULL;
-        }
     }
 
     PSOF_WAVERT_STREAM GetStream() const { return m_Stream; }
@@ -145,13 +139,34 @@ public:
 
     /* IMiniportWaveRTStream */
     STDMETHODIMP SetFormat(PKSDATAFORMAT DataFormat) {
-        if (DataFormat == NULL) return STATUS_INVALID_PARAMETER;
-        if (IsEqualGUID(DataFormat->MajorFormat, KSDATAFORMAT_TYPE_AUDIO))
+        if (m_Stream) return STATUS_INVALID_DEVICE_STATE;
+        if (!DataFormat || DataFormat->FormatSize < sizeof(KSDATAFORMAT) + sizeof(WAVEFORMATEX))
+            return STATUS_INVALID_PARAMETER;
+        if (IsEqualGUID(DataFormat->MajorFormat, KSDATAFORMAT_TYPE_AUDIO) &&
+            IsEqualGUID(DataFormat->Specifier, KSDATAFORMAT_SPECIFIER_WAVEFORMATEX))
         {
-            if (IsEqualGUID(DataFormat->SubFormat, KSDATAFORMAT_SUBTYPE_PCM) ||
-                IsEqualGUID(DataFormat->SubFormat, GUID_NULL))
+            if (IsEqualGUID(DataFormat->SubFormat, KSDATAFORMAT_SUBTYPE_PCM))
             {
                 PKSDATAFORMAT_WAVEFORMATEX waveFormat = (PKSDATAFORMAT_WAVEFORMATEX)DataFormat;
+                const WAVEFORMATEX &pcm = waveFormat->WaveFormatEx;
+                if (pcm.nSamplesPerSec < 8000 || pcm.nSamplesPerSec > 192000 ||
+                    (pcm.nChannels != 1 && pcm.nChannels != 2 && pcm.nChannels != 4 &&
+                     pcm.nChannels != 6 && pcm.nChannels != 8) ||
+                    (pcm.wBitsPerSample != 16 && pcm.wBitsPerSample != 24 && pcm.wBitsPerSample != 32) ||
+                    pcm.nBlockAlign != pcm.nChannels * (pcm.wBitsPerSample / 8) ||
+                    pcm.nAvgBytesPerSec != pcm.nSamplesPerSec * pcm.nBlockAlign ||
+                    pcm.cbSize > DataFormat->FormatSize - sizeof(KSDATAFORMAT) - sizeof(WAVEFORMATEX))
+                    return STATUS_INVALID_PARAMETER;
+                if (pcm.wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+                    if (pcm.cbSize < sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX))
+                        return STATUS_INVALID_PARAMETER;
+                    const WAVEFORMATEXTENSIBLE *ext = (const WAVEFORMATEXTENSIBLE *)&pcm;
+                    if (!IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_PCM) ||
+                        ext->Samples.wValidBitsPerSample > pcm.wBitsPerSample)
+                        return STATUS_INVALID_PARAMETER;
+                } else if (pcm.wFormatTag != WAVE_FORMAT_PCM) {
+                    return STATUS_NOT_SUPPORTED;
+                }
                 m_Format.SamplingFrequency = waveFormat->WaveFormatEx.nSamplesPerSec;
                 m_Format.ChannelsCount = waveFormat->WaveFormatEx.nChannels;
                 m_Format.BitDepth = waveFormat->WaveFormatEx.wBitsPerSample;
@@ -200,41 +215,19 @@ public:
         RtlStringCbPrintfA(msg, sizeof(msg), "[MiniportStream] SetState: state=%u, stream=%p, pin=%u\n", State, m_Stream, m_PinId);
         SofLogBreadcrumb(msg);
 
-        /* USB Audio Offload: Link DMA and UAOL Pipeline Lifecycle */
-        if (m_PinId == 16 || m_PinId == 18) {
-            BOOLEAN isCapture = (m_PinId == 18);
-            if (State == KSSTATE_RUN) {
-                if (m_Stream != NULL && m_DevCtx != NULL) {
-                    SofUaolProgramLinkDma(
-                        m_DevCtx,
-                        isCapture,
-                        m_Format.SamplingFrequency,
-                        m_Format.ChannelsCount,
-                        m_Format.BitDepth,
-                        m_Stream->PhysicalAddress,
-                        m_Stream->BufferSizeBytes
-                    );
-                    SofUaolStartPipeline(m_DevCtx, isCapture);
-                }
-            } else if (State == KSSTATE_PAUSE || State == KSSTATE_STOP) {
-                if (m_DevCtx != NULL) {
-                    SofUaolStopPipeline(m_DevCtx, isCapture);
-                }
-            }
-        }
-
+        if (m_PinId == 16 || m_PinId == 18) return STATUS_NOT_SUPPORTED;
         if (m_Stream != NULL) {
             return SofWaveRtSetState(m_Stream, State);
         }
-        return STATUS_SUCCESS;
+        return State == KSSTATE_STOP ? STATUS_SUCCESS : STATUS_DEVICE_NOT_READY;
     }
 
     STDMETHODIMP GetPosition(PKSAUDIO_POSITION Position) {
         if (Position == NULL) return STATUS_INVALID_PARAMETER;
         ULONG bytePos = 0;
-        if (m_Stream != NULL) {
-            SofWaveRtGetPosition(m_Stream, &bytePos);
-        }
+        if (!m_Stream) return STATUS_DEVICE_NOT_READY;
+        NTSTATUS status = SofWaveRtGetPosition(m_Stream, &bytePos);
+        if (!NT_SUCCESS(status)) return status;
         Position->PlayOffset = bytePos;
         Position->WriteOffset = bytePos;
         return STATUS_SUCCESS;
@@ -283,6 +276,9 @@ public:
         ULONG* OffsetFromFirstPage,
         MEMORY_CACHING_TYPE* CacheType
     ) {
+        if (!AudioBufferMdl || !ActualSize || !OffsetFromFirstPage || !CacheType)
+            return STATUS_INVALID_PARAMETER;
+        if (NotificationCount != 2u) return STATUS_NOT_SUPPORTED;
         char reqMsg[128];
         RtlStringCbPrintfA(reqMsg, sizeof(reqMsg),
             "[MiniportStream] AllocateBufferWithNotification: ReqSize=%u, NotifCount=%u, stream=%p\n",
@@ -320,18 +316,8 @@ public:
         } else if (m_PinId == 14) {
             epType = SOF_ENDPOINT_I2S_SSP2;
             streamTag = SOF_WAVERT_STREAM_TAG_SSP_CAPTURE;
-        } else if (m_PinId == 16) {
-            epType = SOF_ENDPOINT_USB_OFFLOAD;
-            streamTag = SOF_USB_PLAYBACK_STREAM_TAG;
-            if (m_DevCtx != NULL) {
-                SofUsbOffloadStreamOpen(m_DevCtx, 0, m_Format.SamplingFrequency, m_Format.ChannelsCount, m_Format.BitDepth);
-            }
-        } else if (m_PinId == 18) {
-            epType = SOF_ENDPOINT_USB_OFFLOAD;
-            streamTag = SOF_USB_CAPTURE_STREAM_TAG;
-            if (m_DevCtx != NULL) {
-                SofUsbOffloadStreamOpen(m_DevCtx, 1, m_Format.SamplingFrequency, m_Format.ChannelsCount, m_Format.BitDepth);
-            }
+        } else if (m_PinId == 16 || m_PinId == 18) {
+            return STATUS_NOT_SUPPORTED;
         } else if (m_DevCtx != NULL && m_DevCtx->HdaCodecPresent) {
             epType = SOF_ENDPOINT_HDA_ANALOG;
         } else if (m_IsCapture) {
@@ -403,13 +389,9 @@ public:
     STDMETHODIMP_(VOID) FreeBufferWithNotification(PMDL AudioBufferMdl, ULONG BufferSize) {
         UNREFERENCED_PARAMETER(BufferSize);
         SofLogBreadcrumb("[MiniportStream] FreeBufferWithNotification called\n");
-        if (m_PowerRefHeld && m_DevCtx != NULL && m_DevCtx->WdfDevice != NULL) {
-            WdfDeviceResumeIdle(m_DevCtx->WdfDevice);
-            m_PowerRefHeld = FALSE;
-            SofLogBreadcrumb("[Power] Stream released power reference in FreeBuffer (Idle allowed)\n");
-        }
         if (m_Stream != NULL) {
-            if (AudioBufferMdl != NULL && m_Stream->Mdl == AudioBufferMdl) {
+            if (AudioBufferMdl != m_Stream->Mdl) return;
+            if (AudioBufferMdl != NULL) {
                 IoFreeMdl(AudioBufferMdl);
                 m_Stream->Mdl = NULL;
             }
@@ -878,7 +860,11 @@ public:
         }
 
         if (DataFormat != NULL) {
-            streamObj->SetFormat(DataFormat);
+            NTSTATUS status = streamObj->SetFormat(DataFormat);
+            if (!NT_SUCCESS(status)) {
+                streamObj->Release();
+                return status;
+            }
         }
 
         *Stream = streamObj;
@@ -978,7 +964,8 @@ static NTSTATUS PropertyHandler_VolumeLevel(
 
         LONG volDb = 0;
         if (stream != NULL) {
-            SofWaveRtGetVolume(stream, channel, &volDb);
+            NTSTATUS status = SofWaveRtGetVolume(stream, channel, &volDb);
+            if (!NT_SUCCESS(status)) return status;
         } else if (devCtx != NULL) {
             ULONG ep = devCtx->HdaCodecPresent ? SOF_ENDPOINT_HDA_ANALOG : SOF_ENDPOINT_HDMI_1;
             ULONG chIdx = (channel == 1) ? 1 : 0;
@@ -1004,8 +991,12 @@ static NTSTATUS PropertyHandler_VolumeLevel(
         }
 
         LONG volDb = *(PLONG)PropertyRequest->Value;
+        if (channel != -1 && channel != 0 && channel != 1) return STATUS_INVALID_PARAMETER;
+        if (volDb < SOF_VOLUME_MIN_DB_UNITS) volDb = SOF_VOLUME_MIN_DB_UNITS;
+        if (volDb > SOF_VOLUME_MAX_DB_UNITS) volDb = SOF_VOLUME_MAX_DB_UNITS;
         if (stream != NULL) {
-            SofWaveRtSetVolume(stream, channel, volDb);
+            NTSTATUS status = SofWaveRtSetVolume(stream, channel, volDb);
+            if (!NT_SUCCESS(status)) return status;
         } else if (devCtx != NULL) {
             ULONG ep = devCtx->HdaCodecPresent ? SOF_ENDPOINT_HDA_ANALOG : SOF_ENDPOINT_HDMI_1;
             if (channel == 0 || channel == -1) {
@@ -1079,7 +1070,8 @@ static NTSTATUS PropertyHandler_Mute(
 
         BOOLEAN isMuted = FALSE;
         if (stream != NULL) {
-            SofWaveRtGetMute(stream, &isMuted);
+            NTSTATUS status = SofWaveRtGetMute(stream, &isMuted);
+            if (!NT_SUCCESS(status)) return status;
         } else if (devCtx != NULL) {
             ULONG ep = devCtx->HdaCodecPresent ? SOF_ENDPOINT_HDA_ANALOG : SOF_ENDPOINT_HDMI_1;
             isMuted = devCtx->DefaultMute[ep];
@@ -1107,7 +1099,8 @@ static NTSTATUS PropertyHandler_Mute(
         BOOLEAN isMuted = (muteVal != FALSE);
 
         if (stream != NULL) {
-            SofWaveRtSetMute(stream, isMuted);
+            NTSTATUS status = SofWaveRtSetMute(stream, isMuted);
+            if (!NT_SUCCESS(status)) return status;
         } else if (devCtx != NULL) {
             ULONG ep = devCtx->HdaCodecPresent ? SOF_ENDPOINT_HDA_ANALOG : SOF_ENDPOINT_HDMI_1;
             devCtx->DefaultMute[ep] = isMuted;
@@ -1145,7 +1138,7 @@ static NTSTATUS PropertyHandler_PeakMeter(
     }
 
     LONG channel = 0;
-    if (PropertyRequest->InstanceSize >= sizeof(KSNODEPROPERTY_AUDIO_CHANNEL)) {
+    if (PropertyRequest->Instance && PropertyRequest->InstanceSize >= sizeof(KSNODEPROPERTY_AUDIO_CHANNEL)) {
         PKSNODEPROPERTY_AUDIO_CHANNEL chanProp = (PKSNODEPROPERTY_AUDIO_CHANNEL)PropertyRequest->Instance;
         channel = chanProp->Channel;
     }
@@ -1168,7 +1161,8 @@ static NTSTATUS PropertyHandler_PeakMeter(
 
         LONG peakDb = SOF_VOLUME_MIN_DB_UNITS;
         if (stream != NULL) {
-            SofWaveRtGetPeakMeter(stream, channel, &peakDb);
+            NTSTATUS status = SofWaveRtGetPeakMeter(stream, channel, &peakDb);
+            if (!NT_SUCCESS(status)) return status;
         }
 
         *(PLONG)PropertyRequest->Value = peakDb;

@@ -61,6 +61,7 @@ SofIpcInitialize(
 )
 {
     /* Initialize spinlock protecting IPC transmitter state and pending reply buffer */
+    ExInitializeRundownProtection(&Ctx->IpcRundown);
     KeInitializeSpinLock(&Ctx->IpcLock);
 
     /* Notification events: manually cleared before dispatch, signaled by DPC on completion */
@@ -103,6 +104,14 @@ SofIpcCleanup(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
+    KIRQL irql;
+    if (!Ctx->ReplyBuffer) return;
+    KeAcquireSpinLock(&Ctx->IpcLock, &irql);
+    Ctx->IpcFaulted = TRUE;
+    KeSetEvent(&Ctx->IpcReplyEvent, IO_NO_INCREMENT, FALSE);
+    KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
+    KeReleaseSpinLock(&Ctx->IpcLock, irql);
+    ExWaitForRundownProtectionRelease(&Ctx->IpcRundown);
     if (Ctx->ReplyBuffer) {
         ExFreePoolWithTag(Ctx->ReplyBuffer, SOF_DEVICE_TAG);
         Ctx->ReplyBuffer = NULL;
@@ -125,7 +134,8 @@ SofIpcEnableInterrupts(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
-    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u))
         return;
 
     if (Ctx->HwDesc->IsAce) {
@@ -134,7 +144,17 @@ SofIpcEnableInterrupts(
          * Read Interrupt IP Pointer (MTL_HFINTIPPTR) to determine the base offset
          * of the top-level interrupt controller block within DSP BAR4 MMIO space.
          */
-        ULONG hfintipptr = SofDspRead32(Ctx->Bar4VirtualAddress, MTL_HFINTIPPTR) & MTL_HFINTIPPTR_PTR_MASK;
+        ULONG rawPtr;
+        ULONG hfintipptr;
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_HFINTIPPTR, 4u) ||
+            !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_DSP_REG_HfHIPCIE, 4u))
+            return;
+        rawPtr = SofDspRead32(Ctx->Bar4VirtualAddress, MTL_HFINTIPPTR);
+        if (rawPtr == 0xFFFFFFFFu)
+            return;
+        hfintipptr = rawPtr & MTL_HFINTIPPTR_PTR_MASK;
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, hfintipptr, 4u))
+            return;
 
         /*
          * ACE Interrupt Architecture Level 1 Enable:
@@ -184,7 +204,8 @@ SofIpcDisableInterrupts(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
-    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u))
         return;
 
     /*
@@ -198,7 +219,18 @@ SofIpcDisableInterrupts(
 
     if (Ctx->HwDesc->IsAce) {
         /* Read Interrupt IP Pointer to locate top-level IRQ block */
-        ULONG hfintipptr = SofDspRead32(Ctx->Bar4VirtualAddress, MTL_HFINTIPPTR) & MTL_HFINTIPPTR_PTR_MASK;
+        ULONG rawPtr;
+        ULONG hfintipptr;
+        /* Keep channel interrupts masked even if the ACE hierarchy is invalid. */
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_HFINTIPPTR, 4u) ||
+            !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_DSP_REG_HfHIPCIE, 4u))
+            return;
+        rawPtr = SofDspRead32(Ctx->Bar4VirtualAddress, MTL_HFINTIPPTR);
+        if (rawPtr == 0xFFFFFFFFu)
+            return;
+        hfintipptr = rawPtr & MTL_HFINTIPPTR_PTR_MASK;
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, hfintipptr, 4u))
+            return;
 
         /* Disable Host IPC interrupt in second-level HfHIPCIE */
         SofDspUpdateBits(Ctx->Bar4VirtualAddress,
@@ -254,9 +286,24 @@ SofDspDumpCore(
     BOOLEAN hasOops = FALSE;
     ULONG exccause = 0, excvaddr = 0, epc1 = 0, ps = 0;
 
-    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc) {
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL || KeAreAllApcsDisabled())
         return;
-    }
+    /* Never read unmapped register or mailbox ranges in a crash handler. */
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomStatusReg, 32u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomErrorReg, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdr, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTda, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdd, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdr, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIda, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdd, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u) ||
+        Ctx->HwDesc->MailboxUplinkSize < 4096u ||
+        Ctx->HwDesc->MailboxDownlinkSize < 4096u ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->MailboxUplinkOffset, 4096u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->MailboxDownlinkOffset, 4096u))
+        return;
 
     KeQuerySystemTime(&sysTime);
 
@@ -280,11 +327,12 @@ SofDspDumpCore(
 
     /* Calculate total dump buffer size: Header + 4KB Uplink Mailbox + 4KB Downlink Mailbox + 64KB Debug Window */
     ULONG debugWinOffset = Ctx->DebugWindowOffset;
-    if (debugWinOffset == 0 && Ctx->HwDesc) {
-        debugWinOffset = Ctx->HwDesc->IsAce ? 0x190000 : 0xC0000;
-        Ctx->DebugWindowOffset = debugWinOffset;
-    }
-    ULONG debugWinSize = 65536; /* 16 pages of 4KB */
+    ULONG debugWinSize = 0;
+    if (debugWinOffset != 0 &&
+        pj_ipc4_mmio_span_valid(Ctx->Bar4Length, debugWinOffset, 65536u))
+        debugWinSize = 65536u;
+    else
+        debugWinOffset = 0;
 
     dumpSize = sizeof(SOF_DSP_COREDUMP_HEADER) + 4096 + 4096 + debugWinSize;
     dumpBuffer = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, dumpSize, SOF_DEVICE_TAG);
@@ -301,8 +349,8 @@ SofDspDumpCore(
     hdr->DumpSize = dumpSize;
     hdr->TimestampLow = sysTime.LowPart;
     hdr->TimestampHigh = sysTime.HighPart;
-    hdr->VendorId = 0x8086;
-    hdr->DeviceId = 0xE428;
+    hdr->VendorId = Ctx->VendorId;
+    hdr->DeviceId = Ctx->DeviceId;
     if (Reason) {
         RtlStringCbCopyA(hdr->ReasonString, sizeof(hdr->ReasonString), Reason);
     }
@@ -357,7 +405,7 @@ SofDspDumpCore(
      * Read 64KB SRAM Debug Window (Page 0 descriptors + Core slots) via 32-bit MMIO reads.
      * Captures Zephyr Mtrace circular buffers for offline post-mortem log reconstruction.
      */
-    if (debugWinOffset > 0 && debugWinOffset + debugWinSize <= Ctx->Bar4Length) {
+    if (debugWinSize != 0u) {
         volatile ULONG *src = (volatile ULONG *)((PUCHAR)Ctx->Bar4VirtualAddress + debugWinOffset);
         ULONG *dst = (ULONG *)debugWinDst;
         for (ULONG i = 0; i < debugWinSize / sizeof(ULONG); i++) {
@@ -463,7 +511,7 @@ SofDspDumpCore(
                 "================================================================================\r\n"
                 "Reason: %s\r\n"
                 "Timestamp: 0x%08X%08X\r\n"
-                "Hardware: Vendor=0x%04X, Device=0x%04X (Panther Lake)\r\n"
+                "Hardware: Vendor=0x%04X, Device=0x%04X\r\n"
                 "\r\n"
                 "DSP Core0 Status (HFDSC @ 0x160200): 0x%08X\r\n"
                 "DSP Core0 Error  (HFDEC @ 0x160204): 0x%08X\r\n"
@@ -553,6 +601,8 @@ SofIpcIsrCheck(
      * descriptor fails closed without acknowledging another device's IRQ. */
     if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdr, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIda, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdd, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTda, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u))
         return FALSE;
 
@@ -564,7 +614,10 @@ SofIpcIsrCheck(
                                     Ctx->HwDesc->IntIpPtrReg, 4u))
             return FALSE;
         ptr = SofDspRead32(Ctx->Bar4VirtualAddress,
-                           Ctx->HwDesc->IntIpPtrReg) & MTL_HFINTIPPTR_PTR_MASK;
+                           Ctx->HwDesc->IntIpPtrReg);
+        if (ptr == 0xFFFFFFFFu)
+            return FALSE;
+        ptr &= MTL_HFINTIPPTR_PTR_MASK;
         /* Check before addition so even hostile firmware offsets cannot wrap. */
         if (ptr > Ctx->Bar4Length ||
             MTL_DSP_IRQSTS > Ctx->Bar4Length - ptr ||
@@ -581,6 +634,9 @@ SofIpcIsrCheck(
     /* Check whether DSP raised an incoming message (TDR BUSY) or acknowledged our command (IDA DONE) */
     tdr = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTdr);
     ida = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcIda);
+    /* All-ones doorbell reads can mean an unavailable PCI device, not an IRQ. */
+    if (tdr == 0xFFFFFFFFu || ida == 0xFFFFFFFFu)
+        return FALSE;
 
     if ((tdr & Ctx->HwDesc->HipcTdrBusy) || (ida & Ctx->HwDesc->HipcIdaDone)) {
         /*
@@ -620,6 +676,8 @@ SofIpcDpcHandler(
     ULONG ida;
     ULONG tdr;
     BOOLEAN signalReply = FALSE;
+    BOOLEAN bootReady = FALSE;
+    BOOLEAN bootFault = FALSE;
 
     if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
         return;
@@ -635,6 +693,9 @@ SofIpcDpcHandler(
      * 1. Check if DSP completed our previous host-initiated request (ACK / DONE in IDA)
      */
     ida = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcIda);
+    tdr = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTdr);
+    if (tdr == 0xFFFFFFFFu || ida == 0xFFFFFFFFu)
+        return;
     if (ida & Ctx->HwDesc->HipcIdaDone) {
         /* Mask DONE in HipcCtl */
         SofDspUpdateBits(Ctx->Bar4VirtualAddress,
@@ -669,7 +730,7 @@ SofIpcDpcHandler(
     /*
      * 2. Check if DSP sent an incoming message (Reply or Notification in TDR)
      */
-    tdr = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTdr);
+    /* Use the checked snapshot above; new pending messages can raise another IRQ. */
     if (tdr & Ctx->HwDesc->HipcTdrBusy) {
         ULONG tdd = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTdd);
         ULONG primary = tdr & 0x7FFFFFFF;
@@ -711,17 +772,9 @@ SofIpcDpcHandler(
                        "[SOF] IPC Notification: Type %u (0x%08x|0x%08x)\n",
                        notifyType, primary, extension);
 
-            if (pj_ipc4_is_fw_ready(primary) &&
-                Ctx->FwState == SOF_FW_BOOT_IN_PROGRESS) {
-                /* Firmware initialization complete and scheduler running */
-                char bmsg[128];
-                RtlStringCbPrintfA(bmsg, sizeof(bmsg),
-                    "[13] *** DSP FIRMWARE BOOT COMPLETED (FW_READY: 0x%08x|0x%08x) ***\n",
-                    primary, extension);
-                SofLogBreadcrumb(bmsg);
-                DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "%s", bmsg);
-                Ctx->FwState = SOF_FW_BOOT_COMPLETE;
-                KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
+            if (pj_ipc4_is_fw_ready(primary)) {
+                /* Publish readiness only after acknowledging the notification. */
+                bootReady = TRUE;
             } else if (pj_ipc4_is_notification(primary) &&
                        notifyType == SOF_IPC4_NOTIFY_EXCEPTION_CAUGHT) {
                 /* Firmware panic/exception caught by base FW */
@@ -739,6 +792,7 @@ SofIpcDpcHandler(
                     Ctx->FwState = SOF_FW_BOOT_FAILED;
                     KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
                     signalReply = TRUE;
+                    bootFault = TRUE;
                 }
             } else if (pj_ipc4_is_notification(primary) &&
                        notifyType == SOF_IPC4_NOTIFY_LOG_BUFFER_STATUS) {
@@ -788,7 +842,26 @@ SofIpcDpcHandler(
                          Ctx->HwDesc->HipcCtlBusy,
                          Ctx->HwDesc->HipcCtlBusy);
     }
-    /* Acknowledge device notification before waking the sender. */
+    /* The ISR masks both sources. Restore DONE even for a BUSY-only IRQ. */
+    SofDspUpdateBits(Ctx->Bar4VirtualAddress,
+                     Ctx->HwDesc->HipcCtl,
+                     Ctx->HwDesc->HipcCtlDone,
+                     Ctx->HwDesc->HipcCtlDone);
+
+    /* Acknowledge device notification before publishing boot/reply completion. */
+    if (bootReady || bootFault) {
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+        if (bootReady && !Ctx->IpcFaulted &&
+            Ctx->FwState == SOF_FW_BOOT_IN_PROGRESS) {
+            Ctx->FwState = SOF_FW_BOOT_COMPLETE;
+            KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
+        } else if (bootFault) {
+            /* Wake the loader promptly; the fault state is already latched. */
+            KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
+        }
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+    }
     if (signalReply) {
         KIRQL oldIrql;
         KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
@@ -818,8 +891,8 @@ SofIpcDpcHandler(
  * @return STATUS_SUCCESS on success; STATUS_DEVICE_BUSY if already sending; STATUS_IO_TIMEOUT
  *         on timeout; STATUS_UNSUCCESSFUL if DSP returned an error code.
  */
-NTSTATUS
-SofIpcSendMessage(
+static NTSTATUS
+SofIpcSendWhilePowered(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ PSOF_IPC_MESSAGE Msg,
     _Out_opt_ PSOF_IPC_MESSAGE Reply,
@@ -831,6 +904,7 @@ SofIpcSendMessage(
     NTSTATUS status = STATUS_IO_TIMEOUT;
     ULONG replyPrimary;
     ULONG replyExtension;
+    ULONG hostDoorbell;
 
     if (!Ctx || !Msg || TimeoutMs == 0 || TimeoutMs > 60000)
         return STATUS_INVALID_PARAMETER;
@@ -863,11 +937,25 @@ SofIpcSendMessage(
 
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
 
-    if (Ctx->IpcFaulted) {
+    if (Ctx->IpcFaulted || Ctx->FwState != SOF_FW_BOOT_COMPLETE) {
         KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
         return STATUS_DEVICE_NOT_READY;
     }
     if (Ctx->IpcTxBusy) {
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        return STATUS_DEVICE_BUSY;
+    }
+
+    /* Software ownership alone is insufficient: don't overwrite a command
+     * that the DSP has not consumed. An all-ones read indicates inaccessible
+     * MMIO, not a legitimate BUSY state. Check under the transmitter lock. */
+    hostDoorbell = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcIdr);
+    if (hostDoorbell == 0xFFFFFFFFu) {
+        Ctx->IpcFaulted = TRUE;
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        return STATUS_DEVICE_NOT_READY;
+    }
+    if (hostDoorbell & Ctx->HwDesc->HipcIdrBusy) {
         KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
         return STATUS_DEVICE_BUSY;
     }
@@ -960,6 +1048,24 @@ SofIpcSendMessage(
     return STATUS_SUCCESS;
 }
 
+NTSTATUS
+SofIpcSendMessage(
+    _In_ PSOF_DEVICE_CONTEXT Ctx,
+    _In_ PSOF_IPC_MESSAGE Msg,
+    _Out_opt_ PSOF_IPC_MESSAGE Reply,
+    _In_ ULONG TimeoutMs
+)
+{
+    NTSTATUS status;
+    if (!Ctx || !Msg) return STATUS_INVALID_PARAMETER;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) return STATUS_INVALID_DEVICE_STATE;
+    if (!ExAcquireRundownProtection(&Ctx->IpcRundown))
+        return STATUS_DEVICE_NOT_READY;
+    status = SofIpcSendWhilePowered(Ctx, Msg, Reply, TimeoutMs);
+    ExReleaseRundownProtection(&Ctx->IpcRundown);
+    return status;
+}
+
 /**
  * @brief Reads the 32-bit DSP Firmware Status register (FWSTATUS / HFDSC).
  *
@@ -971,7 +1077,8 @@ SofReadFwStatus(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
-    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->FwStatusReg, 4u))
         return 0;
 
     return SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->FwStatusReg);
@@ -988,7 +1095,8 @@ SofReadRomStatus(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
-    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomStatusReg, 4u))
         return 0;
 
     return SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->RomStatusReg);
@@ -1018,45 +1126,41 @@ SofIpc4DrainFwLogs(
 {
     ULONG debugWinOffset;
     ULONG slotOffset;
-    ULONG dspWritePtr, hostReadPtr, avail, logBufSize;
+    ULONG dspWritePtr, hostReadPtr, avail, logBufSize, consumed;
     PUCHAR sramBase;
 
-    if (!Ctx || !Ctx->Bar4VirtualAddress || Core >= 4) {
+    /* Binary trace transport is not yet wired to a worker. Only a passive
+     * caller with a verified firmware-provided debug window may drain it. */
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
+        Core >= 4u || Core >= Ctx->HwDesc->CoresNum ||
+        !Ctx->FwLogInitialized || Ctx->FwState != SOF_FW_BOOT_COMPLETE ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL || KeAreAllApcsDisabled())
         return;
-    }
 
     sramBase = (PUCHAR)Ctx->Bar4VirtualAddress;
     debugWinOffset = Ctx->DebugWindowOffset;
-    if (debugWinOffset == 0) {
-        debugWinOffset = (Ctx->HwDesc && Ctx->HwDesc->IsAce) ? 0x190000 : 0xC0000;
-        Ctx->DebugWindowOffset = debugWinOffset;
-    }
+    if (!debugWinOffset ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, debugWinOffset, 65536u))
+        return;
 
-    /* Locate slot offset for this core if not yet cached */
-    slotOffset = Ctx->FwLogSlotOffset[Core];
-    if (slotOffset == 0) {
-        for (ULONG i = 0; i < 15; i++) {
-            ULONG descTypeOffset = debugWinOffset + i * 12 + 4;
-            ULONG type = SofDspRead32(sramBase, descTypeOffset);
-            if ((type & 0xFFFFFF00) == 0x474F4C00 && (type & 0xFF) == Core) {
-                slotOffset = debugWinOffset + (i + 1) * 4096;
-                Ctx->FwLogSlotOffset[Core] = slotOffset;
-                break;
-            }
-        }
-        if (slotOffset == 0) {
-            slotOffset = debugWinOffset + (Core + 1) * 4096;
-            Ctx->FwLogSlotOffset[Core] = slotOffset;
+    /* Scan all descriptors each time. Do not guess a slot or use a stale
+     * mapping after a firmware reset. Ambiguous descriptors are rejected. */
+    slotOffset = 0;
+    for (ULONG i = 0; i < 15u; ++i) {
+        ULONG type = SofDspRead32(sramBase, debugWinOffset + i * 12u + 4u);
+        if (type == (0x474F4C00u | Core)) {
+            if (slotOffset != 0u) return;
+            slotOffset = debugWinOffset + (i + 1u) * 4096u;
         }
     }
+    if (!slotOffset) return;
 
     /* Read DSP write pointer and host read pointer */
     hostReadPtr = SofDspRead32(sramBase, slotOffset);
     dspWritePtr = SofDspRead32(sramBase, slotOffset + 4);
     logBufSize = 4096 - 8; /* 4088 bytes circular buffer */
 
-    if (dspWritePtr >= logBufSize) dspWritePtr = 0;
-    if (hostReadPtr >= logBufSize) hostReadPtr = 0;
+    if (dspWritePtr >= logBufSize || hostReadPtr >= logBufSize) return;
 
     if (dspWritePtr == hostReadPtr) {
         return;
@@ -1066,6 +1170,7 @@ SofIpc4DrainFwLogs(
             (dspWritePtr - hostReadPtr) :
             (logBufSize - hostReadPtr + dspWritePtr);
 
+    consumed = 0;
     if (avail > 0 && avail <= logBufSize) {
         CHAR lineBuf[256];
         ULONG bytesToRead = (avail > 240) ? 240 : avail;
@@ -1075,6 +1180,7 @@ SofIpc4DrainFwLogs(
             lineBuf[b] = (CHAR)SofDspRead8(sramBase, slotOffset + 8 + bytePos);
         }
         lineBuf[bytesToRead] = '\0';
+        consumed = bytesToRead;
 
         /* Log newly arrived firmware trace */
         if (bytesToRead > 0) {
@@ -1088,8 +1194,12 @@ SofIpc4DrainFwLogs(
     }
 
     /* Advance host read pointer in DSP SRAM */
-    SofDspWrite32(sramBase, slotOffset, dspWritePtr);
-    Ctx->FwLogHostReadPtr[Core] = dspWritePtr;
+    if (consumed != 0u) {
+        hostReadPtr = (hostReadPtr + consumed) % logBufSize;
+        SofDspWrite32(sramBase, slotOffset, hostReadPtr);
+        Ctx->FwLogHostReadPtr[Core] = hostReadPtr;
+        Ctx->FwLogSlotOffset[Core] = slotOffset;
+    }
 }
 
 /**
@@ -1107,7 +1217,8 @@ SofIpc4EnableFwLogs(
 )
 {
     SOF_IPC_MESSAGE msg;
-    SOF_IPC_MESSAGE reply;
+    pj_ipc4_packet packet = {0};
+    pj_ipc4_status encoded;
     NTSTATUS status;
     LARGE_INTEGER sysTime;
     UINT64 usTime;
@@ -1123,6 +1234,12 @@ SofIpc4EnableFwLogs(
         return STATUS_DEVICE_NOT_READY;
     }
 
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || KeAreAllApcsDisabled())
+        return STATUS_INVALID_DEVICE_STATE;
+    /* A debug window must be established independently of trace commands. */
+    if (!Ctx->DebugWindowOffset || !pj_ipc4_mmio_span_valid(Ctx->Bar4Length,
+            Ctx->DebugWindowOffset, 65536u))
+        return STATUS_NOT_SUPPORTED;
     if (Ctx->FwState != SOF_FW_BOOT_COMPLETE) {
         return STATUS_DEVICE_NOT_READY;
     }
@@ -1132,20 +1249,20 @@ SofIpc4EnableFwLogs(
     usTime = (UINT64)(sysTime.QuadPart / 10); /* Convert 100ns units to microseconds */
 
     RtlZeroMemory(&msg, sizeof(msg));
-    RtlZeroMemory(&reply, sizeof(reply));
+    encoded = pj_ipc4_large_config_set(SOF_IPC4_MOD_INIT_BASEFW_MOD_ID,
+        SOF_IPC4_MOD_INIT_BASEFW_INSTANCE_ID, SOF_IPC4_FW_PARAM_SYSTEM_TIME,
+        (const PJ_BYTE *)&usTime, sizeof(usTime), &packet);
+    if (encoded != PJ_IPC4_VALID) return STATUS_INVALID_PARAMETER;
+    msg.Primary = packet.primary;
+    msg.Extension = packet.extension;
+    msg.Payload = (PVOID)packet.payload;
+    msg.PayloadSize = (ULONG)packet.payload_bytes;
 
-    msg.Primary = SOF_IPC4_MSG_TARGET(SOF_IPC4_MODULE_MSG) |
-                  SOF_IPC4_MSG_DIR(SOF_IPC4_MSG_REQUEST) |
-                  SOF_IPC4_MOD_ID(SOF_IPC4_MOD_INIT_BASEFW_MOD_ID) |
-                  SOF_IPC4_MOD_INSTANCE(SOF_IPC4_MOD_INIT_BASEFW_INSTANCE_ID);
-    msg.Extension = SOF_IPC4_MOD_EXT_MSG_PARAM_ID(SOF_IPC4_FW_PARAM_SYSTEM_TIME);
-    msg.Payload = &usTime;
-    msg.PayloadSize = sizeof(usTime);
-
-    status = SofIpcSendMessage(Ctx, &msg, &reply, 500);
+    status = SofIpcSendMessage(Ctx, &msg, NULL, 500);
     if (!NT_SUCCESS(status)) {
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL,
                    "[SOF] Warning: Failed to sync system time with FW (0x%08x)\n", status);
+        return status;
     }
 
     /* 2. Configure log priorities and enable FW logs (SOF_IPC4_FW_PARAM_ENABLE_LOGS = 6) */
@@ -1157,17 +1274,16 @@ SofIpc4EnableFwLogs(
     logState.LogsPrioritiesMask[0] = 0x000001ef;
 
     RtlZeroMemory(&msg, sizeof(msg));
-    RtlZeroMemory(&reply, sizeof(reply));
+    encoded = pj_ipc4_large_config_set(SOF_IPC4_MOD_INIT_BASEFW_MOD_ID,
+        SOF_IPC4_MOD_INIT_BASEFW_INSTANCE_ID, SOF_IPC4_FW_PARAM_ENABLE_LOGS,
+        (const PJ_BYTE *)&logState, sizeof(logState), &packet);
+    if (encoded != PJ_IPC4_VALID) return STATUS_INVALID_PARAMETER;
+    msg.Primary = packet.primary;
+    msg.Extension = packet.extension;
+    msg.Payload = (PVOID)packet.payload;
+    msg.PayloadSize = (ULONG)packet.payload_bytes;
 
-    msg.Primary = SOF_IPC4_MSG_TARGET(SOF_IPC4_MODULE_MSG) |
-                  SOF_IPC4_MSG_DIR(SOF_IPC4_MSG_REQUEST) |
-                  SOF_IPC4_MOD_ID(SOF_IPC4_MOD_INIT_BASEFW_MOD_ID) |
-                  SOF_IPC4_MOD_INSTANCE(SOF_IPC4_MOD_INIT_BASEFW_INSTANCE_ID);
-    msg.Extension = SOF_IPC4_MOD_EXT_MSG_PARAM_ID(SOF_IPC4_FW_PARAM_ENABLE_LOGS);
-    msg.Payload = &logState;
-    msg.PayloadSize = sizeof(logState);
-
-    status = SofIpcSendMessage(Ctx, &msg, &reply, 500);
+    status = SofIpcSendMessage(Ctx, &msg, NULL, 500);
     if (NT_SUCCESS(status)) {
         Ctx->FwLogInitialized = TRUE;
         SofLogBreadcrumb("[SOF] DSP Firmware Zephyr logging enabled successfully\n");

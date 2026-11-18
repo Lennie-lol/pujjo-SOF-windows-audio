@@ -116,6 +116,11 @@ static NTSTATUS WdfIoTargetSendIoctlSynchronously(WDFIOTARGET target,void *reque
   SPB_TRANSFER_LIST_ENTRY *e=input->buffer;
   assert(e[0].direction==SpbTransferDirectionToDevice && e[0].length==2);
   assert(e[1].direction==SpbTransferDirectionFromDevice && e[1].length==2);
+  const uint8_t *index=e[0].buffer;
+  assert(index[0]==0 && (index[1]==0xfd || index[1]==0xfe || index[1]==0xff));
+  /* Model a controller that modifies the output even on short/error returns. */
+  ((uint8_t*)e[1].buffer)[0]=0x67;
+  ((uint8_t*)e[1].buffer)[1]=0x49;
  } else if(code==IOCTL_GPIO_WRITE_PINS) {
   assert(input->size==1 && *(UCHAR*)input->buffer<=1);
  }
@@ -128,10 +133,5 @@ static NTSTATUS WdfIoTargetSendIoctlSynchronously(WDFIOTARGET target,void *reque
  assert(!pthread_mutex_unlock(&rendezvous));
 #endif
  assert(target->open);++sends;if(bytes)*bytes=transferred;return fail_send?-12:0;
-}
-static NTSTATUS WdfIoTargetSendWriteSynchronously(WDFIOTARGET target,void *request,
- WDF_MEMORY_DESCRIPTOR *input,void *offset,WDF_REQUEST_SEND_OPTIONS *opts,ULONG_PTR *bytes) {
- assert(input->size==4);
- return WdfIoTargetSendIoctlSynchronously(target,request,0,input,offset,opts,bytes);
 }
 #endif

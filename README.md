@@ -6,6 +6,8 @@ Debug and Release builds plus portable regressions. Windows 11 VM Debug and
 Release builds also passed. See [PREINSTALL_READINESS.md](PREINSTALL_READINESS.md)
 for the remaining blockers. No version bump.
 
+**Development update (2026-11-18):** GitHub Actions [run #69](https://github.com/Lennie-lol/pujjo-SOF-windows-audio/actions/runs/44368075960) passed WDK Debug/Release and portable regression jobs on development commit `4831d721`. All repository development branches are consolidated into `main` using the newest validated source, with older branch history preserved and documentation reconciled. This is not proof of functional audio; the consolidation commit requires its own validation. Offline-only development changes are excluded. See [PREINSTALL_READINESS.md](PREINSTALL_READINESS.md).
+
 **Current source version:** `v0.0.17` · **Status:** source-only / development · **License:** see [`LICENSE`](LICENSE)
 
 > [!CAUTION]

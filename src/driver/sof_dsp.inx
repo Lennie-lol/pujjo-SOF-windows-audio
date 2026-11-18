@@ -68,12 +68,11 @@ AddReg         = Sof_Service_Inst.AddReg
 [Sof_Service_Inst.AddReg]
 HKR,Parameters,SafeBootPolicy,0x00010001,2
 HKR,Parameters,BootSafetyToken,0x00010001,0
-HKR,Parameters,ArmedTesting,0x00010001,1
-HKR,Parameters,EnablePortCls,0x00010001,1
-HKR,Parameters,EnableS0Idle,0x00010001,1
+HKR,Parameters,ArmedTesting,0x00010001,0
+HKR,Parameters,EnablePortCls,0x00010001,0
+HKR,Parameters,EnableS0Idle,0x00010001,0
 HKR,Parameters,S0IdleTimeoutMs,0x00010001,5000
-HKR,Parameters,SimulateJackState,0x00010001,4
-HKR,Parameters,EnableUsbOffload,0x00010001,1
+HKR,Parameters,EnableUsbOffload,0x00010001,0
 
 ; ================= KMDF WDF Section =================
 

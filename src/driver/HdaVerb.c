@@ -961,55 +961,17 @@ VOID SofCheckAndNotifyJackPresence(
         return;
     }
 
-    /* 1. Check if registry override SimulateJackState is configured */
-    ULONG simMask = 0xFFFFFFFF;
-    WDFKEY key = NULL;
-    NTSTATUS status = WdfDriverOpenParametersRegistryKey(
-        WdfGetDriver(),
-        KEY_READ,
-        WDF_NO_OBJECT_ATTRIBUTES,
-        &key
-    );
-    if (NT_SUCCESS(status) && key != NULL) {
-        UNICODE_STRING simValName;
-        RtlInitUnicodeString(&simValName, L"SimulateJackState");
-        WdfRegistryQueryULong(key, &simValName, &simMask);
-        WdfRegistryClose(key);
-    } else {
-        /* Fallback: try device driver key */
-        status = WdfDeviceOpenRegistryKey(
-            Ctx->WdfDevice,
-            PLUGPLAY_REGKEY_DRIVER,
-            KEY_READ,
-            WDF_NO_OBJECT_ATTRIBUTES,
-            &key
-        );
-        if (NT_SUCCESS(status) && key != NULL) {
-            UNICODE_STRING simValName;
-            RtlInitUnicodeString(&simValName, L"SimulateJackState");
-            WdfRegistryQueryULong(key, &simValName, &simMask);
-            WdfRegistryClose(key);
-        }
-    }
-
     /* HDMI Pins: Pin 5 = HDMI 1, Pin 7 = HDMI 2, Pin 9 = HDMI 3 */
     for (ULONG i = 0; i < 3; i++) {
         ULONG bridgePinId = 5 + (i * 2);
         BOOLEAN newConnected = FALSE;
 
-        if (simMask != 0xFFFFFFFF) {
-            /* Simulated mode: Bit (2 + i) controls HDMI (i + 1) */
-            newConnected = (simMask & (1 << (2 + i))) ? TRUE : FALSE;
-        } else {
-            /* Hardware sense mode: query GFX Codec CAD 2 only if in D0 */
-            if (Ctx->CurrentPowerState == PowerDeviceD0 && Ctx->IDispCodecPresent && i < Ctx->DisplayPinCount) {
-                ULONG pinNid = Ctx->DisplayPinNid[i];
-                BOOLEAN eldValid = FALSE;
-                SofHdaGetDisplayPinSense(Ctx, 2, pinNid, &newConnected, &eldValid);
-            } else {
-                newConnected = Ctx->DisplayConnected[i]; /* Retain state if unpowered */
-            }
-        }
+        BOOLEAN eldValid = FALSE;
+        if (Ctx->CurrentPowerState != PowerDeviceD0 || !Ctx->IDispCodecPresent ||
+            i >= Ctx->DisplayPinCount) continue;
+        if (!NT_SUCCESS(SofHdaGetDisplayPinSense(Ctx, 2, Ctx->DisplayPinNid[i],
+                                                 &newConnected, &eldValid)))
+            continue;
 
         /* Check for state transition */
         if (newConnected != Ctx->DisplayConnected[i]) {
@@ -1024,21 +986,15 @@ VOID SofCheckAndNotifyJackPresence(
             Ctx->DisplayConnected[i] = newConnected;
 
             /* If newly connected in physical hardware mode, re-read ELD if valid */
-            if (newConnected && (simMask == 0xFFFFFFFF)) {
-                if (i < Ctx->DisplayPinCount && Ctx->IDispCodecPresent) {
-                    BOOLEAN pinConnected = FALSE, pinEldValid = FALSE;
-                    SofHdaGetDisplayPinSense(Ctx, 2, Ctx->DisplayPinNid[i], &pinConnected, &pinEldValid);
-                    if (pinConnected && pinEldValid) {
-                        UCHAR eldBuf[128];
-                        ULONG actualEld = 0;
-                        if (NT_SUCCESS(SofHdaGetDisplayEld(Ctx, 2, Ctx->DisplayPinNid[i], eldBuf, sizeof(eldBuf), &actualEld)) && actualEld >= 20) {
-                            SofHdaParseMonitorName(eldBuf, actualEld, Ctx->DisplayMonitorName[i], 32);
-                            SofHdaParseEldAudioCapabilities(eldBuf, actualEld,
-                                &Ctx->DisplaySampleRates[i],
-                                &Ctx->DisplayBitDepths[i],
-                                &Ctx->DisplayMaxChannels[i]);
-                        }
-                    }
+            if (newConnected && eldValid) {
+                UCHAR eldBuf[128];
+                ULONG actualEld = 0;
+                if (NT_SUCCESS(SofHdaGetDisplayEld(Ctx, 2, Ctx->DisplayPinNid[i],
+                        eldBuf, sizeof(eldBuf), &actualEld)) && actualEld >= 20) {
+                    SofHdaParseMonitorName(eldBuf, actualEld, Ctx->DisplayMonitorName[i], 32);
+                    SofHdaParseEldAudioCapabilities(eldBuf, actualEld,
+                        &Ctx->DisplaySampleRates[i], &Ctx->DisplayBitDepths[i],
+                        &Ctx->DisplayMaxChannels[i]);
                 }
             }
 

@@ -33,7 +33,7 @@ static int sleep_ms(void *ctx, unsigned ms) {
     return f->fail_sleep ? -1 : 0;
 }
 static pj1019_evidence all_verified(void) {
-    pj1019_evidence e={1,1,1,1,1,1,1};
+    pj1019_evidence e={1,1,1,1,1,1,1,1};
     return e;
 }
 static pj1019_mock_io callbacks(fake *f) {
@@ -96,6 +96,9 @@ static void fail_closed(void) {
     fake f={0};
     pj1019_mock_io io=callbacks(&f);
     pj1019_reset(&a);
+    e.calibration_procedure_verified=0;
+    assert(pj1019_prepare(&a,&e,&io)==PJ1019_UNVERIFIED && !f.count);
+    e.calibration_procedure_verified=1;
     e.safe_gain_limit_verified=0;
     assert(pj1019_prepare(&a,&e,&io)==PJ1019_UNVERIFIED && !f.count);
     e.safe_gain_limit_verified=1;

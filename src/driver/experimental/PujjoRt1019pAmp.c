@@ -12,10 +12,10 @@ void pj1019_reset(pj1019_amp *a) {
     a->calibration_required = 1u;
 }
 int pj1019_evidence_complete(const pj1019_evidence *e) {
-    return e && e->board_and_acpi_verified &&
-        e->translated_gpio_verified && e->logical_sdb_polarity_verified &&
-        e->speaker_ssp_and_firmware_verified && e->dsp_muting_verified &&
-        e->safe_gain_limit_verified && e->recovery_verified;
+    return e && e->board_and_acpi_verified == 1u &&
+        e->translated_gpio_verified == 1u && e->logical_sdb_polarity_verified == 1u &&
+        e->speaker_ssp_and_firmware_verified == 1u && e->dsp_muting_verified == 1u &&
+        e->safe_gain_limit_verified == 1u && e->recovery_verified == 1u && e->calibration_procedure_verified == 1u;
 }
 #ifdef PJ1019_TEST_ONLY_CALLBACKS
 static int io_valid(const pj1019_mock_io *io) {
@@ -71,7 +71,7 @@ pj1019_status pj1019_audio_start(pj1019_amp *a,
                                  const pj1019_mock_io *io, int stream_ready) {
     if (!a) return PJ1019_INVALID;
     if (a->state != PJ1019_ON_MUTED) return PJ1019_BAD_STATE;
-    if (!stream_ready) return PJ1019_UNVERIFIED;
+    if (stream_ready != 1 || a->calibration_required) return PJ1019_UNVERIFIED;
 #ifndef PJ1019_TEST_ONLY_CALLBACKS
     (void)io;
     return PJ1019_LOCKED;

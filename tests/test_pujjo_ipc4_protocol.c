@@ -65,6 +65,88 @@ static void protocol_tests(void)
         for(i=0u;i<8u;++i) assert(pj_ipc4_decode(out,(PJ_SIZE)i,&decoded)==PJ_IPC4_TRUNCATED);
     }
 }
+static void graph_tests(void)
+{
+    PJ_BYTE data[4096]={0};
+    PJ_BYTE frame[4104]={0};
+    PJ_SIZE n=0u;
+    pj_ipc4_packet p={0}, q={0};
+    assert(pj_ipc4_pipeline_create(3u,5u,256u,2u,1u,&p)==PJ_IPC4_VALID);
+    assert(p.primary==0x11032900u && p.extension==0x00200001u);
+    assert(p.payload==NULL && p.payload_bytes==0u);
+    assert(pj_ipc4_pipeline_create(255u,31u,2047u,15u,1u,&p)==PJ_IPC4_VALID);
+    assert(p.primary==0x11ffffffu && p.extension==0x00f00001u);
+    assert(pj_ipc4_pipeline_create(256u,0u,0u,0u,0u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(p.primary==0x11ffffffu);
+    assert(pj_ipc4_pipeline_create(0u,32u,0u,0u,0u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_pipeline_create(0u,0u,2048u,0u,0u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_pipeline_create(0u,0u,0u,16u,0u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_pipeline_create(0u,0u,0u,0u,2u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_pipeline_delete(3u,&p)==PJ_IPC4_VALID && p.primary==0x12030000u);
+    assert(p.extension==0u && p.payload_bytes==0u);
+    assert(pj_ipc4_pipeline_delete(256u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_pipeline_state(3u,4u,&p)==PJ_IPC4_VALID && p.primary==0x13030004u);
+    assert(pj_ipc4_pipeline_state(3u,1u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_pipeline_state(3u,6u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_pipeline_state(256u,4u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_pipeline_state(3u,3u,NULL)==PJ_IPC4_BAD_PARAMETER);
+    data[0]=0x5au;
+    assert(pj_ipc4_module_init(0x1234u,2u,3u,1u,1u,data,16u,&p)==PJ_IPC4_VALID);
+    assert(p.primary==0x40021234u && p.extension==0x11030004u);
+    assert(p.payload==data && p.payload_bytes==16u);
+    assert(pj_ipc4_module_init(65536u,2u,3u,1u,0u,data,16u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_module_init(1u,256u,3u,1u,0u,data,16u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_module_init(1u,2u,256u,1u,0u,data,16u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_module_init(1u,2u,3u,16u,0u,data,16u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_module_init(1u,2u,3u,1u,2u,data,16u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_module_init(1u,2u,3u,1u,0u,NULL,16u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_module_init(1u,2u,3u,1u,0u,data,0u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_module_init(1u,2u,3u,1u,0u,data,15u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_module_init(1u,2u,3u,1u,0u,data,4100u,&p)==PJ_IPC4_TOO_LARGE);
+    assert(pj_ipc4_module_init(1u,2u,3u,1u,0u,data,sizeof(data),&p)==PJ_IPC4_VALID);
+    assert((p.extension&0xffffu)==1024u);
+    assert(pj_ipc4_encode(&p,frame,sizeof(frame),&n)==PJ_IPC4_VALID && n==sizeof(frame));
+    assert(pj_ipc4_decode(frame,n,&q)==PJ_IPC4_VALID && q.payload_bytes==sizeof(data));
+    assert(q.primary==p.primary && q.extension==p.extension && q.payload[0]==0x5au);
+    assert(pj_ipc4_module_link(1u,0x1234u,2u,3u,0x5678u,4u,5u,&p)==PJ_IPC4_VALID);
+    assert(p.primary==0x45021234u && p.extension==0x1d045678u);
+    assert(pj_ipc4_module_link(0u,0x1234u,2u,3u,0x5678u,4u,5u,&p)==PJ_IPC4_VALID);
+    assert(p.primary==0x46021234u && p.extension==0x1d045678u);
+    assert(p.payload==NULL && p.payload_bytes==0u);
+    assert(pj_ipc4_module_link(1u,65535u,255u,7u,65535u,255u,7u,&p)==PJ_IPC4_VALID);
+    assert(p.primary==0x45ffffffu && p.extension==0x3fffffffu);
+    assert(pj_ipc4_module_link(2u,1u,2u,3u,4u,5u,6u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_module_link(1u,1u,2u,8u,4u,5u,6u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_module_link(1u,1u,2u,3u,4u,5u,8u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(p.primary==0x45ffffffu && p.extension==0x3fffffffu);
+}
+
+static void config_tests(void)
+{
+    PJ_BYTE bytes[4096]={0};
+    pj_ipc4_packet p={0};
+    unsigned i;
+    assert(pj_ipc4_large_config_set(10u,3u,0u,bytes,24u,&p)==PJ_IPC4_VALID);
+    assert(p.primary==0x4403000au && p.extension==0x30000018u);
+    assert(p.payload==bytes && p.payload_bytes==24u);
+    assert(pj_ipc4_large_config_set(0u,0u,20u,bytes,8u,&p)==PJ_IPC4_VALID);
+    assert(p.primary==0x44000000u && p.extension==0x31400008u);
+    assert(pj_ipc4_large_config_set(65535u,255u,255u,bytes,4096u,&p)==PJ_IPC4_VALID);
+    assert(p.primary==0x44ffffffu && p.extension==0x3ff01000u);
+    assert(pj_ipc4_large_config_set(65536u,0u,0u,bytes,4u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_large_config_set(0u,256u,0u,bytes,4u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_large_config_set(0u,0u,256u,bytes,4u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_large_config_set(0u,0u,0u,bytes,4097u,&p)==PJ_IPC4_TOO_LARGE);
+    assert(pj_ipc4_large_config_set(0u,0u,0u,bytes,0u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_large_config_set(0u,0u,0u,NULL,4u,&p)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_large_config_set(0u,0u,0u,bytes,4u,NULL)==PJ_IPC4_BAD_PARAMETER);
+    assert(p.primary==0x44ffffffu && p.extension==0x3ff01000u);
+    for (i=1u;i<=4096u;++i) {
+        assert(pj_ipc4_large_config_set(0u,0u,6u,bytes,i,&p)==PJ_IPC4_VALID);
+        assert((p.extension&0xfffffu)==i);
+    }
+}
+
 static void transaction_tests(void)
 {
     pj_ipc4_transaction t;
@@ -112,7 +194,7 @@ static void transaction_tests(void)
 }
 int main(void)
 {
-    protocol_tests();transaction_tests();
+    protocol_tests();graph_tests();config_tests();transaction_tests();
     puts("PASS: IPC4 protocol frames and fail-closed transaction model");
     return 0;
 }

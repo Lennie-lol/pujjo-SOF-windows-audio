@@ -3,7 +3,7 @@
 from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 ipc = (root / "src/driver/Ipc.c").read_text()
-send = ipc.split("NTSTATUS\nSofIpcSendMessage(", 1)[1].split("\n/**", 1)[0]
+send = ipc.split("NTSTATUS\nSofIpcSendWhilePowered(", 1)[1].split("\n/**", 1)[0]
 dpc = ipc.split("VOID\nSofIpcDpcHandler(", 1)[1].split("\n/**", 1)[0]
 assert "Reply && (Reply->Payload || Reply->PayloadSize != 0)" in send
 assert send.index("Reply &&") < send.index("WRITE_REGISTER_ULONG")
@@ -21,3 +21,47 @@ assert "KeGetCurrentIrql() != PASSIVE_LEVEL" in send
 logger = (root / "src/driver/Driver.c").read_text().split("void SofLogBreadcrumb(", 1)[1]
 assert logger.index("KeAreAllApcsDisabled()") < logger.index("ZwCreateFile(")
 print("PASS: header-only response contract, mapped range checks, reply ownership and timeout fault latch")
+
+# Hardware busy must be checked while holding the software transmit lock and
+# before touching either the mailbox or extension/primary registers.
+assert send.index("KeAcquireSpinLock(&Ctx->IpcLock") < send.index("hostDoorbell = SofDspRead32") < send.index("Ctx->IpcTxBusy = TRUE;") < send.index("WRITE_REGISTER_ULONG")
+assert send.index("hostDoorbell == 0xFFFFFFFFu") < send.index("hostDoorbell & Ctx->HwDesc->HipcIdrBusy")
+assert "Ctx->IpcFaulted = TRUE;" in send.split("if (hostDoorbell == 0xFFFFFFFFu)",1)[1].split("}",1)[0]
+for name,register in (("SofReadFwStatus","FwStatusReg"),("SofReadRomStatus","RomStatusReg")):
+    body=ipc.split("ULONG\n"+name+"(",1)[1].split("\n}",1)[0]
+    assert "!Ctx ||" in body
+    assert body.index("pj_ipc4_mmio_span_valid") < body.index("SofDspRead32")
+    assert "Ctx->HwDesc->"+register+", 4u" in body
+print("PASS: hardware doorbell ownership and DSP status register bounds")
+
+# Crash collection must not perform file I/O at elevated IRQL or read an
+# unverified BAR range. Information omitted from a dump must not be fabricated.
+dump=ipc.split("VOID\nSofDspDumpCore(",1)[1].split("\n/**",1)[0]
+assert dump.index("KeAreAllApcsDisabled()") < dump.index("SofDspRead32")
+assert dump.index("pj_ipc4_mmio_span_valid") < dump.index("SofDspRead32")
+assert "Ctx->HwDesc->RomStatusReg, 32u" in dump
+assert "Ctx->HwDesc->MailboxUplinkOffset, 4096u" in dump
+assert "Ctx->HwDesc->MailboxDownlinkOffset, 4096u" in dump
+assert "hdr->DeviceId = Ctx->DeviceId;" in dump
+assert "hdr->VendorId = Ctx->VendorId;" in dump
+assert "debugWinOffset + debugWinSize" not in dump
+assert "ULONG debugWinSize = 0;" in dump
+drain=ipc.split("VOID\nSofIpc4DrainFwLogs(",1)[1].split("\n/**",1)[0]
+assert drain.index("pj_ipc4_mmio_span_valid(Ctx->Bar4Length, debugWinOffset, 65536u)") < drain.index("SofDspRead32")
+assert "if (slotOffset != 0u) return;" in drain
+assert "if (!slotOffset) return;" in drain
+assert "if (dspWritePtr >= logBufSize || hostReadPtr >= logBufSize) return;" in drain
+assert "consumed = bytesToRead;" in drain
+assert "hostReadPtr = (hostReadPtr + consumed) % logBufSize;" in drain
+assert "SofDspWrite32(sramBase, slotOffset, hostReadPtr);" in drain
+assert "SofDspWrite32(sramBase, slotOffset, dspWritePtr);" not in drain
+print("PASS: bounded diagnostic snapshots and trace cursor integrity")
+
+# Single-block trace configuration must use the correct IPC message type.
+enable=ipc.split("NTSTATUS\nSofIpc4EnableFwLogs(",1)[1]
+assert enable.count("encoded = pj_ipc4_large_config_set(")==2
+assert enable.count("SofIpcSendMessage(Ctx, &msg, NULL, 500)")==2
+assert enable.index("!Ctx->DebugWindowOffset") < enable.index("pj_ipc4_large_config_set")
+assert enable.index("return status;",enable.index("Failed to sync system time")) < enable.index("SOF_IPC4_FW_PARAM_ENABLE_LOGS")
+assert "msg.Extension = packet.extension;" in enable
+print("PASS: trace configuration uses checked single-block commands")

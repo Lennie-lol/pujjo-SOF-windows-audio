@@ -39,3 +39,11 @@ assert not list(root.rglob('*.exe'))
 assert 'branches: [main]' in workflow
 assert 'run_offline_suite.py' in workflow
 print('PASS: no installable driver package, boot locked, mocks isolated from WDK projects')
+
+from pathlib import Path
+driver_dir = Path(__file__).resolve().parents[1] / "src" / "driver"
+template = (driver_dir / "sof_dsp.inx").read_text()
+for setting in ("ArmedTesting", "EnablePortCls", "EnableUsbOffload", "EnableS0Idle"):
+    assert f"HKR,Parameters,{setting},0x00010001,0" in template
+assert "SimulateJackState" not in template
+assert "SimulateJackState" not in (driver_dir / "HdaVerb.c").read_text()

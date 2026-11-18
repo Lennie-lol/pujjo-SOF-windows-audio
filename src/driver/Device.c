@@ -71,88 +71,68 @@ static VOID SofUnmapFailedPreparedBars(_Inout_ PSOF_DEVICE_CONTEXT Ctx)
  *
  * @param[in,out] Ctx Pointer to device extension context.
  */
-VOID SofDiscoverHdaCaps(
+static NTSTATUS SofDiscoverHdaCaps(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
     PUCHAR bar0;
-    ULONG offset;
-    ULONG count = 0;
-    ULONG gcap;
+    ULONG offset, count = 0, i, cap, id;
+    ULONG visited[SOF_HDA_MAX_CAPS];
+    ULONG pp = 0, spb = 0, ml = 0;
+    USHORT gcap;
 
-    if (!Ctx || !Ctx->Bar0VirtualAddress || Ctx->Bar0Length < 0x80)
-        return;
+    if (!Ctx) return STATUS_INVALID_PARAMETER;
+    /* Invalidate previous results even if the next mapping is unavailable. */
+    Ctx->PpCapOffset = Ctx->SpbCapOffset = Ctx->MlCapOffset = 0;
+    Ctx->NumCaptureStreams = Ctx->NumPlaybackStreams = 0;
+    if (!Ctx->Bar0VirtualAddress || Ctx->Bar0Length < 0x80u)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
 
     bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
-    Ctx->PpCapOffset = 0;
-    Ctx->SpbCapOffset = 0;
-
-    /*
-     * Read Global Capabilities Register (GCAP, BAR0 offset 0x00):
-     * Bits 8..11:  Number of Input/Capture Stream Descriptors.
-     * Bits 12..15: Number of Output/Playback Stream Descriptors.
-     */
-    gcap = readl(bar0 + SOF_HDA_GCAP);
-    Ctx->NumCaptureStreams = (gcap >> 8) & 0x0F;
-    Ctx->NumPlaybackStreams = (gcap >> 12) & 0x0F;
-
-    /* Zero means no reported streams. Never manufacture hardware counts. */
-
-    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-               "[SOF] GCAP=0x%08x: NumCapture=%u, NumPlayback=%u\n",
-               gcap, Ctx->NumCaptureStreams, Ctx->NumPlaybackStreams);
-
-    /*
-     * Read Lower Link Capabilities Header (LLCH) at BAR0 offset 0x14 (16-bit offset pointer).
-     * Points to the first entry of the capability linked list.
-     */
+    /* GCAP is a 16-bit register, not the neighboring version bytes. */
+    gcap = readw(bar0 + SOF_HDA_GCAP);
+    if (gcap == 0xFFFFu) return STATUS_DEVICE_NOT_READY;
     offset = readw(bar0 + SOF_HDA_LLCH);
 
-    if (offset == 0 || offset == 0xFFFF || offset >= Ctx->Bar0Length) {
-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                   "[SOF] No HDA extended capabilities list (LLCH=0x%x)\n", offset);
-        return;
-    }
-
-    /* Walk the capability linked list up to SOF_HDA_MAX_CAPS hops */
-    while (count++ <= SOF_HDA_MAX_CAPS && offset != 0 && offset != 0xFFFF) {
-        ULONG capOffset = offset & SOF_HDA_CAP_NEXT_MASK;
-        ULONG cap;
-        ULONG capId;
-
-        if (capOffset + sizeof(ULONG) > Ctx->Bar0Length) {
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL,
-                       "[SOF] Capability offset 0x%x exceeds BAR0 length 0x%llx\n",
-                       capOffset, (unsigned long long)Ctx->Bar0Length);
-            break;
+    /* An empty list is legitimate; a malformed list is not. Publish results
+     * only after the entire bounded chain has been validated. */
+    while (offset != 0) {
+        if (count >= SOF_HDA_MAX_CAPS || offset == 0xFFFFu ||
+            (offset & 3u) != 0 || offset < 0x80u ||
+            offset > Ctx->Bar0Length - sizeof(ULONG))
+            return STATUS_DEVICE_CONFIGURATION_ERROR;
+        for (i = 0; i < count; ++i) {
+            if (visited[i] == offset)
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
         }
-
-        cap = readl(bar0 + capOffset);
-        capId = (cap & SOF_HDA_CAP_ID_MASK) >> SOF_HDA_CAP_ID_OFF;
-
-        if (capId == SOF_HDA_PP_CAP_ID) {
-            Ctx->PpCapOffset = capOffset;
-            /* Discovery only: enabling GPROCEN/PIE is an activation action,
-             * not a side effect of reading HDA capability descriptors. */
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] Discovered PP capability at 0x%x (read-only)\n", capOffset);
-            SofLogBreadcrumb("[CAP] Discovered PP capability; not activated\n");
-        } else if (capId == SOF_HDA_SPIB_CAP_ID) {
-            Ctx->SpbCapOffset = capOffset;
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] Discovered SPIB capability at 0x%x\n", capOffset);
-            SofLogBreadcrumb("[CAP] Discovered SPIB capability\n");
-        } else if (capId == SOF_HDA_ML_CAP_ID) {
-            Ctx->MlCapOffset = capOffset;
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] Discovered ML capability at 0x%x\n", capOffset);
-            SofLogBreadcrumb("[CAP] Discovered ML capability\n");
+        visited[count++] = offset;
+        cap = readl(bar0 + offset);
+        if (cap == 0xFFFFFFFFu) return STATUS_DEVICE_NOT_READY;
+        if (cap == 0) return STATUS_DEVICE_CONFIGURATION_ERROR;
+        id = (cap & SOF_HDA_CAP_ID_MASK) >> SOF_HDA_CAP_ID_OFF;
+        if (id == SOF_HDA_PP_CAP_ID) {
+            if (pp || Ctx->Bar0Length - offset < SOF_HDA_REG_PP_PPCTL + sizeof(ULONG))
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+            pp = offset;
+        } else if (id == SOF_HDA_SPIB_CAP_ID) {
+            if (spb || Ctx->Bar0Length - offset < SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL + sizeof(ULONG))
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+            spb = offset;
+        } else if (id == SOF_HDA_ML_CAP_ID) {
+            if (ml) return STATUS_DEVICE_CONFIGURATION_ERROR;
+            ml = offset;
         }
-
         offset = cap & SOF_HDA_CAP_NEXT_MASK;
-        if (offset == capOffset || offset >= Ctx->Bar0Length)
-            break;
     }
+    Ctx->NumCaptureStreams = (gcap >> 8) & 0x0Fu;
+    Ctx->NumPlaybackStreams = (gcap >> 12) & 0x0Fu;
+    Ctx->PpCapOffset = pp;
+    Ctx->SpbCapOffset = spb;
+    Ctx->MlCapOffset = ml;
+    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
+               "[SOF] GCAP=0x%04x PP=0x%x SPIB=0x%x ML=0x%x (read-only)\n",
+               (ULONG)gcap, pp, spb, ml);
+    return STATUS_SUCCESS;
 }
 
 /**
@@ -303,7 +283,8 @@ SofEvtDevicePrepareHardware(
     }
 
     /* Discover HD-A controller capabilities without activating DSP processing */
-    SofDiscoverHdaCaps(ctx);
+    status = SofDiscoverHdaCaps(ctx);
+    if (!NT_SUCCESS(status)) goto PreparationFailed;
 
     /*
      * Read codec wake/status without resetting HDA link or DSP state.
@@ -406,11 +387,10 @@ SofEvtDevicePrepareHardware(
 
     /*
      * Query PortCls configuration from driver parameters registry.
-     * Default: PortCls enabled out-of-the-box (EnablePortCls = 1).
-     * Can be explicitly disabled via registry: EnablePortCls = 0.
+     * Missing settings leave optional endpoints and offload disabled.
      */
-    ULONG armedTesting = 1;
-    ULONG enablePortCls = 1;
+    ULONG armedTesting = 0;
+    ULONG enablePortCls = 0;
     WDFKEY paramKey = NULL;
     NTSTATUS regStatus = WdfDriverOpenParametersRegistryKey(
         WdfGetDriver(),
@@ -422,7 +402,7 @@ SofEvtDevicePrepareHardware(
         UNICODE_STRING valArmed;
         UNICODE_STRING valPortCls;
         UNICODE_STRING valUsbOffload;
-        ULONG enableUsbOffload = 1;
+        ULONG enableUsbOffload = 0;
         RtlInitUnicodeString(&valArmed, L"ArmedTesting");
         RtlInitUnicodeString(&valPortCls, L"EnablePortCls");
         RtlInitUnicodeString(&valUsbOffload, L"EnableUsbOffload");
@@ -432,7 +412,7 @@ SofEvtDevicePrepareHardware(
         ctx->EnableUsbOffload = enableUsbOffload;
         WdfRegistryClose(paramKey);
     } else {
-        ctx->EnableUsbOffload = 1;
+        ctx->EnableUsbOffload = 0;
     }
 
     ctx->ArmedTesting = armedTesting;
@@ -678,150 +658,54 @@ SofEvtDeviceD0Entry(
                "[SOF] EvtDeviceD0Entry: Entering D0 from State %d\n",
                PreviousState);
 
-    ctx->CurrentPowerState = PowerDeviceD0;
+    KIRQL ipcIrql;
+    SOF_FW_BOOT_STATE initialFwState;
+    BOOLEAN ipcFaulted;
+    NTSTATUS bootStatus;
 
-    /* Wake hardware from D0i3 if entering from a low-power state */
-    if (PreviousState > WdfPowerDeviceD0) {
-        SofHdaSetD0i3(ctx, FALSE);
-    }
+    KeAcquireSpinLock(&ctx->IpcLock, &ipcIrql);
+    initialFwState = ctx->FwState;
+    ipcFaulted = ctx->IpcFaulted || ctx->IpcTxBusy;
+    KeReleaseSpinLock(&ctx->IpcLock, ipcIrql);
 
-    /* Enable IPC interrupts on entering D0 */
+    /* No retained-session assumption: resume needs a reviewed cAVS power,
+     * DMA and IPC ownership restoration path. Do not probe ACE registers on
+     * this ADL-N target or attempt a cold boot on an occupied DSP. */
+    if (ipcFaulted || initialFwState != SOF_FW_BOOT_NOT_STARTED ||
+        PreviousState != WdfPowerDeviceD3Final)
+        return STATUS_DEVICE_NOT_READY;
+    if (!ctx->HardwarePrepared || !ctx->HwDesc ||
+        !ctx->Bar0VirtualAddress || !ctx->Bar4VirtualAddress)
+        return STATUS_DEVICE_NOT_READY;
+
+    /* The loader is the sole owner of the cold firmware boot sequence.
+     * No speculative HDMI/HDA/SSP graph creation or codec programming here. */
     SofIpcEnableInterrupts(ctx);
-
-    /* Check if initial cold boot or waking from low-power state */
-    BOOLEAN isInitialBoot = (ctx->FwState == SOF_FW_BOOT_NOT_STARTED);
-    BOOLEAN dspNeedsBoot = isInitialBoot;
-
-    if (!isInitialBoot && ctx->Bar4VirtualAddress && ctx->HwDesc) {
-        PUCHAR bar4 = (PUCHAR)ctx->Bar4VirtualAddress;
-        ULONG ctl = SofDspRead32(bar4, MTL_DSP2CXCTL_PRIMARY_CORE);
-        ULONG dsscs = SofDspRead32(bar4, MTL_HFDSSCS);
-        ULONG romSts = SofDspRead32(bar4, ctx->HwDesc->RomStatusReg);
-
-        char chkMsg[160];
-        RtlStringCbPrintfA(chkMsg, sizeof(chkMsg),
-            "[Power] D0Entry Resume Check: Core0=0x%08x, DSSCS=0x%08x, ROM=0x%08x\n",
-            ctl, dsscs, romSts);
-        SofLogBreadcrumb(chkMsg);
-
-        /* If Core0 is not powered (CPA=0) or Subsystem is not powered (CPA=0) or ROM not entered */
-        if (!(ctl & MTL_DSP2CXCTL_PRIMARY_CORE_CPA_MASK) ||
-            !(dsscs & MTL_HFDSSCS_CPA_MASK) ||
-            FSR_TO_STATE_CODE(romSts) != FSR_STATE_FW_ENTERED) {
-            dspNeedsBoot = TRUE;
-            SofLogBreadcrumb("[Power] DSP reset or lost power during sleep: Re-booting firmware on resume...\n");
-        } else {
-            SofLogBreadcrumb("[Power] DSP retained power & firmware state across sleep (CPA=1)!\n");
-        }
+    bootStatus = SofStartFirmwareBoot(ctx, NULL);
+    if (!NT_SUCCESS(bootStatus)) {
+        SofLogBreadcrumb("[Power] D0 entry aborted: firmware boot failed.\n");
+        SofIpcDisableInterrupts(ctx);
+        return bootStatus;
     }
 
-    if (dspNeedsBoot) {
-        NTSTATUS bootStatus;
-        if (isInitialBoot) {
-            SofLogBreadcrumb("[12] Triggering initial firmware boot in D0...\n");
-        } else {
-            SofLogBreadcrumb("[Power] Triggering resume firmware re-boot in D0...\n");
-        }
-
-        bootStatus = SofStartFirmwareBoot(ctx, NULL);
-        if (NT_SUCCESS(bootStatus) && ctx->FwState == SOF_FW_BOOT_COMPLETE) {
-            SOF_AUDIO_FORMAT_PARAMS fmt;
-            ULONG hostInst, gainInst, daiInst;
-
-            /* Build 48kHz, 2-channel, 32-bit container audio format */
-            SofIpc4BuildDefaultStereoFormat(48000, 32, &fmt);
-
-            if (isInitialBoot) {
-                SofLogBreadcrumb("[14] Firmware boot succeeded! Verifying on-demand audio pipelines...\n");
-
-                /* 1. Test HDMI 1 On-Demand Pipeline (Link 1, Pipeline ID 1, Stream Tag 1) */
-                if (NT_SUCCESS(SofIpc4CreateHdmiPipeline(ctx, 1, 1, 1, &fmt, &hostInst, &gainInst, &daiInst))) {
-                    SofLogBreadcrumb("[HDMI1] Pipeline 1 verified; resetting and deleting on-demand...\n");
-                    SofIpc4SetPipelineState(ctx, 1, SOF_IPC4_PIPE_RESET);
-                    SofIpc4DeletePipeline(ctx, 1);
-                    SofIpc4FreeInstanceId(ctx, SOF_IPC4_MOD_ID_COPIER, hostInst);
-                    SofIpc4FreeInstanceId(ctx, SOF_IPC4_MOD_ID_GAIN, gainInst);
-                    SofIpc4FreeInstanceId(ctx, SOF_IPC4_MOD_ID_COPIER, daiInst);
-                }
-
-                /* 2. Test HDMI 2 On-Demand Pipeline (Link 2, Pipeline ID 2, Stream Tag 2) */
-                if (NT_SUCCESS(SofIpc4CreateHdmiPipeline(ctx, 2, 2, 2, &fmt, &hostInst, &gainInst, &daiInst))) {
-                    SofLogBreadcrumb("[HDMI2] Pipeline 2 verified; resetting and deleting on-demand...\n");
-                    SofIpc4SetPipelineState(ctx, 2, SOF_IPC4_PIPE_RESET);
-                    SofIpc4DeletePipeline(ctx, 2);
-                    SofIpc4FreeInstanceId(ctx, SOF_IPC4_MOD_ID_COPIER, hostInst);
-                    SofIpc4FreeInstanceId(ctx, SOF_IPC4_MOD_ID_GAIN, gainInst);
-                    SofIpc4FreeInstanceId(ctx, SOF_IPC4_MOD_ID_COPIER, daiInst);
-                }
-
-                /* 3. Test HDMI 3 On-Demand Pipeline (Link 3, Pipeline ID 3, Stream Tag 3) */
-                if (NT_SUCCESS(SofIpc4CreateHdmiPipeline(ctx, 3, 3, 3, &fmt, &hostInst, &gainInst, &daiInst))) {
-                    SofLogBreadcrumb("[HDMI3] Pipeline 3 verified; resetting and deleting on-demand...\n");
-                    SofIpc4SetPipelineState(ctx, 3, SOF_IPC4_PIPE_RESET);
-                    SofIpc4DeletePipeline(ctx, 3);
-                    SofIpc4FreeInstanceId(ctx, SOF_IPC4_MOD_ID_COPIER, hostInst);
-                    SofIpc4FreeInstanceId(ctx, SOF_IPC4_MOD_ID_GAIN, gainInst);
-                    SofIpc4FreeInstanceId(ctx, SOF_IPC4_MOD_ID_COPIER, daiInst);
-                }
-
-                /* Pujjo safety: do not probe an arbitrary SSP2 path.
-                 * RT5682/RT1019 codec sequencing and SSP assignment are NOT
-                 * implemented. No speaker-pipeline tests are run yet. */
-                SofLogBreadcrumb("[PUJJO] SSP probing skipped (routing unverified).\n");
-            }
-
-            /* Initialize / restore HDA Codec status */
-            if (ctx->HdaCodecPresent) {
-                SofHdaProbeCodec(ctx, 0, &ctx->CodecVendorId, &ctx->CodecRevisionId);
-                SofHdaInitCodec(ctx, 0);
-
-                if (isInitialBoot) {
-                    if (NT_SUCCESS(SofIpc4CreatePlaybackPipeline(ctx, 6, 6, &fmt, &hostInst, &gainInst, &daiInst))) {
-                        SofLogBreadcrumb("[HDA] Playback pipeline 6 verified; resetting and deleting on-demand...\n");
-                        SofIpc4SetPipelineState(ctx, 6, SOF_IPC4_PIPE_RESET);
-                        SofIpc4DeletePipeline(ctx, 6);
-                        SofIpc4FreeInstanceId(ctx, SOF_IPC4_MOD_ID_COPIER, hostInst);
-                        SofIpc4FreeInstanceId(ctx, SOF_IPC4_MOD_ID_GAIN, gainInst);
-                        SofIpc4FreeInstanceId(ctx, SOF_IPC4_MOD_ID_COPIER, daiInst);
-                    }
-                }
-            }
-
-            /* Initialize / restore Intel Display Audio Codec status (CAD 2) */
-            if (ctx->Bar0VirtualAddress) {
-                USHORT wakests = readw((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_WAKESTS);
-                if (wakests & SOF_HDA_WAKESTS_SDIN2) {
-                    ctx->IDispCodecPresent = TRUE;
-                }
-            }
-
-            if (ctx->IDispCodecPresent) {
-                if (NT_SUCCESS(SofHdaProbeDisplayCodec(ctx, 2, &ctx->GfxCodecVendorId, &ctx->GfxCodecRevisionId))) {
-                    SofHdaInitDisplayCodec(ctx, 2);
-                }
-            }
-
-            if (isInitialBoot) {
-                SofLogBreadcrumb("[16] All on-demand pipelines verified! (0 active pipelines in idle D0)\n");
-            } else {
-                SofLogBreadcrumb("[Power] Resume firmware re-boot and codec restoration completed!\n");
-            }
-        }
-    } else {
-        /* DSP retained power across sleep: ensure HDA codec power state is restored to D0 */
-        if (ctx->HdaCodecPresent) {
-            ULONG dummy;
-            SofHdaSendVerb(ctx, HDA_VERB(0, 0x01, HDA_VERB_SET_POWER_STATE, 0x00), &dummy);
-        }
+    KeAcquireSpinLock(&ctx->IpcLock, &ipcIrql);
+    ipcFaulted = ctx->IpcFaulted || ctx->FwState != SOF_FW_BOOT_COMPLETE;
+    KeReleaseSpinLock(&ctx->IpcLock, ipcIrql);
+    if (ipcFaulted) {
+        SofIpcDisableInterrupts(ctx);
+        return STATUS_DEVICE_NOT_READY;
     }
+    ctx->CurrentPowerState = PowerDeviceD0;
+    SofLogBreadcrumb("[Power] Firmware ready; audio graph and codec readiness are separate.\n");
 
     /* Immediately check and report jack presence on D0 entry */
-    if (ctx->PortEvents != NULL) {
+    if (ctx->PortClsRegistered && ctx->PortEvents != NULL) {
         SofCheckAndNotifyJackPresence(ctx);
     }
 
     /* Start / re-arm Jack Poll Timer (1000ms periodic) */
-    if (ctx->JackPollTimer) {
+    if (ctx->PortClsRegistered && ctx->PortEvents != NULL && ctx->JackPollTimer) {
+        InterlockedExchange(&ctx->JackPolling, TRUE);
         WdfTimerStart(ctx->JackPollTimer, WDF_REL_TIMEOUT_IN_MS(1000));
         SofLogBreadcrumb("[Jack] Started JackPollTimer (1000ms periodic)\n");
     }
@@ -851,12 +735,7 @@ SofEvtDeviceD0Entry(
         }
     }
 
-    /* Initialize USB Audio Offload & Sideband Stack Listener */
-    if (ctx->EnableUsbOffload) {
-        SofUaolInit(ctx);
-        SofUsbOffloadInit(ctx);
-    }
-
+    /* Pujjo USB offload is not a verified part of cold boot. */
     SofLogBreadcrumb("[17] SofEvtDeviceD0Entry completed successfully!\n");
     return STATUS_SUCCESS;
 #endif /* PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT */
@@ -891,9 +770,12 @@ SofEvtDeviceD0Exit(
         SofLogBreadcrumb(xmsg);
     }
 
+    InterlockedExchange(&ctx->JackPolling, FALSE);
+    if (ctx->JackPollTimer) WdfTimerStop(ctx->JackPollTimer, TRUE);
+
     /* Stop Watchdog Health Timer when leaving D0 */
     if (ctx->WatchdogHealthTimer) {
-        WdfTimerStop(ctx->WatchdogHealthTimer, FALSE);
+        WdfTimerStop(ctx->WatchdogHealthTimer, TRUE);
         SofLogBreadcrumb("[Watchdog] Stopped WatchdogHealthTimer\n");
 
         /* If cleanly leaving D0, reset ConsecutiveCrashCount */
@@ -969,7 +851,7 @@ SofEvtJackPollTimer(
 {
     WDFDEVICE device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(device);
-    if (ctx != NULL) {
+    if (ctx && InterlockedCompareExchange(&ctx->JackPolling, 0, 0)) {
         if (ctx->PortEvents != NULL) {
             SofCheckAndNotifyJackPresence(ctx);
         }

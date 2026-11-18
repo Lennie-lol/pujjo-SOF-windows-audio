@@ -6,9 +6,16 @@ import xml.etree.ElementTree as ET
 root=Path(__file__).resolve().parents[1]
 loader=(root/'src/driver/Loader.c').read_text()
 assert 'ioStatus.Information != fileSize' in loader
-end=loader[loader.index('FW_READY notification not received within timeout'):]
+# Failure is now latched under the IPC lock before examining bootState.
+end=loader[loader.index('status = KeWaitForSingleObject(&Ctx->FwReadyEvent'):]
 assert 'Ctx->FwState = SOF_FW_BOOT_COMPLETE' not in end
-assert 'STATUS_IO_TIMEOUT' in end and 'SOF_FW_BOOT_FAILED' in end
+failure=end.split('if (status != STATUS_SUCCESS || Ctx->IpcFaulted',1)[1].split('KeReleaseSpinLock',1)[0]
+assert 'bootState != SOF_FW_BOOT_COMPLETE' in failure
+assert 'Ctx->FwState = SOF_FW_BOOT_FAILED;' in failure
+assert 'Ctx->IpcFaulted = TRUE;' in failure
+assert 'bootState = SOF_FW_BOOT_FAILED;' in failure
+assert end.index('bootState = SOF_FW_BOOT_FAILED;') < end.index('if (bootState == SOF_FW_BOOT_COMPLETE)')
+assert 'return status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_DEVICE_NOT_READY;' in end
 ns={'m':'http://schemas.microsoft.com/developer/msbuild/2003'}
 for project in root.glob('*.vcxproj'):
     tree=ET.parse(project)

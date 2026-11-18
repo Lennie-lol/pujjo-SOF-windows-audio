@@ -143,7 +143,9 @@ int main(void)
     assert(pj5682s_bind(&c,&b)==PJ5682S_OK);
     assert(pj5682s_identify(&c)==PJ5682S_OK);
     m.swap_identity=1;
+    value=0xabcd;
     assert(pj5682s_read_identity(&c,0xff,&value)==PJ5682S_WRONG_CHIP);
+    assert(value==0xabcd);
     assert(c.state==PJ5682S_FAILED && c.verified_id==0);
     pj5682s_unbind(&c);
     m.swap_identity=0;

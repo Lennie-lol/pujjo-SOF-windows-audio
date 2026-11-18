@@ -97,3 +97,74 @@ int pj_ipc4_mmio_span_valid(PJ_DWORD mapped_bytes, PJ_DWORD offset, PJ_DWORD byt
     return bytes != 0u && (offset & 3u) == 0u && (bytes & 3u) == 0u &&
            offset <= mapped_bytes && bytes <= mapped_bytes - offset;
 }
+
+/* IPC4 graph command encoders, per include/sof/ipc4/header.h and the
+ * Linux SOF IPC4 topology driver's message construction. No I/O. */
+static pj_ipc4_status graph_packet(PJ_DWORD primary, PJ_DWORD extension,
+    const PJ_BYTE *payload, PJ_SIZE bytes, pj_ipc4_packet *out)
+{
+    pj_ipc4_packet p;
+    if (!out) return PJ_IPC4_BAD_PARAMETER;
+    p.primary=primary;
+    p.extension=extension;
+    p.payload=payload;
+    p.payload_bytes=bytes;
+    *out=p;
+    return PJ_IPC4_VALID;
+}
+pj_ipc4_status pj_ipc4_pipeline_create(PJ_DWORD id, PJ_DWORD priority,
+    PJ_DWORD memory_pages, PJ_DWORD core, PJ_DWORD low_power, pj_ipc4_packet *out)
+{
+    if (id>255u || priority>31u || memory_pages>2047u ||
+        core>15u || low_power>1u)
+        return PJ_IPC4_BAD_PARAMETER;
+    return graph_packet((17u<<24)|(id<<16)|(priority<<11)|memory_pages,
+                        (core<<20)|low_power, 0, 0u, out);
+}
+pj_ipc4_status pj_ipc4_pipeline_delete(PJ_DWORD id, pj_ipc4_packet *out)
+{
+    if (id>255u) return PJ_IPC4_BAD_PARAMETER;
+    return graph_packet((18u<<24)|(id<<16),0u,0,0u,out);
+}
+pj_ipc4_status pj_ipc4_pipeline_state(PJ_DWORD id, PJ_DWORD state, pj_ipc4_packet *out)
+{
+    /* RESET, PAUSED, RUNNING, EOS. Invalid/uninitialized are not commands. */
+    if (id>255u || state<2u || state>5u) return PJ_IPC4_BAD_PARAMETER;
+    return graph_packet((19u<<24)|(id<<16)|state,0u,0,0u,out);
+}
+pj_ipc4_status pj_ipc4_module_init(PJ_DWORD module, PJ_DWORD instance,
+    PJ_DWORD pipeline, PJ_DWORD core, PJ_DWORD domain,
+    const PJ_BYTE *payload, PJ_SIZE bytes, pj_ipc4_packet *out)
+{
+    if (!out || module>65535u || instance>255u || pipeline>255u ||
+        core>15u || domain>1u || !payload || bytes==0u || (bytes&3u)!=0u)
+        return PJ_IPC4_BAD_PARAMETER;
+    if (bytes>PJ_IPC4_MAX_MAILBOX_PAYLOAD) return PJ_IPC4_TOO_LARGE;
+    return graph_packet(PJ_IPC4_TARGET_MASK|(instance<<16)|module,
+        (PJ_DWORD)(bytes/4u)|(pipeline<<16)|(core<<24)|(domain<<28),
+        payload,bytes,out);
+}
+pj_ipc4_status pj_ipc4_module_link(PJ_DWORD bind, PJ_DWORD src_module,
+    PJ_DWORD src_instance, PJ_DWORD src_queue, PJ_DWORD dst_module,
+    PJ_DWORD dst_instance, PJ_DWORD dst_queue, pj_ipc4_packet *out)
+{
+    if (bind>1u || src_module>65535u || dst_module>65535u ||
+        src_instance>255u || dst_instance>255u || src_queue>7u || dst_queue>7u)
+        return PJ_IPC4_BAD_PARAMETER;
+    return graph_packet(PJ_IPC4_TARGET_MASK|((bind?5u:6u)<<24)|
+        (src_instance<<16)|src_module,
+        (src_queue<<27)|(dst_queue<<24)|(dst_instance<<16)|dst_module,0,0u,out);
+}
+
+pj_ipc4_status pj_ipc4_large_config_set(PJ_DWORD module, PJ_DWORD instance,
+    PJ_DWORD parameter, const PJ_BYTE *payload, PJ_SIZE bytes, pj_ipc4_packet *out)
+{
+    if (!out || module > 65535u || instance > 255u ||
+        parameter > 255u || !payload || bytes == 0u)
+        return PJ_IPC4_BAD_PARAMETER;
+    if (bytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD) return PJ_IPC4_TOO_LARGE;
+    return graph_packet(PJ_IPC4_TARGET_MASK | (4u << 24) |
+                        (instance << 16) | module,
+                        (3u << 28) | (parameter << 20) | (PJ_DWORD)bytes,
+                        payload, bytes, out);
+}

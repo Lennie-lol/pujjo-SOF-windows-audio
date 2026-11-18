@@ -27,6 +27,7 @@ typedef struct pj1019_evidence {
     unsigned dsp_muting_verified;
     unsigned safe_gain_limit_verified;
     unsigned recovery_verified;
+    unsigned calibration_procedure_verified;
 } pj1019_evidence;
 /* Test doubles ONLY; never bind these to kernel or real devices.
  * All callbacks return zero on success. mute(1) silences speaker DSP.
