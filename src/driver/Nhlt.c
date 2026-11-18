@@ -48,130 +48,120 @@ NTSTATUS SofNhltParse(
     const ACPI_NHLT_HEADER *hdr;
     const UCHAR *curr;
     const UCHAR *end;
+    SOF_NHLT_INFO parsed;
     UCHAR endpointCount;
-    UCHAR epIndex;
+    ULONG epIndex;
+    ULONG byteIndex;
+    UCHAR checksum = 0;
 
-    if (NhltBuffer == NULL || Info == NULL) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    RtlZeroMemory(Info, sizeof(SOF_NHLT_INFO));
-
-    if (NhltSize < sizeof(ACPI_NHLT_HEADER) + 1) {
+    if (!Info) return STATUS_INVALID_PARAMETER;
+    RtlZeroMemory(Info, sizeof(*Info));
+    if (!NhltBuffer) return STATUS_INVALID_PARAMETER;
+    RtlZeroMemory(&parsed, sizeof(parsed));
+    if (NhltSize < sizeof(ACPI_NHLT_HEADER) + 1)
         return STATUS_BUFFER_TOO_SMALL;
-    }
-
     hdr = (const ACPI_NHLT_HEADER *)NhltBuffer;
-
-    /* Verify NHLT signature ('NHLT' = 0x544C484E) */
-    if (hdr->Signature != NHLT_ACPI_SIGNATURE) {
-        return STATUS_NOT_FOUND;
-    }
-
-    if (hdr->Length > NhltSize || hdr->Length < sizeof(ACPI_NHLT_HEADER) + 1) {
+    if (hdr->Signature != NHLT_ACPI_SIGNATURE) return STATUS_NOT_FOUND;
+    if (hdr->Length > NhltSize || hdr->Length < sizeof(ACPI_NHLT_HEADER) + 1)
         return STATUS_INVALID_PARAMETER;
-    }
+    /* ACPI checksum covers the declared table only. A checksum is not trust. */
+    for (byteIndex = 0; byteIndex < hdr->Length; ++byteIndex)
+        checksum = (UCHAR)(checksum + ((const UCHAR *)NhltBuffer)[byteIndex]);
+    if (checksum != 0) return STATUS_INVALID_PARAMETER;
 
     curr = (const UCHAR *)NhltBuffer + sizeof(ACPI_NHLT_HEADER);
     end = (const UCHAR *)NhltBuffer + hdr->Length;
-
     endpointCount = *curr++;
-    Info->TotalEndpoints = endpointCount;
+    parsed.TotalEndpoints = endpointCount;
 
-    for (epIndex = 0; epIndex < endpointCount && curr < end; epIndex++) {
+    for (epIndex = 0; epIndex < endpointCount; ++epIndex) {
         const NHLT_ENDPOINT_DESCRIPTOR *ep;
-        ULONG epLen;
+        const UCHAR *cfg;
+        const UCHAR *epEnd;
+        ULONG epLen, capSize, formatIndex;
+        UCHAR formatCount;
+        ULONG sampleRate = 0, channels = 0, bitDepth = 0;
 
-        if ((size_t)(end - curr) < sizeof(NHLT_ENDPOINT_DESCRIPTOR)) {
-            break;
-        }
-
+        /* Never return a successful partial endpoint inventory. */
+        if ((size_t)(end - curr) < sizeof(NHLT_ENDPOINT_DESCRIPTOR))
+            return STATUS_INVALID_PARAMETER;
         ep = (const NHLT_ENDPOINT_DESCRIPTOR *)curr;
         epLen = ep->Length;
+        if (epLen < sizeof(NHLT_ENDPOINT_DESCRIPTOR) ||
+            (size_t)(end - curr) < epLen) return STATUS_INVALID_PARAMETER;
+        epEnd = curr + epLen;
+        cfg = curr + sizeof(NHLT_ENDPOINT_DESCRIPTOR);
 
-        if (epLen < sizeof(NHLT_ENDPOINT_DESCRIPTOR) || (size_t)(end - curr) < epLen) {
-            break;
+        /* Every endpoint carries a length-prefixed vendor config then
+         * a count of format records. Check before advancing any cursor. */
+        if ((size_t)(epEnd - cfg) < sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+        RtlCopyMemory(&capSize, cfg, sizeof(capSize));
+        cfg += sizeof(ULONG);
+        if (capSize > (size_t)(epEnd - cfg)) return STATUS_INVALID_PARAMETER;
+        cfg += capSize;
+        if (cfg == epEnd) return STATUS_INVALID_PARAMETER;
+        formatCount = *cfg++;
+        for (formatIndex = 0; formatIndex < formatCount; ++formatIndex) {
+            WAVEFORMATEXTENSIBLE wfe;
+            if ((size_t)(epEnd - cfg) < sizeof(wfe) + sizeof(ULONG))
+                return STATUS_INVALID_PARAMETER;
+            RtlCopyMemory(&wfe, cfg, sizeof(wfe));
+            cfg += sizeof(wfe);
+            RtlCopyMemory(&capSize, cfg, sizeof(capSize));
+            cfg += sizeof(ULONG);
+            if (capSize > (size_t)(epEnd - cfg)) return STATUS_INVALID_PARAMETER;
+            cfg += capSize;
+            if (formatIndex == 0) {
+                sampleRate = wfe.Format.nSamplesPerSec;
+                channels = wfe.Format.nChannels;
+                bitDepth = wfe.Format.wBitsPerSample;
+            }
         }
-
+        /* Unknown extension/trailing bytes are not interpreted as formats. */
         switch (ep->LinkType) {
         case NHLT_LINK_DMIC:
-            Info->DmicEndpointsCount++;
-            Info->Dmic.Present = TRUE;
-            /* Default DMIC format: 48kHz, 2-ch or 4-ch depending on instance */
-            if (Info->Dmic.ChannelCount == 0) {
-                Info->Dmic.ChannelCount = (ep->InstanceId >= 2) ? NHLT_DMIC_4CH : NHLT_DMIC_2CH;
-                Info->Dmic.SampleRate = 48000;
-                Info->Dmic.BitDepth = 32;
+            ++parsed.DmicEndpointsCount;
+            parsed.Dmic.Present = TRUE;
+            if (parsed.Dmic.ChannelCount == 0) {
+                parsed.Dmic.ChannelCount = channels;
+                parsed.Dmic.SampleRate = sampleRate;
+                parsed.Dmic.BitDepth = bitDepth;
             }
             break;
-
         case NHLT_LINK_SSP:
-            Info->SspEndpointsCount++;
-            if (ep->HwVendorId != 0 && ep->HwDeviceId != 0) {
-                Info->ExternalCodecPresent = TRUE;
-                Info->CodecVendorId = ep->HwVendorId;
-                Info->CodecDeviceId = ep->HwDeviceId;
-                Info->CodecLinkType = NHLT_LINK_SSP;
-                Info->CodecInstanceId = ep->InstanceId;
-            }
+            ++parsed.SspEndpointsCount;
             break;
-
         case NHLT_LINK_SDW:
-            if (Info->SdwEndpointsCount < SOF_MAX_SDW_ENDPOINTS) {
-                PSOF_NHLT_SDW_ENDPOINT sdwEp = &Info->SdwEndpoints[Info->SdwEndpointsCount];
-                sdwEp->Present = TRUE;
-                sdwEp->LinkIndex = ep->InstanceId;
-                sdwEp->Direction = ep->Direction;
-                sdwEp->VendorId = ep->HwVendorId;
-                sdwEp->DeviceId = ep->HwDeviceId;
-                sdwEp->DeviceType = ep->DeviceType;
-                sdwEp->SampleRate = 48000;
-                sdwEp->ChannelCount = 2;
-                sdwEp->BitDepth = 32;
-
-                /* Attempt to extract format parameters if format blob is present */
-                if (epLen > sizeof(NHLT_ENDPOINT_DESCRIPTOR)) {
-                    const UCHAR *cfgPtr = (const UCHAR *)ep + sizeof(NHLT_ENDPOINT_DESCRIPTOR);
-                    const UCHAR *epEnd = (const UCHAR *)ep + epLen;
-                    if ((size_t)(epEnd - cfgPtr) >= sizeof(ULONG)) {
-                        ULONG capSize = *(const ULONG *)cfgPtr;
-                        cfgPtr += sizeof(ULONG) + capSize;
-                        if ((size_t)(epEnd - cfgPtr) >= 1) {
-                            UCHAR fmtCount = *cfgPtr++;
-                            if (fmtCount > 0 && (size_t)(epEnd - cfgPtr) >= sizeof(WAVEFORMATEXTENSIBLE)) {
-                                const WAVEFORMATEXTENSIBLE *wfe = (const WAVEFORMATEXTENSIBLE *)cfgPtr;
-                                if (wfe->Format.nSamplesPerSec != 0) {
-                                    sdwEp->SampleRate = wfe->Format.nSamplesPerSec;
-                                }
-                                if (wfe->Format.nChannels != 0) {
-                                    sdwEp->ChannelCount = wfe->Format.nChannels;
-                                }
-                                if (wfe->Format.wBitsPerSample != 0) {
-                                    sdwEp->BitDepth = wfe->Format.wBitsPerSample;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Info->SdwEndpointsCount++;
-            if (ep->HwVendorId != 0 && ep->HwDeviceId != 0) {
-                Info->ExternalCodecPresent = TRUE;
-                Info->CodecVendorId = ep->HwVendorId;
-                Info->CodecDeviceId = ep->HwDeviceId;
-                Info->CodecLinkType = NHLT_LINK_SDW;
-                Info->CodecInstanceId = ep->InstanceId;
+            if (parsed.SdwEndpointsCount >= SOF_MAX_SDW_ENDPOINTS)
+                return STATUS_INVALID_PARAMETER;
+            {
+                PSOF_NHLT_SDW_ENDPOINT sdw = &parsed.SdwEndpoints[parsed.SdwEndpointsCount++];
+                sdw->Present = TRUE;
+                sdw->LinkIndex = ep->InstanceId;
+                sdw->Direction = ep->Direction;
+                sdw->VendorId = ep->HwVendorId;
+                sdw->DeviceId = ep->HwDeviceId;
+                sdw->DeviceType = ep->DeviceType;
+                sdw->SampleRate = sampleRate;
+                sdw->ChannelCount = channels;
+                sdw->BitDepth = bitDepth;
             }
             break;
-
         default:
             break;
         }
-
+        if ((ep->LinkType == NHLT_LINK_SSP || ep->LinkType == NHLT_LINK_SDW) &&
+            ep->HwVendorId != 0 && ep->HwDeviceId != 0) {
+            parsed.ExternalCodecPresent = TRUE;
+            parsed.CodecVendorId = ep->HwVendorId;
+            parsed.CodecDeviceId = ep->HwDeviceId;
+            parsed.CodecLinkType = ep->LinkType;
+            parsed.CodecInstanceId = ep->InstanceId;
+        }
         curr += epLen;
     }
-
-    Info->IsValid = TRUE;
+    parsed.IsValid = TRUE;
+    *Info = parsed;
     return STATUS_SUCCESS;
 }
 
@@ -218,6 +208,8 @@ NTSTATUS SofNhltQueryAcpiTable(
             return STATUS_NOT_FOUND;
         }
 
+        /* Bound allocation and prevent integer overflow. */
+        if (tableSize > 1024u * 1024u) return STATUS_INVALID_PARAMETER;
         querySize = sizeof(SYSTEM_FIRMWARE_TABLE_INFORMATION) + tableSize;
         pTableInfo = (PSYSTEM_FIRMWARE_TABLE_INFORMATION)ExAllocatePool2(
             POOL_FLAG_NON_PAGED,
@@ -246,6 +238,11 @@ NTSTATUS SofNhltQueryAcpiTable(
             return status;
         }
 
+        if (pTableInfo->TableBufferLength == 0 ||
+            pTableInfo->TableBufferLength > tableSize) {
+            ExFreePoolWithTag(pTableInfo, SOF_NHLT_TAG);
+            return STATUS_INVALID_PARAMETER;
+        }
         *NhltBufferOut = pTableInfo->TableBuffer;
         *NhltSizeOut = pTableInfo->TableBufferLength;
         return STATUS_SUCCESS;
@@ -257,7 +254,7 @@ NTSTATUS SofNhltQueryAcpiTable(
         PVOID buffer;
         DWORD readBytes;
 
-        if (needed == 0) {
+        if (needed == 0 || needed > 1024u * 1024u) {
             return STATUS_NOT_FOUND;
         }
 
@@ -267,7 +264,7 @@ NTSTATUS SofNhltQueryAcpiTable(
         }
 
         readBytes = GetSystemFirmwareTable('ACPI', 'NHLT', buffer, needed);
-        if (readBytes == 0) {
+        if (readBytes == 0 || readBytes > needed) {
             free(buffer);
             return STATUS_NOT_FOUND;
         }

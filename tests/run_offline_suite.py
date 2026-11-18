@@ -16,7 +16,7 @@ SUITES=[
  'scripts/verify_upstream_integrity.py','tests/test_sof_zephyr_log.py',
  'tests/run_resource_policy_tests.py','tests/run_loader_transport_tests.py',
  'tests/test_audit_regressions.py','tests/run_windows_transport_tests.py',
- 'tests/test_v16_static.py','tests/run_dma_tests.py',
+ 'tests/test_v16_static.py','tests/run_dma_tests.py','tests/run_nhlt_bounds_tests.py',
  'tests/test_windows_ci_v017.py','tests/run_kernel_mock_abi_tests.py',
  'tests/test_preinstall_guards.py','tests/run_ipc4_boot_model_tests.py',
  'tests/run_boot_speaker_integration_tests.py',
