@@ -500,16 +500,6 @@ SofEvtDeviceAdd(
 
     SofLogBreadcrumb("[6] WdfDeviceCreate succeeded!\n");
 
-    /* Protect wdmFdo against IopDecrementDeviceObjectRef underflow (BugCheck 0x18) on file close */
-    PDEVICE_OBJECT wdmFdo = WdfDeviceWdmGetDeviceObject(device);
-    if (wdmFdo != NULL) {
-        for (ULONG i = 0; i < 100000; i++) {
-            ObReferenceObject(wdmFdo);
-        }
-        InterlockedExchange(&wdmFdo->ReferenceCount, 100000);
-        SofLogBreadcrumb("[6] wdmFdo ReferenceCount & PointerCount biased to 100000\n");
-    }
-
     deviceContext = GetDeviceContext(device);
     RtlZeroMemory(deviceContext, sizeof(SOF_DEVICE_CONTEXT));
     deviceContext->WdfDevice = device;
@@ -826,18 +816,9 @@ SofEvtDeviceWdmIrpPreprocess(
                        "[SOF] PcDispatchIrp: Major=%u Dev=%p File=%p FsCtx=%p\n",
                        irpSp->MajorFunction, dispatchDevice, fileObject, fileObject ? fileObject->FsContext : NULL);
 
-            PDEVICE_OBJECT origDevObj = fileObject ? fileObject->DeviceObject : NULL;
-
+            /* Legacy path remains unreachable while PortCls registration is
+             * locked. Do not mutate the I/O manager's file-object ownership. */
             NTSTATUS dispStatus = PcDispatchIrp(dispatchDevice, Irp);
-
-            /*
-             * Restore fileObject->DeviceObject to origDevObj (or wdmFdo if NULL).
-             * Both wdmFdo and dispatchDevice have their ReferenceCount and Object Header
-             * PointerCount biased by 100,000, guaranteeing zero possibility of BugCheck 0x18.
-             */
-            if (fileObject != NULL) {
-                fileObject->DeviceObject = (origDevObj != NULL) ? origDevObj : wdmFdo;
-            }
 
             if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
                 char omsg[128];

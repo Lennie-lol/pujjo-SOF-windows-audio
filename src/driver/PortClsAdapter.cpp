@@ -2378,6 +2378,13 @@ SofAudioDriverInit(
     return STATUS_SUCCESS;
 }
 
+/* Legacy private PortCls extension layout and IRP routing have no
+ * supported ownership contract. Keep registration locked pending replacement. */
+static BOOLEAN SofPortClsBackendVerified()
+{
+    return FALSE;
+}
+
 extern "C" NTSTATUS SofRegisterPortClsSubdevices(
     _In_ WDFDEVICE Device,
     _In_ PSOF_DEVICE_CONTEXT Ctx
@@ -2393,6 +2400,7 @@ extern "C" NTSTATUS SofRegisterPortClsSubdevices(
     const ULONG maxObjects = 10;
     char bmsg[128];
 
+    if (!SofPortClsBackendVerified()) return STATUS_NOT_SUPPORTED;
     SOF_VALIDATE_OR_BAIL(wdmFdo != NULL, STATUS_INVALID_PARAMETER, "wdmFdo is NULL");
     SOF_VALIDATE_OR_BAIL(pdo != NULL, STATUS_INVALID_PARAMETER, "pdo is NULL");
     SOF_VALIDATE_OR_BAIL(Ctx != NULL, STATUS_INVALID_PARAMETER, "Ctx is NULL");
@@ -2429,13 +2437,6 @@ extern "C" NTSTATUS SofRegisterPortClsSubdevices(
     }
 
     /* 2. Initialize PortCls Device Extension */
-    /* Bias Object Manager PointerCount in OBJECT_HEADER (-0x30) to guarantee
-     * that ObfDereferenceObject called during file close/cleanup never underflows below 0 (BugCheck 0x18).
-     */
-    for (ULONG i = 0; i < 100000; i++) {
-        ObReferenceObject(audioDevice);
-    }
-    InterlockedExchange(&audioDevice->ReferenceCount, 100000);
     audioDevice->StackSize = wdmFdo->StackSize;
     audioDevice->Flags |= (DO_DIRECT_IO | DO_POWER_PAGABLE);
 
