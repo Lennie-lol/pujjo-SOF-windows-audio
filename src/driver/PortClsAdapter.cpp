@@ -31,6 +31,7 @@
 #include <ntstrsafe.h>
 #include "PortClsAdapter.h"
 #include "WaveRt.h"
+#include "PujjoDmaPlan.h"
 #include "Device.h"
 #include "HdaVerb.h"
 #include "UsbOffload.h"
@@ -293,42 +294,14 @@ public:
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS status;
-        ULONG streamTag = m_IsCapture ? SOF_WAVERT_STREAM_TAG_CAPTURE : SOF_WAVERT_STREAM_TAG_PLAYBACK;
-        ULONG bufferSize = (RequestedSize > 0) ? RequestedSize : 65536;
-        SOF_ENDPOINT_TYPE epType = SOF_ENDPOINT_HDMI_1;
+        if (m_PinId != 10 || !m_IsCapture) return STATUS_NOT_SUPPORTED;
+        PJ_DWORD bufferSize, periodMs;
+        if (!pj_pcm_notification_ring(m_Format.SamplingFrequency, m_Format.ChannelsCount,
+                m_Format.BitDepth, m_Format.ValidBitDepth, RequestedSize, &bufferSize, &periodMs))
+            return STATUS_INVALID_BUFFER_SIZE;
 
-        if (m_PinId == 4) {
-            epType = SOF_ENDPOINT_HDMI_1;
-            streamTag = SOF_WAVERT_STREAM_TAG_HDMI_1;
-        } else if (m_PinId == 6) {
-            epType = SOF_ENDPOINT_HDMI_2;
-            streamTag = SOF_WAVERT_STREAM_TAG_HDMI_2;
-        } else if (m_PinId == 8) {
-            epType = SOF_ENDPOINT_HDMI_3;
-            streamTag = SOF_WAVERT_STREAM_TAG_HDMI_3;
-        } else if (m_PinId == 10) {
-            epType = SOF_ENDPOINT_DMIC_PDM;
-            streamTag = SOF_WAVERT_STREAM_TAG_DMIC;
-        } else if (m_PinId == 12) {
-            epType = SOF_ENDPOINT_I2S_SSP2;
-            streamTag = SOF_WAVERT_STREAM_TAG_SSP_RENDER;
-        } else if (m_PinId == 14) {
-            epType = SOF_ENDPOINT_I2S_SSP2;
-            streamTag = SOF_WAVERT_STREAM_TAG_SSP_CAPTURE;
-        } else if (m_PinId == 16 || m_PinId == 18) {
-            return STATUS_NOT_SUPPORTED;
-        } else if (m_DevCtx != NULL && m_DevCtx->HdaCodecPresent) {
-            epType = SOF_ENDPOINT_HDA_ANALOG;
-        } else if (m_IsCapture) {
-            epType = SOF_ENDPOINT_I2S_SSP2;
-        } else {
-            epType = SOF_ENDPOINT_HDMI_1;
-        }
-
-        status = SofWaveRtCreateStream(
-            m_DevCtx, epType, m_IsCapture, streamTag, &m_Format, bufferSize, 10, &m_Stream
-        );
+        NTSTATUS status = SofWaveRtCreateStream(m_DevCtx, SOF_ENDPOINT_DMIC_PDM,
+            TRUE, 0, &m_Format, bufferSize, periodMs, &m_Stream);
         if (!NT_SUCCESS(status)) {
             char msg[128];
             RtlStringCbPrintfA(msg, sizeof(msg),
@@ -351,24 +324,7 @@ public:
         *OffsetFromFirstPage = 0;
         *CacheType = MmCached;
 
-        /* Store active stream in device context */
-        if (m_PinId == 4) {
-            m_DevCtx->HdmiStreams[0] = m_Stream;
-        } else if (m_PinId == 6) {
-            m_DevCtx->HdmiStreams[1] = m_Stream;
-        } else if (m_PinId == 8) {
-            m_DevCtx->HdmiStreams[2] = m_Stream;
-        } else if (m_PinId == 10) {
-            m_DevCtx->DmicStream = m_Stream;
-        } else if (m_PinId == 12) {
-            m_DevCtx->SspPlaybackStream = m_Stream;
-        } else if (m_PinId == 14) {
-            m_DevCtx->SspCaptureStream = m_Stream;
-        } else if (m_IsCapture) {
-            m_DevCtx->CaptureStream = m_Stream;
-        } else {
-            m_DevCtx->PlaybackStream = m_Stream;
-        }
+        m_DevCtx->DmicStream = m_Stream;
 
         /* Replay cached notification events into newly created stream */
         for (ULONG i = 0; i < m_CachedEventCount; i++) {

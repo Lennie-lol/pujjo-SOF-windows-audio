@@ -55,6 +55,9 @@ extern "C" {
 #define NHLT_DIRECTION_RENDER           0   /**< Playback / Output */
 #define NHLT_DIRECTION_CAPTURE          1   /**< Capture / Input */
 
+#define NHLT_DEVICE_DMIC                1
+#define NHLT_DEVICE_I2S                 4
+
 /* Standard DMIC Configurations */
 #define NHLT_DMIC_2CH                   2   /**< 2-channel stereo mic array */
 #define NHLT_DMIC_4CH                   4   /**< 4-channel quad mic array */
@@ -185,6 +188,30 @@ typedef struct _SOF_NHLT_INFO {
 
 } SOF_NHLT_INFO, *PSOF_NHLT_INFO;
 
+typedef struct _SOF_NHLT_CONFIG_KEY {
+    UCHAR LinkType;
+    UCHAR VirtualBusId;
+    UCHAR Direction;
+    UCHAR DeviceType;
+    ULONG SampleRate;
+    USHORT Channels;
+    USHORT ContainerBits;
+    USHORT ValidBits;
+} SOF_NHLT_CONFIG_KEY;
+
+/* A call with Format == NULL describes the endpoint itself. Further calls
+ * describe each of its formats. All pointers are read-only and valid only
+ * for the duration of the callback. The table must remain immutable. */
+typedef void (*SOF_NHLT_VISITOR)(
+    _In_opt_ void *Context,
+    _In_ const NHLT_ENDPOINT_DESCRIPTOR *Endpoint,
+    _In_reads_bytes_(EndpointBytes) const UCHAR *EndpointConfig,
+    _In_ ULONG EndpointBytes,
+    _In_opt_ const WAVEFORMATEXTENSIBLE *Format,
+    _In_reads_bytes_opt_(ConfigBytes) const UCHAR *Config,
+    _In_ ULONG ConfigBytes
+);
+
 /* NHLT Parser Functions */
 
 /**
@@ -199,6 +226,25 @@ NTSTATUS SofNhltParse(
     _In_reads_bytes_(NhltSize) const void *NhltBuffer,
     _In_ size_t NhltSize,
     _Out_ PSOF_NHLT_INFO Info
+);
+
+NTSTATUS SofNhltEnumerate(
+    _In_reads_bytes_(NhltSize) const void *NhltBuffer,
+    _In_ size_t NhltSize,
+    _In_ SOF_NHLT_VISITOR Visitor,
+    _In_opt_ void *Context
+);
+
+/* Copies an exact PCM configuration into caller-owned storage. Identical
+ * duplicates are accepted. Conflicting matches return
+ * STATUS_OBJECT_NAME_COLLISION. A size probe uses NULL and zero capacity. */
+NTSTATUS SofNhltCopyConfiguration(
+    _In_reads_bytes_(NhltSize) const void *NhltBuffer,
+    _In_ size_t NhltSize,
+    _In_ const SOF_NHLT_CONFIG_KEY *Key,
+    _Out_writes_bytes_opt_(Capacity) UCHAR *Config,
+    _In_ ULONG Capacity,
+    _Out_ PULONG ConfigBytes
 );
 
 /* Kernel ACPI Firmware Query */

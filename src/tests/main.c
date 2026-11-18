@@ -482,25 +482,15 @@ static void test_ipc4_hdmi_and_ssp_pipeline_creation(void)
         SofIpc4FreeInstanceId(NULL, SOF_IPC4_MOD_ID_COPIER, daiInst);
     }
 
-    /* 2. SSP2 Playback Pipeline */
+    /* SSP prototypes require a validated device NHLT and firmware context. */
     status = SofIpc4CreateSspPipeline(NULL, 4, 4, 2, FALSE, &fmt, &hostInst, &gainInst, &daiInst);
-    assert(status == 0);
-    SofIpc4SetPipelineState(NULL, 4, SOF_IPC4_PIPE_RESET);
-    SofIpc4DeletePipeline(NULL, 4);
-    SofIpc4FreeInstanceId(NULL, SOF_IPC4_MOD_ID_COPIER, hostInst);
-    SofIpc4FreeInstanceId(NULL, SOF_IPC4_MOD_ID_GAIN, gainInst);
-    SofIpc4FreeInstanceId(NULL, SOF_IPC4_MOD_ID_COPIER, daiInst);
-
-    /* 3. SSP2 Capture Pipeline */
+    assert(!NT_SUCCESS(status));
+    assert(hostInst == 0xFFFFFFFF && gainInst == 0xFFFFFFFF && daiInst == 0xFFFFFFFF);
     status = SofIpc4CreateSspPipeline(NULL, 5, 5, 2, TRUE, &fmt, &hostInst, &gainInst, &daiInst);
-    assert(status == 0);
-    SofIpc4SetPipelineState(NULL, 5, SOF_IPC4_PIPE_RESET);
-    SofIpc4DeletePipeline(NULL, 5);
-    SofIpc4FreeInstanceId(NULL, SOF_IPC4_MOD_ID_COPIER, hostInst);
-    SofIpc4FreeInstanceId(NULL, SOF_IPC4_MOD_ID_GAIN, gainInst);
-    SofIpc4FreeInstanceId(NULL, SOF_IPC4_MOD_ID_COPIER, daiInst);
+    assert(!NT_SUCCESS(status));
+    assert(hostInst == 0xFFFFFFFF && gainInst == 0xFFFFFFFF && daiInst == 0xFFFFFFFF);
 
-    printf("[PASS] test_ipc4_hdmi_and_ssp_pipeline_creation (HDMI 1-3 & SSP2 Playback/Capture)\n");
+    printf("[PASS] HDMI host mock and missing SSP configuration rejection\n");
 }
 
 #pragma pack(push, 1)

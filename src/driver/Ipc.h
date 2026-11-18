@@ -170,7 +170,7 @@ VOID SofIpcDpcHandler(
 NTSTATUS SofIpcSendMessage(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ PSOF_IPC_MESSAGE Msg,
-    _Out_opt_ PSOF_IPC_MESSAGE Reply,
+    _Inout_opt_ PSOF_IPC_MESSAGE Reply,
     _In_ ULONG TimeoutMs
 );
 

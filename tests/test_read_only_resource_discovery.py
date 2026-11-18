@@ -11,10 +11,15 @@ assert "writel(" not in prep and "WRITE_REGISTER_" not in prep
 assert "SofHardwareDevelopmentAllowed()" in prep
 assert prep.index("!SofHardwareDevelopmentAllowed()") < prep.index("WdfFdoQueryForInterface")
 assert "status = SofDiscoverHdaCaps(ctx);\n    if (!NT_SUCCESS(status)) goto PreparationFailed;" in prep
+assert "PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 0" in prep
+assert "PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 4" in prep
+assert prep.index("WdfCmResourceListGetDescriptor(ResourcesRaw, i)") < prep.index("bar0Resource->u.Memory.Start")
+assert "memoryBarIndex" not in prep
 assert "SofIpcInitialize(ctx)" in prep
-assert "no CRST writes" in prep
-assert "ctx->Bar0Length < SOF_HDA_WAKESTS + sizeof(USHORT)" in prep
-print("PASS: PCI/HDA resource discovery is read-only and checks codec status bounds")
+assert "without CRST writes" in prep
+assert "ctx->Bar0Length < SOF_HDA_REG_ICS + sizeof(USHORT)" in prep
+assert "SOF_HDA_WAKESTS" not in prep and "IDispCodecPresent" not in prep
+print("PASS: PCI/HDA resource discovery is read-only and checks controller status bounds")
 
 # Diagnostic reporting must not open an SPB or GPIO target in default builds.
 peripheral=(Path(__file__).resolve().parents[1]/"src/driver/peripheral/PujjoPeripheralKmdf.c").read_text()

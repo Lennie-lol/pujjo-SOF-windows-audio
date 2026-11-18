@@ -18,16 +18,14 @@
 
 #include "Driver.h"
 #include "PujjoBoardGuard.h"
+#include "PujjoBoardId.h"
 #include "Device.h"
 #include "Loader.h"
 #include "Topo.h"
 #include "WaveRt.h"
 #include "PortClsAdapter.h"
-#include "HdaVerb.h"
 #include "HdaBusInterface.h"
-#include "SdwController.h"
-#include "UsbOffload.h"
-#include "UaolGateway.h"
+#include "HdaVerb.h"
 #include <ntstrsafe.h>
 #include <initguid.h>
 #include <wdmguid.h>
@@ -157,12 +155,13 @@ SofEvtDevicePrepareHardware(
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
     NTSTATUS status;
     ULONG resourceCount;
-    ULONG memoryBarIndex = 0;
+    PHYSICAL_ADDRESS bar0Bus = {0}, bar4Bus = {0};
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR bar0Resource = NULL, bar4Resource = NULL;
     ULONG i;
     BUS_INTERFACE_STANDARD busInterface;
+    PCI_COMMON_CONFIG pciConfig = {0};
     char msg[256];
 
-    UNREFERENCED_PARAMETER(ResourcesRaw);
     if (!SofHardwareDevelopmentAllowed()) return STATUS_NOT_SUPPORTED;
 
     /* Pujjo-only fork. Fail closed before touching PCI registers. */
@@ -180,33 +179,21 @@ SofEvtDevicePrepareHardware(
      * Identify hardware using a read-only PCI Standard Bus Interface query.
      * Do not change BME, MSE, or any PCI configuration while discovering.
      */
-    if (NT_SUCCESS(WdfFdoQueryForInterface(Device,
-                                           &GUID_BUS_INTERFACE_STANDARD,
-                                           (PINTERFACE)&busInterface,
-                                           sizeof(BUS_INTERFACE_STANDARD),
-                                           1,
-                                           NULL))) {
-        PCI_COMMON_CONFIG pciConfig;
-        ULONG bytesRead = busInterface.GetBusData(busInterface.Context,
-                                                  PCI_WHICHSPACE_CONFIG,
-                                                  &pciConfig,
-                                                  0,
-                                                  sizeof(PCI_COMMON_CONFIG));
-        if (bytesRead >= sizeof(PCI_COMMON_CONFIG)) {
-            ctx->VendorId = pciConfig.VendorID;
-            ctx->DeviceId = pciConfig.DeviceID;
-            ctx->RevisionId = pciConfig.RevisionID;
+    status = WdfFdoQueryForInterface(Device, &GUID_BUS_INTERFACE_STANDARD,
+        (PINTERFACE)&busInterface, sizeof(busInterface), 1, NULL);
+    if (!NT_SUCCESS(status)) return status;
+    ULONG bytesRead = busInterface.GetBusData(busInterface.Context, PCI_WHICHSPACE_CONFIG,
+        &pciConfig, 0, sizeof(pciConfig));
+    busInterface.InterfaceDereference(busInterface.Context);
+    if (bytesRead < FIELD_OFFSET(PCI_COMMON_CONFIG, u.type0.BaseAddresses) +
+                    sizeof(pciConfig.u.type0.BaseAddresses))
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
 
-            /* Windows PCI/PnP owns command register policy. Never turn
-             * on DMA bus mastering or memory decoding during discovery. */
-            if ((pciConfig.Command & 0x0006u) != 0x0006u) {
-                DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL,
-                           "[SOF] PCI MSE/BME not enabled (command=0x%04x); no change made\n",
-                           pciConfig.Command);
-            }
-        }
-        busInterface.InterfaceDereference(busInterface.Context);
-    }
+    ctx->VendorId = pciConfig.VendorID;
+    ctx->DeviceId = pciConfig.DeviceID;
+    ctx->RevisionId = pciConfig.RevisionID;
+    if ((pciConfig.Command & 0x0006u) != 0x0006u)
+        SofLogBreadcrumb("[PCI] Memory decode or bus mastering is disabled.\n");
 
     /* Only the Intel Alder Lake-N 54C8 controller is in scope.
      * Never silently default to another Intel DSP when PCI config access fails. */
@@ -234,32 +221,38 @@ SofEvtDevicePrepareHardware(
                "[SOF] Platform identified: %s (VID 0x%04x, DID 0x%04x)\n",
                ctx->HwDesc->PlatformName, ctx->VendorId, ctx->DeviceId);
 
-    /* Parse Translated Resources (BAR0 = HDA, BAR4 = DSP Shim/SRAM, Interrupts) */
+    /* Correlate PCI BAR bus addresses with the raw resource list. Use
+     * each raw descriptor's translated counterpart for host MMIO. */
+    ULONG high0, high4;
+    if ((pciConfig.HeaderType & 0x7fu) != 0 ||
+        !PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 0, &bar0Bus.LowPart, &high0) ||
+        !PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 4, &bar4Bus.LowPart, &high4))
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    bar0Bus.HighPart = (LONG)high0;
+    bar4Bus.HighPart = (LONG)high4;
+    if (bar0Bus.QuadPart == bar4Bus.QuadPart)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+
     resourceCount = WdfCmResourceListGetCount(ResourcesTranslated);
+    if (resourceCount != WdfCmResourceListGetCount(ResourcesRaw))
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
     for (i = 0; i < resourceCount; i++) {
-        PCM_PARTIAL_RESOURCE_DESCRIPTOR desc =
-            WdfCmResourceListGetDescriptor(ResourcesTranslated, i);
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR raw = WdfCmResourceListGetDescriptor(ResourcesRaw, i);
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR desc = WdfCmResourceListGetDescriptor(ResourcesTranslated, i);
+        if (!desc || !raw) return STATUS_DEVICE_CONFIGURATION_ERROR;
 
-        if (!desc)
-            continue;
-
-        if (desc->Type == CmResourceTypeMemory) {
-            if (memoryBarIndex == 0) {
-                /* BAR0: HD Audio Controller Registers */
-                ctx->Bar0PhysicalAddress = desc->u.Memory.Start;
-                ctx->Bar0Length = desc->u.Memory.Length;
-                ctx->Bar0VirtualAddress = MmMapIoSpace(desc->u.Memory.Start,
-                                                      desc->u.Memory.Length,
-                                                      MmNonCached);
-            } else if (memoryBarIndex == 1) {
-                /* BAR4: DSP Shim, Mailbox, and SRAM */
-                ctx->Bar4PhysicalAddress = desc->u.Memory.Start;
-                ctx->Bar4Length = desc->u.Memory.Length;
-                ctx->Bar4VirtualAddress = MmMapIoSpace(desc->u.Memory.Start,
-                                                      desc->u.Memory.Length,
-                                                      MmNonCached);
-            }
-            memoryBarIndex++;
+        if (raw->Type == CmResourceTypeMemory) {
+            PCM_PARTIAL_RESOURCE_DESCRIPTOR *target;
+            if (raw->u.Memory.Start.QuadPart == bar0Bus.QuadPart)
+                target = &bar0Resource;
+            else if (raw->u.Memory.Start.QuadPart == bar4Bus.QuadPart)
+                target = &bar4Resource;
+            else
+                continue;
+            if (*target || desc->Type != CmResourceTypeMemory || !desc->u.Memory.Length ||
+                raw->u.Memory.Length != desc->u.Memory.Length)
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+            *target = desc;
         } else if (desc->Type == CmResourceTypeInterrupt) {
             ctx->InterruptVector = desc->u.Interrupt.Vector;
             ctx->InterruptIrql = (KIRQL)desc->u.Interrupt.Level;
@@ -274,6 +267,16 @@ SofEvtDevicePrepareHardware(
         }
     }
 
+    if (!bar0Resource || !bar4Resource ||
+        bar0Resource->u.Memory.Start.QuadPart == bar4Resource->u.Memory.Start.QuadPart)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    ctx->Bar0PhysicalAddress = bar0Resource->u.Memory.Start;
+    ctx->Bar0Length = bar0Resource->u.Memory.Length;
+    ctx->Bar4PhysicalAddress = bar4Resource->u.Memory.Start;
+    ctx->Bar4Length = bar4Resource->u.Memory.Length;
+    ctx->Bar0VirtualAddress = MmMapIoSpace(ctx->Bar0PhysicalAddress, ctx->Bar0Length, MmNonCached);
+    ctx->Bar4VirtualAddress = MmMapIoSpace(ctx->Bar4PhysicalAddress, ctx->Bar4Length, MmNonCached);
+
     /* Require both mapped BAR windows before any register reads. Never
      * continue with half-initialized resources after MmMapIoSpace failure. */
     if (!ctx->Bar0VirtualAddress || !ctx->Bar4VirtualAddress ||
@@ -286,30 +289,14 @@ SofEvtDevicePrepareHardware(
     status = SofDiscoverHdaCaps(ctx);
     if (!NT_SUCCESS(status)) goto PreparationFailed;
 
-    /*
-     * Read codec wake/status without resetting HDA link or DSP state.
-     * Recovery from stuck Immediate Command Busy (ICB) must be a separate
-     * validated hardware operation, never part of PnP discovery.
-     */
-    if (ctx->Bar0VirtualAddress) {
-        /* The caller is still in resource discovery: no CRST writes. */
-        if (ctx->Bar0Length < SOF_HDA_WAKESTS + sizeof(USHORT) ||
-            ctx->Bar0Length < SOF_HDA_REG_ICS + sizeof(USHORT)) {
-            status = STATUS_INVALID_BUFFER_SIZE;
-            goto PreparationFailed;
-        }
-        if (readw((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_REG_ICS) & SOF_HDA_ICS_ICB)
-            SofLogBreadcrumb("[HDA] ICB busy during read-only discovery (no reset)\n");
-
-        USHORT wakests = readw((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_WAKESTS);
-        ctx->HdaCodecPresent = (wakests & SOF_HDA_WAKESTS_SDIN0) ? TRUE : FALSE;
-        ctx->IDispCodecPresent = (wakests & SOF_HDA_WAKESTS_SDIN2) ? TRUE : FALSE;
-        RtlStringCbPrintfA(msg, sizeof(msg),
-            "[9a] HDA Codec Probe: WAKESTS=0x%04X -> HdaCodecPresent=%s, IDispCodecPresent=%s\n",
-            wakests, ctx->HdaCodecPresent ? "TRUE" : "FALSE",
-            ctx->IDispCodecPresent ? "TRUE" : "FALSE");
-        SofLogBreadcrumb(msg);
+    /* Controller status is observed without CRST writes. Wake-status
+     * bits do not identify either ACPI peripheral on this board. */
+    if (ctx->Bar0Length < SOF_HDA_REG_ICS + sizeof(USHORT)) {
+        status = STATUS_INVALID_BUFFER_SIZE;
+        goto PreparationFailed;
     }
+    if (readw((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_REG_ICS) & SOF_HDA_ICS_ICB)
+        SofLogBreadcrumb("[HDA] ICB busy during read-only discovery\n");
 
     {
         ULONG romSts = (ctx->Bar4VirtualAddress && ctx->HwDesc) ? SofReadRomStatus(ctx) : 0;
@@ -329,11 +316,11 @@ SofEvtDevicePrepareHardware(
     status = SofIpcInitialize(ctx);
     if (!NT_SUCCESS(status)) goto PreparationFailed;
 
-    /* Initialize default audio control states (0 dB, unmuted) */
+    /* Start every endpoint muted. */
     for (ULONG ep = 0; ep < SOF_ENDPOINT_COUNT; ep++) {
         ctx->DefaultVolumeLevelDb[ep][0] = 0;
         ctx->DefaultVolumeLevelDb[ep][1] = 0;
-        ctx->DefaultMute[ep] = FALSE;
+        ctx->DefaultMute[ep] = TRUE;
     }
 
     /* Initialize display audio stream pointers and defaults */
@@ -351,116 +338,77 @@ SofEvtDevicePrepareHardware(
         NTSTATUS nhltStatus = SofNhltQueryAcpiTable(&nhltBuffer, &nhltSize);
         if (NT_SUCCESS(nhltStatus) && nhltBuffer != NULL) {
             nhltStatus = SofNhltParse(nhltBuffer, nhltSize, &ctx->NhltInfo);
-            if (!NT_SUCCESS(nhltStatus)) {
-                RtlZeroMemory(&ctx->NhltInfo, sizeof(ctx->NhltInfo));
-                SofLogBreadcrumb("[NHLT] Invalid table; no endpoint evidence accepted\n");
+            if (NT_SUCCESS(nhltStatus)) {
+                ctx->NhltTable = nhltBuffer;
+                ctx->NhltTableSize = nhltSize;
+                RtlStringCbPrintfA(msg, sizeof(msg),
+                    "[NHLT] Valid ACPI table: %u endpoints (DMIC=%u, SSP=%u, SDW=%u)\n",
+                    ctx->NhltInfo.TotalEndpoints, ctx->NhltInfo.DmicEndpointsCount,
+                    ctx->NhltInfo.SspEndpointsCount, ctx->NhltInfo.SdwEndpointsCount);
+            } else {
+                SofNhltFreeAcpiTable(nhltBuffer);
+                RtlStringCbPrintfA(msg, sizeof(msg),
+                    "[NHLT] Invalid ACPI table: 0x%08x\n", nhltStatus);
             }
+        } else {
             RtlStringCbPrintfA(msg, sizeof(msg),
-                "[10] ACPI NHLT parsed: Endpoints=%u (DMIC=%u ch=%u, SSP=%u, SDW=%u)\n",
-                ctx->NhltInfo.TotalEndpoints,
-                ctx->NhltInfo.DmicEndpointsCount,
-                ctx->NhltInfo.Dmic.ChannelCount,
-                ctx->NhltInfo.SspEndpointsCount,
-                ctx->NhltInfo.SdwEndpointsCount);
-            SofLogBreadcrumb(msg);
-
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] ACPI NHLT parsed: Total Endpoints=%u, DMIC=%u (Channels=%u), SSP=%u, SDW=%u\n",
-                       ctx->NhltInfo.TotalEndpoints,
-                       ctx->NhltInfo.DmicEndpointsCount,
-                       ctx->NhltInfo.Dmic.ChannelCount,
-                       ctx->NhltInfo.SspEndpointsCount,
-                       ctx->NhltInfo.SdwEndpointsCount);
-            SofNhltFreeAcpiTable(nhltBuffer);
-        } else {
-            SofLogBreadcrumb("[10] ACPI NHLT table not present (no endpoint evidence)\n");
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] ACPI NHLT table not found; no endpoint evidence.\n");
+                "[NHLT] ACPI table unavailable: 0x%08x\n", nhltStatus);
         }
+        SofLogBreadcrumb(msg);
     }
 
-    /* Enumerate SoundWire child PDOs (e.g. SOUNDWIRE\SDCA_PERIPHERAL) */
-    status = SofSdwEnumerateChildren(ctx);
-    if (!NT_SUCCESS(status)) {
-        SofLogBreadcrumb("[SDW] SofSdwEnumerateChildren failed\n");
-    }
-
-    /*
-     * Query PortCls configuration from driver parameters registry.
-     * Missing settings leave optional endpoints and offload disabled.
-     */
-    ULONG armedTesting = 0;
-    ULONG enablePortCls = 0;
-    WDFKEY paramKey = NULL;
-    NTSTATUS regStatus = WdfDriverOpenParametersRegistryKey(
-        WdfGetDriver(),
-        KEY_READ | KEY_WRITE,
-        WDF_NO_OBJECT_ATTRIBUTES,
-        &paramKey
-    );
-    if (NT_SUCCESS(regStatus)) {
-        UNICODE_STRING valArmed;
-        UNICODE_STRING valPortCls;
-        UNICODE_STRING valUsbOffload;
-        ULONG enableUsbOffload = 0;
-        RtlInitUnicodeString(&valArmed, L"ArmedTesting");
-        RtlInitUnicodeString(&valPortCls, L"EnablePortCls");
-        RtlInitUnicodeString(&valUsbOffload, L"EnableUsbOffload");
-        WdfRegistryQueryULong(paramKey, &valArmed, &armedTesting);
-        WdfRegistryQueryULong(paramKey, &valPortCls, &enablePortCls);
-        WdfRegistryQueryULong(paramKey, &valUsbOffload, &enableUsbOffload);
-        ctx->EnableUsbOffload = enableUsbOffload;
-        WdfRegistryClose(paramKey);
-    } else {
-        ctx->EnableUsbOffload = 0;
-    }
-
-    ctx->ArmedTesting = armedTesting;
-    ctx->EnablePortCls = enablePortCls;
-    SofUaolInit(ctx);
-
-    char safeMsg[160];
-    RtlStringCbPrintfA(safeMsg, sizeof(safeMsg),
-        "[10b] Safety Guards: CanaryArmed=%u, SafeBootPolicy=%u, EnablePortCls=%u\n",
-        g_CanaryArmed ? 1 : 0, g_SafeBootPolicy, enablePortCls);
-    SofLogBreadcrumb(safeMsg);
-    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "%s", safeMsg);
-
-    if (g_CanaryArmed && enablePortCls != 0) {
-        SofLogBreadcrumb("[10b] Canary Armed & PortCls enabled: Registering PortCls WaveRT Subdevices...\n");
-        status = SofRegisterPortClsSubdevices(Device, ctx);
-        if (!NT_SUCCESS(status)) {
-            char smsg[128];
-            RtlStringCbPrintfA(smsg, sizeof(smsg),
-                "[10b] SofRegisterPortClsSubdevices failed: 0x%08x -> falling back to Safe Mode\n", status);
-            SofLogBreadcrumb(smsg);
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "%s", smsg);
-            ctx->PortClsRegistered = FALSE;
-            status = STATUS_SUCCESS; /* Soft assert: ensure device and boot never fail */
-        } else {
-            ctx->PortClsRegistered = TRUE;
-            SofLogBreadcrumb("[10b] SofRegisterPortClsSubdevices succeeded (Wave subdevice active)!\n");
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] PortCls WaveRT subdevice registered successfully.\n");
+    /* These settings request an audio adapter after firmware boot. */
+    ctx->ArmedTesting = 0;
+    ctx->EnablePortCls = 0;
+    {
+        WDFKEY paramKey = NULL;
+        if (NT_SUCCESS(WdfDriverOpenParametersRegistryKey(WdfGetDriver(), KEY_READ,
+                WDF_NO_OBJECT_ATTRIBUTES, &paramKey))) {
+            UNICODE_STRING valArmed, valPortCls;
+            RtlInitUnicodeString(&valArmed, L"ArmedTesting");
+            RtlInitUnicodeString(&valPortCls, L"EnablePortCls");
+            WdfRegistryQueryULong(paramKey, &valArmed, &ctx->ArmedTesting);
+            WdfRegistryQueryULong(paramKey, &valPortCls, &ctx->EnablePortCls);
+            WdfRegistryClose(paramKey);
         }
-    } else {
-        SofLogBreadcrumb("[10b] Safe Mode active: PortCls subdevices registration bypassed.\n");
-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                   "[SOF] Safe Mode: PortCls registration bypassed (CanaryArmed=%u, EnablePortCls=%u).\n",
-                   g_CanaryArmed ? 1 : 0, enablePortCls);
-        ctx->PortClsRegistered = FALSE;
     }
 
     ctx->HardwarePrepared = TRUE;
-    SofLogBreadcrumb("[10a] Hardware prepared successfully (BAR0 & BAR4 mapped, IPC & NHLT ready)!\n");
+    SofLogBreadcrumb("[10a] BAR resources and host IPC state prepared\n");
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-               "[SOF] Hardware preparation completed successfully.\n");
+               "[SOF] Mapped hardware resources.\n");
     return STATUS_SUCCESS;
 
 PreparationFailed:
     /* Only BARs were acquired before these failure points; never leak them
      * if WDF does not deliver ReleaseHardware for failed preparation. */
     SofUnmapFailedPreparedBars(ctx);
+    return status;
+}
+
+/* Continue quiescing other endpoints after a failure. Report the first error
+ * and preserve any buffers which WaveRT could not prove safe to release. */
+static NTSTATUS SofQuiesceDeviceStreams(PSOF_DEVICE_CONTEXT Ctx, BOOLEAN Release)
+{
+    PVOID *slots[] = {
+        &Ctx->PlaybackStream, &Ctx->CaptureStream,
+        &Ctx->HdmiStreams[0], &Ctx->HdmiStreams[1], &Ctx->HdmiStreams[2],
+        &Ctx->DmicStream, &Ctx->SspPlaybackStream, &Ctx->SspCaptureStream
+    };
+    NTSTATUS status = STATUS_SUCCESS;
+
+    for (ULONG i = 0; i < RTL_NUMBER_OF(slots); ++i) {
+        PSOF_WAVERT_STREAM stream = (PSOF_WAVERT_STREAM)*slots[i];
+        NTSTATUS streamStatus;
+        if (!stream) continue;
+        if (Release) {
+            streamStatus = SofWaveRtFreeStream(stream);
+            *slots[i] = NULL;
+        } else {
+            streamStatus = SofWaveRtSetState(stream, KSSTATE_PAUSE);
+        }
+        if (NT_SUCCESS(status) && !NT_SUCCESS(streamStatus)) status = streamStatus;
+    }
     return status;
 }
 
@@ -489,43 +437,20 @@ SofEvtDeviceReleaseHardware(
                "[SOF] SofEvtDeviceReleaseHardware starting...\n");
     SofLogBreadcrumb("[Teardown] SofEvtDeviceReleaseHardware starting...\n");
 
-    /* Unregister PortCls Subdevices */
-    SofUnregisterPortClsSubdevices(Device, ctx);
-    SofLogBreadcrumb("[Teardown] SofUnregisterPortClsSubdevices completed.\n");
-
-    /* Free active audio streams */
-    if (ctx->PlaybackStream != NULL) {
-        SofWaveRtFreeStream((PSOF_WAVERT_STREAM)ctx->PlaybackStream);
-        ctx->PlaybackStream = NULL;
+    NTSTATUS status = SofUnregisterPortClsSubdevices(Device, ctx);
+    NTSTATUS streamStatus = SofQuiesceDeviceStreams(ctx, TRUE);
+    if (NT_SUCCESS(status)) status = streamStatus;
+    if (ctx->DspNeedsPowerDown) {
+        SofIpcDisableInterrupts(ctx);
+        KeFlushQueuedDpcs();
+        NTSTATUS powerStatus = SofPowerDownDsp(ctx);
+        if (NT_SUCCESS(status)) status = powerStatus;
     }
-    if (ctx->CaptureStream != NULL) {
-        SofWaveRtFreeStream((PSOF_WAVERT_STREAM)ctx->CaptureStream);
-        ctx->CaptureStream = NULL;
-    }
-    for (ULONG i = 0; i < 3; i++) {
-        if (ctx->HdmiStreams[i] != NULL) {
-            SofWaveRtFreeStream((PSOF_WAVERT_STREAM)ctx->HdmiStreams[i]);
-            ctx->HdmiStreams[i] = NULL;
-        }
-    }
-    if (ctx->DmicStream != NULL) {
-        SofWaveRtFreeStream((PSOF_WAVERT_STREAM)ctx->DmicStream);
-        ctx->DmicStream = NULL;
-    }
-    if (ctx->SspPlaybackStream != NULL) {
-        SofWaveRtFreeStream((PSOF_WAVERT_STREAM)ctx->SspPlaybackStream);
-        ctx->SspPlaybackStream = NULL;
-    }
-    if (ctx->SspCaptureStream != NULL) {
-        SofWaveRtFreeStream((PSOF_WAVERT_STREAM)ctx->SspCaptureStream);
-        ctx->SspCaptureStream = NULL;
-    }
-
-    /* Cleanup IPC resources */
     SofIpcCleanup(ctx);
-
-    /* Power down DSP hardware cleanly */
-    SofPowerDownDsp(ctx);
+    SofNhltFreeAcpiTable(ctx->NhltTable);
+    ctx->NhltTable = NULL;
+    ctx->NhltTableSize = 0;
+    RtlZeroMemory(&ctx->NhltInfo, sizeof(ctx->NhltInfo));
 
     if (ctx->Bar0VirtualAddress) {
         MmUnmapIoSpace(ctx->Bar0VirtualAddress, ctx->Bar0Length);
@@ -543,11 +468,8 @@ SofEvtDeviceReleaseHardware(
                    "[SOF] BAR4 unmapped.\n");
     }
 
-    /* Uninitialize SoundWire controller context */
-    SofSdwUninitController(ctx);
-
     ctx->HardwarePrepared = FALSE;
-    return STATUS_SUCCESS;
+    return status;
 }
 
 /**
@@ -610,7 +532,6 @@ SofEvtDeviceD0Entry(
     bootStatus = SofStartFirmwareBoot(ctx, NULL);
     if (!NT_SUCCESS(bootStatus)) {
         SofLogBreadcrumb("[Power] D0 entry aborted: firmware boot failed.\n");
-        SofIpcDisableInterrupts(ctx);
         return bootStatus;
     }
 
@@ -621,20 +542,18 @@ SofEvtDeviceD0Entry(
         SofIpcDisableInterrupts(ctx);
         return STATUS_DEVICE_NOT_READY;
     }
+
+    if (g_CanaryArmed && ctx->EnablePortCls != 0) {
+        NTSTATUS portStatus = SofRegisterPortClsSubdevices(Device, ctx);
+        if (!NT_SUCCESS(portStatus)) {
+            SofLogBreadcrumb("[Power] Requested PortCls registration failed.\n");
+            SofIpcDisableInterrupts(ctx);
+            NTSTATUS powerStatus = SofPowerDownDsp(ctx);
+            return NT_SUCCESS(powerStatus) ? portStatus : powerStatus;
+        }
+    }
     ctx->CurrentPowerState = PowerDeviceD0;
-    SofLogBreadcrumb("[Power] Firmware ready; audio graph and codec readiness are separate.\n");
-
-    /* Immediately check and report jack presence on D0 entry */
-    if (ctx->PortClsRegistered && ctx->PortEvents != NULL) {
-        SofCheckAndNotifyJackPresence(ctx);
-    }
-
-    /* Start / re-arm Jack Poll Timer (1000ms periodic) */
-    if (ctx->PortClsRegistered && ctx->PortEvents != NULL && ctx->JackPollTimer) {
-        InterlockedExchange(&ctx->JackPolling, TRUE);
-        WdfTimerStart(ctx->JackPollTimer, WDF_REL_TIMEOUT_IN_MS(1000));
-        SofLogBreadcrumb("[Jack] Started JackPollTimer (1000ms periodic)\n");
-    }
+    SofLogBreadcrumb("[Power] DSP firmware reported FW_READY.\n");
 
     /* Start Watchdog Health Timer (10s countdown to confirm healthy D0 uptime) */
     if (ctx->WatchdogHealthTimer) {
@@ -686,7 +605,7 @@ SofEvtDeviceD0Exit(
 )
 {
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
-    if (!SofHardwareDevelopmentAllowed()) return STATUS_SUCCESS;
+    if (!SofHardwareDevelopmentAllowed() || !ctx->DspNeedsPowerDown) return STATUS_SUCCESS;
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] EvtDeviceD0Exit: Transitioning from D0 to Target State %d\n",
@@ -718,39 +637,7 @@ SofEvtDeviceD0Exit(
         }
     }
 
-    /* Pause any active streams */
-    if (ctx->PlaybackStream != NULL) {
-        SofWaveRtSetState((PSOF_WAVERT_STREAM)ctx->PlaybackStream, KSSTATE_PAUSE);
-    }
-    if (ctx->CaptureStream != NULL) {
-        SofWaveRtSetState((PSOF_WAVERT_STREAM)ctx->CaptureStream, KSSTATE_PAUSE);
-    }
-    for (ULONG i = 0; i < 3; i++) {
-        if (ctx->HdmiStreams[i] != NULL) {
-            SofWaveRtSetState((PSOF_WAVERT_STREAM)ctx->HdmiStreams[i], KSSTATE_PAUSE);
-        }
-    }
-    if (ctx->DmicStream != NULL) {
-        SofWaveRtSetState((PSOF_WAVERT_STREAM)ctx->DmicStream, KSSTATE_PAUSE);
-    }
-    if (ctx->SspPlaybackStream != NULL) {
-        SofWaveRtSetState((PSOF_WAVERT_STREAM)ctx->SspPlaybackStream, KSSTATE_PAUSE);
-    }
-    if (ctx->SspCaptureStream != NULL) {
-        SofWaveRtSetState((PSOF_WAVERT_STREAM)ctx->SspCaptureStream, KSSTATE_PAUSE);
-    }
-
-    /* Put HDA Codec to D3 to conserve power (Display Audio is power-managed by Intel Graphics) */
-    if (ctx->HdaCodecPresent) {
-        ULONG dummy;
-        SofHdaSendVerb(ctx, HDA_VERB(0, 0x01, HDA_VERB_SET_POWER_STATE, 0x03), &dummy);
-        SofLogBreadcrumb("[Power] HDA Codec set to D3\n");
-    }
-
-    /* Release / suspend USB Audio Offload */
-    if (ctx->EnableUsbOffload) {
-        SofUsbOffloadRelease(ctx);
-    }
+    NTSTATUS streamStatus = SofQuiesceDeviceStreams(ctx, FALSE);
 
     /* Do not access the inherited Meteor Lake D0i3 register on Pujjo.
      * Invalidate the firmware session and wake waiters before power loss. */
@@ -765,12 +652,13 @@ SofEvtDeviceD0Exit(
         KeReleaseSpinLock(&ctx->IpcLock, irql);
         ctx->CurrentPowerState = PowerDeviceUnspecified;
         SofIpcDisableInterrupts(ctx);
+        KeFlushQueuedDpcs();
         powerStatus = SofPowerDownDsp(ctx);
         if (!NT_SUCCESS(powerStatus)) return powerStatus;
     }
     /* WDF_POWER_DEVICE_STATE is not DEVICE_POWER_STATE. Resume remains locked. */
     ctx->CurrentPowerState = PowerDeviceUnspecified;
-    return STATUS_SUCCESS;
+    return streamStatus;
 }
 
 /**

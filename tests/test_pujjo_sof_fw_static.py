@@ -11,9 +11,11 @@ proj=(p/'sof_dsp.vcxproj').read_text()
 assert '#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)' in loader
 assert '#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)' in device
 assert 'return STATUS_NOT_SUPPORTED' in loader and 'return STATUS_NOT_SUPPORTED' in device
-assert 'Ctx->DeviceId == 0x54C8' in loader
+assert 'Ctx->VendorId != 0x8086 || Ctx->DeviceId != 0x54C8' in loader
 assert 'PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED' in loader
 assert 'sof-adl-n.ri' in loader and 'sof-ipc4' in loader
+assert 'sof-tgl.ri' not in loader and 'defaultPath' not in loader
+assert 'BCryptHash(' in loader and 'STATUS_INVALID_IMAGE_HASH' in loader
 assert 'sof-tgl.ri' not in policy
 assert 'sof-ipc4/adl-n/intel-signed/sof-adl-n.ri' in policy
 assert 'sof/intel-signed/sof-adl-n.ri' in policy

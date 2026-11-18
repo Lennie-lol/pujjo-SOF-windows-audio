@@ -145,6 +145,9 @@ typedef struct _SOF_WAVERT_STREAM {
     SOF_DMA_BUFFER      RingAllocation;
     SOF_DMA_BUFFER      BdlAllocation;
     BOOLEAN             DescriptorPublished;
+    BOOLEAN             DescriptorReserved;
+    ULONG               BdlPeriodCount;
+    volatile LONG       DmaFaulted;
 
     /** @brief User-mode virtual mapping address in Windows Audio Service. */
     PVOID               UserMapping;
@@ -321,7 +324,7 @@ VOID SofWaveRtSignalNotification(
  *
  * @param[in] Stream Pointer to stream instance.
  */
-VOID SofWaveRtConfigureHdaStream(
+NTSTATUS SofWaveRtConfigureHdaStream(
     _In_ PSOF_WAVERT_STREAM Stream
 );
 
@@ -330,7 +333,7 @@ VOID SofWaveRtConfigureHdaStream(
  *
  * @param[in] Stream Pointer to stream instance.
  */
-VOID SofWaveRtStartHdaStream(
+NTSTATUS SofWaveRtStartHdaStream(
     _In_ PSOF_WAVERT_STREAM Stream
 );
 
@@ -339,7 +342,7 @@ VOID SofWaveRtStartHdaStream(
  *
  * @param[in] Stream Pointer to stream instance.
  */
-VOID SofWaveRtStopHdaStream(
+NTSTATUS SofWaveRtStopHdaStream(
     _In_ PSOF_WAVERT_STREAM Stream
 );
 
@@ -348,7 +351,7 @@ VOID SofWaveRtStopHdaStream(
  *
  * @param[in] Stream Pointer to stream instance.
  */
-VOID SofWaveRtResetHdaStream(
+NTSTATUS SofWaveRtResetHdaStream(
     _In_ PSOF_WAVERT_STREAM Stream
 );
 

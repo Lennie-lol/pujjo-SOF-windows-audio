@@ -192,8 +192,33 @@ static void transaction_tests(void)
     assert(t.state==PJ_TX_FAULTED);
 #endif
 }
+static void test_large_reply(void)
+{
+    pj_ipc4_packet p = {0};
+    PJ_DWORD size = 4242;
+    PJ_WORD version[4] = {0};
+    const PJ_BYTE config[] = {
+        9,0,0,0, 4,0,0,0, 10,0,0,0,   /* other tuple */
+        0,0,0,0, 8,0,0,0, 2,0,12,0,0,0,1,0
+    };
+    assert(pj_ipc4_large_config_get(0u,0u,7u,4096u,&p)==PJ_IPC4_VALID);
+    assert(p.primary==0x43000000u && p.extension==0x20701000u && p.payload_bytes==0);
+    assert(pj_ipc4_large_reply_size(p.extension,0x3070001cu,4096u,&size)==PJ_IPC4_VALID);
+    assert(size==sizeof(config));
+    assert(pj_ipc4_large_reply_size(p.extension,0x2070001cu,4096u,&size)==PJ_IPC4_INVALID_HEADER);
+    assert(pj_ipc4_large_reply_size(p.extension,0x3080001cu,4096u,&size)==PJ_IPC4_INVALID_HEADER);
+    assert(pj_ipc4_large_reply_size(p.extension,0x30701001u,4096u,&size)==PJ_IPC4_BUFFER_SMALL);
+    assert(size==sizeof(config));
+    assert(pj_ipc4_fw_version(config,size,version)==PJ_IPC4_VALID);
+    assert(version[0]==2u && version[1]==12u && version[2]==0u && version[3]==1u);
+    assert(pj_ipc4_fw_version(config,size-1u,version)==PJ_IPC4_TRUNCATED);
+    assert(pj_ipc4_fw_version(config,12u,version)==PJ_IPC4_INVALID_HEADER);
+    assert(version[0]==2u && version[1]==12u && version[2]==0u && version[3]==1u);
+}
+
 int main(void)
 {
+    test_large_reply();
     protocol_tests();graph_tests();config_tests();transaction_tests();
     puts("PASS: IPC4 protocol frames and fail-closed transaction model");
     return 0;

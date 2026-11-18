@@ -186,6 +186,10 @@ SofIpcEnableInterrupts(
                      Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone,
                      Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone);
 
+    if (!Ctx->HwDesc->IsAce && pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPIC, 4u))
+        SofDspUpdateBits(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPIC,
+                         HDA_DSP_IPC_INTERRUPT, HDA_DSP_IPC_INTERRUPT);
+
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] IPC interrupts enabled (IsAce=%d, CTL offset 0x%x).\n",
                Ctx->HwDesc->IsAce, Ctx->HwDesc->HipcCtl);
@@ -207,6 +211,10 @@ SofIpcDisableInterrupts(
     if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u))
         return;
+
+    if (!Ctx->HwDesc->IsAce && pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPIC, 4u))
+        SofDspUpdateBits(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPIC,
+                         HDA_DSP_IPC_INTERRUPT, 0);
 
     /*
      * Channel-Level IPC Interrupt Disable:
@@ -632,6 +640,13 @@ SofIpcIsrCheck(
         /* Return FALSE if register is unmapped or IPC bit is not asserted. */
         if (irqSts == 0xFFFFFFFF || !(irqSts & MTL_DSP_IRQSTS_IPC))
             return FALSE;
+    } else if (!Ctx->HwDesc->IsAce) {
+        ULONG irqSts;
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPIS, 4u))
+            return FALSE;
+        irqSts = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPIS);
+        if (irqSts == MAXULONG || !(irqSts & HDA_DSP_IPC_INTERRUPT))
+            return FALSE;
     }
 
     /* Check whether DSP raised an incoming message (TDR BUSY) or acknowledged our command (IDA DONE) */
@@ -756,11 +771,30 @@ SofIpcDpcHandler(
                 pj_ipc4_reply_matches(Ctx->IpcRequestPrimary, primary)) {
                 Ctx->PendingReply.Primary = primary;
                 Ctx->PendingReply.Extension = extension;
-                /* Current commands need only headers; do not infer a payload
-                 * length from the size of the mapped mailbox. */
                 Ctx->PendingReply.Payload = NULL;
                 Ctx->PendingReply.PayloadSize = 0;
-                Ctx->IpcReplyReady = TRUE;
+                if (tdd == MAXULONG) {
+                    Ctx->IpcFaulted = TRUE;
+                } else if (Ctx->IpcReplyCapacity && !(primary & SOF_IPC4_REPLY_STATUS)) {
+                    PJ_DWORD bytes = 0;
+                    if (pj_ipc4_large_reply_size(Ctx->IpcRequestExtension, tdd,
+                            Ctx->IpcReplyCapacity, &bytes) != PJ_IPC4_VALID) {
+                        Ctx->IpcFaulted = TRUE;
+                    } else {
+                        /* The sender validated the entire read window before
+                         * ringing the doorbell. Copy only the declared bytes. */
+                        PUCHAR mailbox = (PUCHAR)Ctx->Bar4VirtualAddress +
+                                         Ctx->HwDesc->MailboxUplinkOffset;
+                        PUCHAR buffer = (PUCHAR)Ctx->ReplyBuffer;
+                        for (ULONG i = 0; i < bytes; i += sizeof(ULONG)) {
+                            ULONG word = READ_REGISTER_ULONG((PULONG)(mailbox + i));
+                            for (ULONG n = 0; n < sizeof(ULONG) && i + n < bytes; ++n)
+                                buffer[i + n] = (UCHAR)(word >> (n * 8u));
+                        }
+                        Ctx->PendingReply.PayloadSize = bytes;
+                    }
+                }
+                Ctx->IpcReplyReady = !Ctx->IpcFaulted;
                 signalReply = TRUE;
             }
             KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
@@ -901,7 +935,7 @@ static NTSTATUS
 SofIpcSendWhilePowered(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ PSOF_IPC_MESSAGE Msg,
-    _Out_opt_ PSOF_IPC_MESSAGE Reply,
+    _Inout_opt_ PSOF_IPC_MESSAGE Reply,
     _In_ ULONG TimeoutMs
 )
 {
@@ -911,6 +945,7 @@ SofIpcSendWhilePowered(
     ULONG replyPrimary;
     ULONG replyExtension;
     ULONG hostDoorbell;
+    ULONG capacity = Reply ? Reply->PayloadSize : 0;
 
     if (!Ctx || !Msg || TimeoutMs == 0 || TimeoutMs > 60000)
         return STATUS_INVALID_PARAMETER;
@@ -922,10 +957,21 @@ SofIpcSendWhilePowered(
     if ((Msg->Primary & PJ_IPC4_RESERVED_MASK) != 0u ||
         pj_ipc4_is_reply(Msg->Primary) || pj_ipc4_is_notification(Msg->Primary))
         return STATUS_INVALID_PARAMETER;
-    /* Existing callers request headers only. Until response lengths are
-     * verified, refuse payload-bearing replies before MMIO. */
-    if (Reply && (Reply->Payload || Reply->PayloadSize != 0))
-        return STATUS_NOT_SUPPORTED;
+    /* This transport implements single-block LARGE_CONFIG_GET payloads only. */
+    if (Reply && ((capacity != 0) != (Reply->Payload != NULL)))
+        return STATUS_INVALID_PARAMETER;
+    if (capacity) {
+        PJ_DWORD ignored;
+        if ((Msg->Primary & PJ_IPC4_CORRELATION_MASK) != PJ_IPC4_MODULE_LARGE_GET ||
+            Msg->PayloadSize || capacity > Ctx->ReplyBufferSize ||
+            pj_ipc4_large_reply_size(Msg->Extension, Msg->Extension | (1u << 28),
+                capacity, &ignored) != PJ_IPC4_VALID)
+            return STATUS_INVALID_PARAMETER;
+        if (((capacity + 3u) & ~3u) > Ctx->HwDesc->MailboxUplinkSize ||
+            !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->MailboxUplinkOffset,
+                (capacity + 3u) & ~3u))
+            return STATUS_INVALID_BUFFER_SIZE;
+    }
     if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdr, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdd, 4u))
         return STATUS_INVALID_BUFFER_SIZE;
@@ -969,6 +1015,8 @@ SofIpcSendWhilePowered(
     Ctx->IpcTxBusy = TRUE;
     Ctx->IpcReplyReady = FALSE;
     Ctx->IpcRequestPrimary = Msg->Primary;
+    Ctx->IpcRequestExtension = Msg->Extension;
+    Ctx->IpcReplyCapacity = capacity;
     RtlZeroMemory(&Ctx->PendingReply, sizeof(Ctx->PendingReply));
     KeResetEvent(&Ctx->IpcReplyEvent);
 
@@ -1039,7 +1087,9 @@ SofIpcSendWhilePowered(
     if (Reply) {
         Reply->Primary = replyPrimary;
         Reply->Extension = replyExtension;
-        Reply->PayloadSize = 0;
+        Reply->PayloadSize = Ctx->PendingReply.PayloadSize;
+        if (Reply->PayloadSize)
+            RtlCopyMemory(Reply->Payload, Ctx->ReplyBuffer, Reply->PayloadSize);
     }
     Ctx->IpcReplyReady = FALSE;
     Ctx->IpcTxBusy = FALSE;
@@ -1058,7 +1108,7 @@ NTSTATUS
 SofIpcSendMessage(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ PSOF_IPC_MESSAGE Msg,
-    _Out_opt_ PSOF_IPC_MESSAGE Reply,
+    _Inout_opt_ PSOF_IPC_MESSAGE Reply,
     _In_ ULONG TimeoutMs
 )
 {

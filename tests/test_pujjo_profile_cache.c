@@ -18,6 +18,7 @@ int main(void) {
     pj_firmware_config actual={0},expected={0},sentinel={11,22,33,44};
     wr32(image,0x31454124u);wr32(image+4u,EXT);wr32(image+FW,0x314d4124u);wr32(image+FW+4u,52u);wr32(image+FW+36u,2u);
     wr32(image+M0,0x454d4124u);wr32(image+M1,0x454d4124u);memcpy(image+M1+12u,uuid,16u);
+    wr32(image+M1+28u,0x20u);
     wr16(image+M1+70u,2u);wr32(image+M1+72u,1u);wr16(image+M1+76u,12u);
     record(image+C0,280u,384u,384u,7363u);record(image+C1,512u,192u,192u,4000u);
     assert(pj_firmware_load_profile(image,sizeof(image),uuid,&p)==PJ_CATALOG_OK);
@@ -47,6 +48,18 @@ int main(void) {
     assert(pj_firmware_load_profile(image,sizeof(image),uuid,&p)==PJ_CATALOG_OK);
     memset(image,0,sizeof(image)); /* cached data survives firmware release */
     assert(pj_firmware_profile_config(&p,384u,384u,&actual)==PJ_CATALOG_OK && actual.cpc==7363u);
+    PJ_DWORD pages=0;
+    assert(pj_firmware_plan_ll(&p,384u,384u,&actual,&pages)==PJ_CATALOG_OK);
+    assert(pages==2u && actual.cpc==7363u && actual.instance_bytes==280u);
+    assert(pj_firmware_plan_ll(&p,192u,192u,&actual,&pages)==PJ_CATALOG_OK);
+    assert(pages==1u && actual.cpc==0u && actual.instance_bytes==280u);
+    p.configs[1].cpc=8000u;
+    assert(pj_firmware_plan_ll(&p,384u,384u,&actual,&pages)==PJ_CATALOG_OK && actual.cpc==8000u);
+    p.configs[1].instance_bytes=500u;
+    assert(pj_firmware_plan_ll(&p,384u,384u,&actual,&pages)==PJ_CATALOG_AMBIGUOUS);
+    assert(pj_firmware_plan_ll(&p,192u,192u,&actual,&pages)==PJ_CATALOG_NOT_FOUND);
+    assert(pj_firmware_plan_ll(&p,10000u,10000u,&actual,&pages)==PJ_CATALOG_NOT_FOUND);
+    assert(actual.cpc==8000u && pages==2u);
     actual=sentinel;p.count=65u;
     assert(pj_firmware_profile_config(&p,384u,384u,&actual)==PJ_CATALOG_INVALID_IMAGE);
     assert(memcmp(&actual,&sentinel,sizeof(actual))==0);

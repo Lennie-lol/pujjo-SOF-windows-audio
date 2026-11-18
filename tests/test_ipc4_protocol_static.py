@@ -64,7 +64,10 @@ for function,encoder in (
 ):
     body=topo.split('NTSTATUS '+function+'(',1)[1].split('#else',1)[0]
     assert '#ifdef _KERNEL_MODE' in body
-    assert body.index(encoder) < body.index('return SofIpc4SendGraphPacket(Ctx, result, &packet);')
+    assert body.index(encoder) < body.index('SofIpc4SendGraphPacket(Ctx, result, &packet);')
+    if function == 'SofIpc4InitModuleInstance':
+        assert body.index('pj_firmware_plan_ll(') < body.index(encoder)
+        assert body.index('SofIpc4SendGraphPacket(') < body.rindex('ExFreePoolWithTag(storage, SOF_DEVICE_TAG);') < body.index('return status;')
     assert 'return STATUS_SUCCESS' not in body
 print('PASS: WDK graph commands use tested encoders and propagate real transport status')
 
@@ -74,11 +77,21 @@ allocator=topo.split('NTSTATUS SofIpc4AllocInstanceId(',1)[1].split('VOID SofIpc
 assert '*OutInstanceId = 0xFFFFFFFFu;' in allocator
 assert 'if (!mask) return STATUS_NOT_SUPPORTED;' in allocator
 assert allocator.index('KeAcquireSpinLock') < allocator.index('*mask |=') < allocator.index('KeReleaseSpinLock')
-for name in ('Playback','Capture','Hdmi','Ssp','Dmic','Alh'):
+topo_header=(root/'src/driver/Topo.h').read_text()
+for name in ('Ssp','Dmic'):
+    symbol='NTSTATUS SofIpc4Create'+name+'Pipeline('
+    for interface in (topo,topo_header):
+        signature=interface.split(symbol,1)[1].split('\n)',1)[0]
+        assert '_In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,' in signature
+    body=topo.split('NTSTATUS SofIpc4Create'+name+'Pipeline(',1)[1].split('\n}',1)[0]
+    assert 'return SofIpc4CreateNhltPipeline(' in body
+for name in ('Playback','Capture','Hdmi','Nhlt','Alh'):
     body=topo.split('NTSTATUS SofIpc4Create'+name+'Pipeline(',1)[1].split('\n}',1)[0]
     assert body.count('status = SofIpc4AllocInstanceId(')==3
     for part in body.split('status = SofIpc4AllocInstanceId(')[1:]:
         assert part.split(';',1)[1].lstrip().startswith('if (!NT_SUCCESS(status)) goto cleanup;')
+    paused=body[body.index('SOF_IPC4_PIPE_PAUSED'):body.index('*OutHostInst = hostInst')]
+    assert 'if (!NT_SUCCESS(status))' in paused and 'goto cleanup;' in paused
     cleanup=body.split('cleanup:',1)[1]
     assert cleanup.index('if (NT_SUCCESS(SofIpc4DeletePipeline') < cleanup.index('SofIpc4FreeInstanceId')
     assert cleanup.count('SofIpc4FreeInstanceId(')==3

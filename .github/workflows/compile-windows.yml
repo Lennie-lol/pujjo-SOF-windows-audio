@@ -105,10 +105,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           foreach ($case in @(
-            @{ Project='sof_dsp'; Define='PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT' },
-            @{ Project='pujjo_rt5682_probe'; Define='PJ5682S_ENABLE_READONLY_PROBE' }
+            @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED' },
+            @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_READONLY_PROBE' }
           )) {
-            $env:CL = "/D$($case.Define)"
+            $env:CL = $case.Defines
             $objects = Join-Path $env:RUNNER_TEMP ("compile-only-" + $case.Project)
             msbuild "$($case.Project).vcxproj" /t:ClCompile /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 "/p:IntDir=$objects/" /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:minimal
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

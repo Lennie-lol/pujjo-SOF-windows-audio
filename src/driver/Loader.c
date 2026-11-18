@@ -25,6 +25,9 @@
 #ifdef _KERNEL_MODE
 #include "Device.h"
 #include <ntstrsafe.h>
+#if defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) && defined(PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED)
+#include <bcrypt.h>
+#endif
 void SofLogBreadcrumb(const char* text);
 #else
 #include <windows.h>
@@ -501,6 +504,7 @@ SofPowerDownDsp(
             SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg));
         SofLogBreadcrumb(bmsg);
     }
+    Ctx->DspNeedsPowerDown = FALSE;
     return STATUS_SUCCESS;
 }
 
@@ -791,6 +795,183 @@ SofConfigureCodeLoaderDma(
     return STATUS_SUCCESS;
 }
 
+#if defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) && defined(PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED)
+static NTSTATUS SofVerifyAdlNIpc4Candidate(PUCHAR Image, ULONG ImageBytes)
+{
+    /* sof-bin v2.12.x/sof-ipc4-v2.12/adl-n/intel-signed/sof-adl-n.ri
+     * Git blob 47bb69dd2e22435e6da37ccee17103e0f6452638. The digest
+     * pins the artifact. The hardware ROM still owns signature acceptance. */
+    static const UCHAR expected[32] = {
+        0xbc,0x83,0xcf,0xfa,0x1b,0xb5,0xa4,0xa8,0xda,0x24,0xbb,0xc7,0xbb,0x70,0x40,0xbd,
+        0x74,0x4f,0x1e,0x0c,0x63,0xe3,0xd1,0x61,0x51,0xd1,0x76,0x9a,0xc8,0xae,0x82,0x14
+    };
+    UCHAR digest[sizeof(expected)];
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    NTSTATUS status;
+
+    if (ImageBytes != 707036u) return STATUS_INVALID_IMAGE_FORMAT;
+    status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0);
+    if (!NT_SUCCESS(status)) return status;
+    status = BCryptHash(algorithm, NULL, 0, Image, ImageBytes, digest, sizeof(digest));
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (!NT_SUCCESS(status)) return status;
+    return RtlEqualMemory(expected, digest, sizeof(digest)) ?
+           STATUS_SUCCESS : STATUS_INVALID_IMAGE_HASH;
+}
+#endif
+
+#ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT
+/* cAVS 2.5 ICCMAX boot workaround, as used by the Linux ADL-N
+ * descriptor. A temporary capture descriptor keeps the platform guardband
+ * active during boot. It is unrelated to microphone routing. */
+#define SOF_ADLN_LTRP_OFFSET 0x1048u
+#define SOF_ADLN_LTRP_GUARDBAND_MASK 0x3fu
+#define SOF_ADLN_LTRP_BOOT_GUARDBAND (95u & SOF_ADLN_LTRP_GUARDBAND_MASK)
+
+typedef struct _SOF_ICCMAX_DMA {
+    SOF_DMA_BUFFER Data;
+    SOF_DMA_BUFFER Bdl;
+    PUCHAR Registers;
+    PUCHAR Ppctl;
+    PUCHAR Ltrp;
+    UCHAR OriginalGuardband;
+    BOOLEAN OriginalDecoupled;
+    BOOLEAN Published;
+} SOF_ICCMAX_DMA;
+
+static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
+{
+    ULONG slot, ppctl, ctl;
+    UCHAR ltrp;
+    pj_dma_plan plan;
+    PSOF_INTEL_DSP_BDL bdl;
+    NTSTATUS status;
+    PUCHAR bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
+
+    if (!bar0 || Ctx->Bar0Length <= SOF_ADLN_LTRP_OFFSET ||
+        !pj_hda_stream_slot(Ctx->NumCaptureStreams, Ctx->NumPlaybackStreams, 1u, 0u,
+                            Ctx->Bar0Length, &slot) ||
+        !Ctx->PpCapOffset || Ctx->PpCapOffset > Ctx->Bar0Length ||
+        SOF_HDA_REG_PP_PPCTL + sizeof(ULONG) > Ctx->Bar0Length - Ctx->PpCapOffset)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+
+    Dma->Registers = bar0 + SOF_HDA_ADSP_LOADER_BASE + slot * SOF_HDA_ADSP_SD_ENTRY_SIZE;
+    Dma->Ppctl = bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL;
+    Dma->Ltrp = bar0 + SOF_ADLN_LTRP_OFFSET;
+    ppctl = readl(Dma->Ppctl);
+    ltrp = READ_REGISTER_UCHAR(Dma->Ltrp);
+    ctl = SofCodeLoaderReadControl(Dma->Registers);
+    if (ppctl == MAXULONG || ltrp == 0xffu || ctl == MAXULONG ||
+        (ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)) ||
+        readl(Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPL) != 0 ||
+        readl(Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPU) != 0)
+        return STATUS_DEVICE_BUSY;
+
+    status = SofAllocateDmaBuffer(Ctx, PAGE_SIZE, &Dma->Data);
+    if (!NT_SUCCESS(status)) return status;
+    status = SofAllocateDmaBuffer(Ctx, PAGE_SIZE, &Dma->Bdl);
+    if (!NT_SUCCESS(status)) return status;
+    if ((Dma->Bdl.PhysicalAddress.LowPart & 127u) ||
+        !pj_dma_plan_pair(Dma->Data.PhysicalAddress.LowPart,
+                          (ULONG)Dma->Data.PhysicalAddress.HighPart,
+                          PAGE_SIZE, PAGE_SIZE / 2u, &plan))
+        return STATUS_INVALID_BUFFER_SIZE;
+    bdl = Dma->Bdl.VirtualAddress;
+    bdl[0].AddrLow = plan.first.low;
+    bdl[0].AddrHigh = plan.first.high;
+    bdl[0].Size = plan.first.length;
+    bdl[1].AddrLow = plan.second.low;
+    bdl[1].AddrHigh = plan.second.high;
+    bdl[1].Size = plan.second.length;
+
+    Dma->OriginalGuardband = ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK;
+    Dma->OriginalDecoupled = (ppctl & 1u) != 0;
+    Dma->Published = TRUE;
+    writel(Dma->Bdl.PhysicalAddress.LowPart, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPL);
+    writel((ULONG)Dma->Bdl.PhysicalAddress.HighPart, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPU);
+    writel(PAGE_SIZE, Dma->Registers + SOF_HDA_ADSP_REG_SD_CBL);
+    writew(1, Dma->Registers + SOF_HDA_ADSP_REG_SD_LVI);
+    writel(ppctl | 1u, Dma->Ppctl);
+    WRITE_REGISTER_UCHAR(Dma->Ltrp,
+        (UCHAR)((ltrp & ~SOF_ADLN_LTRP_GUARDBAND_MASK) | SOF_ADLN_LTRP_BOOT_GUARDBAND));
+    ltrp = READ_REGISTER_UCHAR(Dma->Ltrp);
+    ppctl = readl(Dma->Ppctl);
+    if (ltrp == 0xffu || (ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK) != SOF_ADLN_LTRP_BOOT_GUARDBAND ||
+        ppctl == MAXULONG || !(ppctl & 1u))
+        return STATUS_DEVICE_NOT_READY;
+    SofCodeLoaderWriteControl(Dma->Registers, SOF_HDA_SD_CTL_DMA_START);
+    for (ULONG i = 0; i < 500u; ++i) {
+        ctl = SofCodeLoaderReadControl(Dma->Registers);
+        if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
+        if (ctl & SOF_HDA_SD_CTL_DMA_START) return STATUS_SUCCESS;
+        KeStallExecutionProcessor(10);
+    }
+    return STATUS_IO_TIMEOUT;
+}
+
+static NTSTATUS SofStopIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    if (Dma->Published) {
+        ULONG ctl = SofCodeLoaderReadControl(Dma->Registers), attempt;
+        ULONG ppctl;
+        UCHAR ltrp;
+        if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
+        SofCodeLoaderWriteControl(Dma->Registers, 0);
+        for (attempt = 0; attempt < 500u; ++attempt) {
+            ctl = SofCodeLoaderReadControl(Dma->Registers);
+            if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
+            if (!(ctl & SOF_HDA_SD_CTL_DMA_START)) break;
+            KeStallExecutionProcessor(10);
+        }
+        if (attempt == 500u) return STATUS_IO_TIMEOUT;
+        Dma->Published = FALSE;
+        writel(0, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPL);
+        writel(0, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPU);
+        WRITE_REGISTER_UCHAR(Dma->Registers + SOF_HDA_ADSP_REG_SD_STS, SOF_HDA_CL_DMA_SD_INT_MASK);
+        ppctl = readl(Dma->Ppctl);
+        if (ppctl != MAXULONG)
+            writel((ppctl & ~1u) | (Dma->OriginalDecoupled ? 1u : 0u), Dma->Ppctl);
+        ltrp = READ_REGISTER_UCHAR(Dma->Ltrp);
+        if (ltrp != 0xffu)
+            WRITE_REGISTER_UCHAR(Dma->Ltrp,
+                (UCHAR)((ltrp & ~SOF_ADLN_LTRP_GUARDBAND_MASK) | Dma->OriginalGuardband));
+        if (ppctl == MAXULONG || ltrp == 0xffu) status = STATUS_DEVICE_NOT_READY;
+    }
+    SofFreeDmaBuffer(Ctx, &Dma->Bdl);
+    SofFreeDmaBuffer(Ctx, &Dma->Data);
+    return status;
+}
+
+static NTSTATUS SofQueryBootedFirmwareVersion(PSOF_DEVICE_CONTEXT Ctx,
+                                             const SOF_FW_IMAGE_INFO *Info)
+{
+    pj_ipc4_packet packet;
+    SOF_IPC_MESSAGE request = {0}, reply = {0};
+    PJ_WORD version[4];
+    NTSTATUS status;
+
+    if (pj_ipc4_large_config_get(SOF_IPC4_MOD_INIT_BASEFW_MOD_ID,
+            SOF_IPC4_MOD_INIT_BASEFW_INSTANCE_ID, SOF_IPC4_FW_PARAM_FW_CONFIG,
+            PJ_IPC4_MAX_MAILBOX_PAYLOAD, &packet) != PJ_IPC4_VALID)
+        return STATUS_INVALID_PARAMETER;
+    request.Primary = packet.primary;
+    request.Extension = packet.extension;
+    reply.PayloadSize = PJ_IPC4_MAX_MAILBOX_PAYLOAD;
+    reply.Payload = ExAllocatePool2(POOL_FLAG_NON_PAGED, reply.PayloadSize, SOF_POOL_TAG);
+    if (!reply.Payload) return STATUS_INSUFFICIENT_RESOURCES;
+
+    status = SofIpcSendMessage(Ctx, &request, &reply, 500);
+    if (NT_SUCCESS(status) &&
+        (pj_ipc4_fw_version(reply.Payload, reply.PayloadSize, version) != PJ_IPC4_VALID ||
+         version[0] != Info->MajorVersion || version[1] != Info->MinorVersion ||
+         version[2] != Info->HotfixVersion || version[3] != Info->BuildVersion))
+        status = STATUS_REVISION_MISMATCH;
+    ExFreePoolWithTag(reply.Payload, SOF_POOL_TAG);
+    return status;
+}
+#endif
+
 /**
  * @brief Complete DSP firmware load, hardware initialization, and execution orchestrator.
  *
@@ -826,19 +1007,20 @@ SofStartFirmwareBoot(
     UNREFERENCED_PARAMETER(OptionalFwPath);
     return STATUS_NOT_SUPPORTED;
 #else
+    SOF_ICCMAX_DMA iccmax = {0};
     SOF_DMA_BUFFER fwDma = {0};
     SOF_DMA_BUFFER bdlDma = {0};
     SOF_FW_IMAGE_INFO fwInfo = {0};
     PVOID rawFw = NULL;
     ULONG rawFwSize = 0;
-    WCHAR defaultPath[128];
     PCWSTR targetPath = OptionalFwPath;
     PUCHAR bar4;
     PUCHAR bar0;
     ULONG streamTag = 1;
-    ULONG streamIndex = 7;
+    ULONG streamIndex = 0;
     ULONG sdOffset;
-    PUCHAR streamRegs;
+    PUCHAR streamRegs = NULL;
+    BOOLEAN dmaConfigured = FALSE;
     ULONG ipcHdr;
     ULONG statusReg = 0;
     ULONG timeout;
@@ -858,6 +1040,7 @@ SofStartFirmwareBoot(
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdr, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdr, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPIS, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomStatusReg, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomErrorReg, 4u))
         return STATUS_INVALID_BUFFER_SIZE;
@@ -875,36 +1058,15 @@ SofStartFirmwareBoot(
     bar4 = (PUCHAR)Ctx->Bar4VirtualAddress;
     bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
 
-    /* ADL-N 8086:54C8 requires a Pujjo-specific, independently verified IPC4
-     * image. Never silently use the Tiger Lake fallback for this board. */
-    if (Ctx->VendorId == 0x8086 && Ctx->DeviceId == 0x54C8) {
-#if !defined(PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED)
+    /* Only the Pujjo ADL-N controller has a candidate reviewed here. */
+    if (Ctx->VendorId != 0x8086 || Ctx->DeviceId != 0x54C8 ||
+        Ctx->HwDesc->Family != SOF_HW_INTEL_CAVS_2_5)
         return STATUS_NOT_SUPPORTED;
-#else
-        /* Illustrative Windows staging path only: no corresponding firmware
-         * is shipped, installed, signed, verified, or tested in this fork. */
-        if (!targetPath) {
-            targetPath = L"\\SystemRoot\\System32\\drivers\\intel\\sof-ipc4\\adl-n\\sof-adl-n.ri";
-        }
+#if !defined(PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED)
+    return STATUS_NOT_SUPPORTED;
 #endif
-    }
-
-    /* Determine firmware filename if not specified */
-    if (!targetPath) {
-        PCSTR socName = "tgl";
-        if (Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_4_0) socName = (Ctx->HwDesc->CoresNum == 2) ? "nvl-s" : "nvl";
-        else if (Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_3_0) socName = "ptl";
-        else if (Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_2_0) socName = "lnl";
-        else if (Ctx->HwDesc->Family == SOF_HW_INTEL_ACE_1_0) socName = "mtl";
-        else if (Ctx->HwDesc->Family == SOF_HW_INTEL_CAVS_2_0) socName = "icl";
-        else if (Ctx->HwDesc->Family == SOF_HW_INTEL_CAVS_1_8) socName = "cnl";
-        else if (Ctx->HwDesc->Family == SOF_HW_INTEL_CAVS_1_5) socName = "apl";
-
-        RtlStringCbPrintfW(defaultPath, sizeof(defaultPath),
-                           L"\\SystemRoot\\System32\\drivers\\intel\\sof\\sof-%S.ri",
-                           socName);
-        targetPath = defaultPath;
-    }
+    if (!targetPath)
+        targetPath = L"\\SystemRoot\\System32\\drivers\\intel\\sof-ipc4\\adl-n\\sof-adl-n.ri";
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] Initiating firmware boot from: %ls\n", targetPath);
@@ -916,6 +1078,14 @@ SofStartFirmwareBoot(
                    targetPath, status);
         return status;
     }
+
+#if defined(PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED)
+    status = SofVerifyAdlNIpc4Candidate(rawFw, rawFwSize);
+    if (!NT_SUCCESS(status)) {
+        SofFreeFirmwareBuffer(rawFw);
+        return status;
+    }
+#endif
 
     status = SofParseFirmwareImage(rawFw, rawFwSize, &fwInfo);
     if (!NT_SUCCESS(status)) {
@@ -990,6 +1160,7 @@ SofStartFirmwareBoot(
     }
 
     /* 0. Ensure DSP is powered down and reset before configuring DMA */
+    Ctx->DspNeedsPowerDown = TRUE;
     status = SofPowerDownDsp(Ctx);
     if (!NT_SUCCESS(status)) goto boot_failed;
 
@@ -999,13 +1170,15 @@ SofStartFirmwareBoot(
         char err[128];
         RtlStringCbPrintfA(err, sizeof(err), "[12-ERR] SofConfigureCodeLoaderDma failed: 0x%08x\n", status);
         SofLogBreadcrumb(err);
-        SofFreeDmaBuffer(Ctx, &bdlDma);
-        SofFreeDmaBuffer(Ctx, &fwDma);
-        return status;
+        goto boot_failed;
     }
 
     sdOffset = SOF_HDA_ADSP_LOADER_BASE + (streamIndex * SOF_HDA_ADSP_SD_ENTRY_SIZE);
     streamRegs = bar0 + sdOffset;
+    dmaConfigured = TRUE;
+    Ctx->DspNeedsPowerDown = TRUE;
+    status = SofStartIccmaxDma(Ctx, &iccmax);
+    if (!NT_SUCCESS(status)) goto boot_failed;
 
     /*
      * 1. Power Up DSP Subsystem & Domain Gating on ACE:
@@ -1049,6 +1222,16 @@ SofStartFirmwareBoot(
             SofDspRead32(bar4, MTL_HFDSSCS), SofDspRead32(bar4, pwrSts),
             SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg));
         SofLogBreadcrumb(bmsg);
+    }
+
+    /* cAVS ROM requires core 0 powered while still stalled and reset
+     * before the host publishes PURGE. */
+    if (!Ctx->HwDesc->IsAce) {
+        const ULONG held = HDA_DSP_ADSPCS_CRST_MASK(1) | HDA_DSP_ADSPCS_CSTALL_MASK(1);
+        const ULONG ready = HDA_DSP_ADSPCS_SPA_MASK(1) | HDA_DSP_ADSPCS_CPA_MASK(1) | held;
+        status = SofCavsCoreTransition(Ctx, HDA_DSP_ADSPCS_SPA_MASK(1),
+            HDA_DSP_ADSPCS_SPA_MASK(1), ready, ready);
+        if (!NT_SUCCESS(status)) goto boot_failed;
     }
 
     /*
@@ -1107,15 +1290,11 @@ SofStartFirmwareBoot(
              (SofDspRead32(bar4, MTL_DSP2CXCTL_PRIMARY_CORE) & MTL_DSP2CXCTL_PRIMARY_CORE_CPA_MASK)) ? "SET" : "TIMEOUT");
         SofLogBreadcrumb(bmsg);
     } else {
-        /* Match the bundled cAVS reference: power up, leave reset while
+        /* Match the bundled cAVS reference: leave reset while
          * stalled, then unstall. Check SPA/CPA and reset/stall readback. */
         const ULONG powered = HDA_DSP_ADSPCS_SPA_MASK(1) | HDA_DSP_ADSPCS_CPA_MASK(1);
         const ULONG reset = HDA_DSP_ADSPCS_CRST_MASK(1);
         const ULONG stall = HDA_DSP_ADSPCS_CSTALL_MASK(1);
-        status = SofCavsCoreTransition(Ctx, HDA_DSP_ADSPCS_SPA_MASK(1),
-            HDA_DSP_ADSPCS_SPA_MASK(1), HDA_DSP_ADSPCS_CPA_MASK(1) | reset | stall,
-            HDA_DSP_ADSPCS_CPA_MASK(1) | reset | stall);
-        if (!NT_SUCCESS(status)) goto boot_failed;
         status = SofCavsCoreTransition(Ctx, reset, 0, powered | stall, powered | stall);
         if (!NT_SUCCESS(status)) goto boot_failed;
         status = SofCavsCoreTransition(Ctx, stall, 0, powered | reset, powered);
@@ -1188,8 +1367,10 @@ SofStartFirmwareBoot(
     SofIpcEnableInterrupts(Ctx);
     {
         ULONG control = SofDspRead32(bar4, Ctx->HwDesc->HipcCtl);
+        ULONG route = SofDspRead32(bar4, HDA_DSP_REG_ADSPIC);
         ULONG required = Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone;
-        if (control == 0xFFFFFFFFu || (control & required) != required) {
+        if (control == MAXULONG || (control & required) != required ||
+            route == MAXULONG || !(route & HDA_DSP_IPC_INTERRUPT)) {
             status = STATUS_DEVICE_NOT_READY;
             goto boot_failed;
         }
@@ -1277,6 +1458,22 @@ stop_dma:
             goto dma_unconfirmed;
         }
 
+        /* Detach DMA addresses even on an early boot failure. The RUN
+         * handshake above determines whether the common buffers may be freed. */
+        dmaConfigured = FALSE;
+        SofCodeLoaderWriteControl(streamRegs, 0);
+        WRITE_REGISTER_UCHAR(streamRegs + SOF_HDA_ADSP_REG_SD_STS, SOF_HDA_CL_DMA_SD_INT_MASK);
+        writel(0, streamRegs + SOF_HDA_ADSP_REG_SD_BDLPL);
+        writel(0, streamRegs + SOF_HDA_ADSP_REG_SD_BDLPU);
+        {
+            ULONG intctl = readl(bar0 + SOF_HDA_INTCTL);
+            if (intctl == MAXULONG) {
+                status = STATUS_DEVICE_NOT_READY;
+                goto boot_failed;
+            }
+            writel(intctl & ~(1u << streamIndex), bar0 + SOF_HDA_INTCTL);
+        }
+
         if (Ctx->SpbCapOffset) {
             PUCHAR spibBar = bar0 + Ctx->SpbCapOffset;
             PUCHAR spibAddr = spibBar + SOF_HDA_SPIB_BASE + (streamIndex * SOF_HDA_SPIB_INTERVAL) + SOF_HDA_SPIB_SPIB;
@@ -1299,6 +1496,9 @@ stop_dma:
     SofFreeDmaBuffer(Ctx, &bdlDma);
     SofFreeDmaBuffer(Ctx, &fwDma);
 
+    status = SofStopIccmaxDma(Ctx, &iccmax);
+    if (!NT_SUCCESS(status)) goto boot_failed;
+
     /* Check if FW entered successfully; a fault must never become success. */
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
     bootState = Ctx->FwState;
@@ -1317,13 +1517,8 @@ stop_dma:
                    "[SOF] Firmware boot timed out (ROM Status: 0x%08x, ERR: 0x%08x, LPIB: 0x%x, SD_STS: 0x%02x)\n",
                    statusReg, romErr, lpib, sdsts);
 
-        /* Fail closed. Never silently retry a different unreviewed firmware
-         * after a ROM/DMA boot failure, especially on the Pujjo ADL-N board. */
-        KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
-        Ctx->FwState = SOF_FW_BOOT_FAILED;
-        Ctx->IpcFaulted = TRUE;
-        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
-        return STATUS_IO_TIMEOUT;
+        status = statusReg == MAXULONG ? STATUS_DEVICE_NOT_READY : STATUS_IO_TIMEOUT;
+        goto boot_failed;
     }
 
     RtlStringCbPrintfA(bmsg, sizeof(bmsg),
@@ -1348,16 +1543,16 @@ stop_dma:
     KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
 
     if (bootState == SOF_FW_BOOT_COMPLETE) {
+        status = SofQueryBootedFirmwareVersion(Ctx, &fwInfo);
+        if (!NT_SUCCESS(status)) {
+            SofLogBreadcrumb("[IPC4] Running firmware version query failed.\n");
+            goto boot_failed;
+        }
         RtlStringCbPrintfA(bmsg, sizeof(bmsg),
             "[12g] *** DSP FIRMWARE BOOT COMPLETED (FW_READY received)! ***\n");
         SofLogBreadcrumb(bmsg);
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                    "[SOF] Firmware boot sequence completed successfully (FW_READY).\n");
-
-        /* Enable DSP firmware Zephyr logging if not yet initialized */
-        if (!Ctx->FwLogInitialized) {
-            SofIpc4EnableFwLogs(Ctx);
-        }
 
         return STATUS_SUCCESS;
     } else {
@@ -1366,10 +1561,11 @@ stop_dma:
             statusReg);
         SofLogBreadcrumb(bmsg);
         /* ROM entry is not IPC4 readiness. Never manufacture boot success. */
-        SofPowerDownDsp(Ctx);
-        return status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_DEVICE_NOT_READY;
+        status = status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_DEVICE_NOT_READY;
+        goto boot_failed;
     }
 boot_failed:
+    if (dmaConfigured) goto stop_dma;
     /* RUN was never issued or was confirmed clear. */
     SofFreeDmaBuffer(Ctx, &bdlDma);
     SofFreeDmaBuffer(Ctx, &fwDma);
@@ -1380,6 +1576,17 @@ dma_unconfirmed:
     Ctx->FwState = SOF_FW_BOOT_FAILED;
     Ctx->IpcFaulted = TRUE;
     KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+    /* ICCMAX must stop even when the code-loader descriptor was lost. */
+    if (!NT_SUCCESS(SofStopIccmaxDma(Ctx, &iccmax)))
+        SofLogBreadcrumb("[Power] ICCMAX rollback could not be confirmed.\n");
+    if (Ctx->DspNeedsPowerDown) {
+        NTSTATUS rollbackStatus;
+        SofIpcDisableInterrupts(Ctx);
+        KeFlushQueuedDpcs();
+        rollbackStatus = SofPowerDownDsp(Ctx);
+        if (!NT_SUCCESS(rollbackStatus))
+            SofLogBreadcrumb("[Power] DSP rollback could not be confirmed.\n");
+    }
     return status;
 #endif /* PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT */
 }

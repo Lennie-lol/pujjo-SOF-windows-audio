@@ -17,9 +17,9 @@
  */
 
 #include "Topo.h"
+#include "PujjoIpc4Protocol.h"
 #ifdef _KERNEL_MODE
 #include "Device.h"
-#include "PujjoIpc4Protocol.h"
 #include <ntstrsafe.h>
 void SofLogBreadcrumb(const char* text);
 #else
@@ -35,7 +35,7 @@ void SofLogBreadcrumb(const char* text);
  * @param[out] OutFmt   Pointer to firmware sof_ipc4_audio_format structure.
  */
 VOID SofIpc4BuildAudioFormat(
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS InParams,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *InParams,
     _Out_ struct sof_ipc4_audio_format *OutFmt
 )
 {
@@ -92,7 +92,7 @@ static NTSTATUS SofIpc4ComputeChunkBytes(
 }
 
 NTSTATUS SofIpc4BuildCopierConfig(
-    _In_ const PSOF_COPIER_PARAMS Params,
+    _In_ const SOF_COPIER_PARAMS *Params,
     _Out_writes_bytes_(MaxBuffer) PVOID CopierBuffer,
     _In_ ULONG MaxBuffer,
     _Out_ PULONG OutLength
@@ -101,7 +101,8 @@ NTSTATUS SofIpc4BuildCopierConfig(
     struct sof_ipc4_copier_data *copier;
     struct sof_ipc4_gtw_attributes *gtwAttr;
     ULONG totalSize;
-    ULONG chunkBytes;
+    ULONG chunkBytes, configBytes;
+    BOOLEAN isAlh = FALSE, needsBlob = FALSE;
 
     if (!OutLength) return STATUS_INVALID_PARAMETER;
     *OutLength = 0;
@@ -109,10 +110,47 @@ NTSTATUS SofIpc4BuildCopierConfig(
         !NT_SUCCESS(SofIpc4ComputeChunkBytes(&Params->AudioFormat, &chunkBytes)))
         return STATUS_INVALID_PARAMETER;
 
-    /* Check the whole variable-length blob before touching caller memory. */
-    totalSize = sizeof(struct sof_ipc4_copier_data);
-    if (Params->NodeType == SOF_IPC4_GTW_ALH)
-        totalSize += sizeof(struct sof_ipc4_alh_configuration_blob) - sizeof(uint32_t);
+    switch (Params->NodeType) {
+    case SOF_IPC4_GTW_HOST:
+    case SOF_IPC4_GTW_HOST_IN:
+        if (Params->NodeIndex > 14u) return STATUS_INVALID_PARAMETER;
+        break;
+    case SOF_IPC4_GTW_HDA:
+    case SOF_IPC4_GTW_HDA_IN:
+        break;
+    case SOF_IPC4_GTW_DMIC:
+        if (Params->NodeIndex > 7u) return STATUS_INVALID_PARAMETER;
+        needsBlob = TRUE;
+        break;
+    case SOF_IPC4_GTW_SSP_OUT:
+    case SOF_IPC4_GTW_SSP_IN:
+        needsBlob = TRUE;
+        break;
+    case SOF_IPC4_GTW_ALH_OUT:
+    case SOF_IPC4_GTW_ALH_IN:
+        isAlh = TRUE;
+        break;
+    default:
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* SSP and DMIC configurations already include the firmware attributes. */
+    configBytes = sizeof(struct sof_ipc4_gtw_attributes);
+    if (needsBlob) {
+        if (!Params->GatewayConfig || Params->GatewayConfigBytes <= configBytes)
+            return STATUS_DEVICE_CONFIGURATION_ERROR;
+        if ((Params->GatewayConfigBytes % sizeof(uint32_t)) != 0u)
+            return STATUS_INVALID_BUFFER_SIZE;
+        configBytes = Params->GatewayConfigBytes;
+    } else if (Params->GatewayConfig || Params->GatewayConfigBytes) {
+        return STATUS_INVALID_PARAMETER;
+    } else if (isAlh) {
+        configBytes = sizeof(struct sof_ipc4_alh_configuration_blob);
+    }
+    totalSize = sizeof(*copier) - sizeof(uint32_t);
+    if (configBytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD - totalSize)
+        return STATUS_INVALID_BUFFER_SIZE;
+    totalSize += configBytes;
     if (MaxBuffer < totalSize) return STATUS_BUFFER_TOO_SMALL;
 
     RtlZeroMemory(CopierBuffer, totalSize);
@@ -133,7 +171,10 @@ NTSTATUS SofIpc4BuildCopierConfig(
                               SOF_IPC4_NODE_INDEX(Params->NodeIndex);
     copier->gtw_cfg.dma_buffer_size = 4 * chunkBytes; /* Minimum 4ms DMA buffer */
 
-    if (Params->NodeType == SOF_IPC4_GTW_ALH) {
+    if (needsBlob) {
+        copier->gtw_cfg.config_length = configBytes / sizeof(uint32_t);
+        RtlCopyMemory(copier->gtw_cfg.config_data, Params->GatewayConfig, configBytes);
+    } else if (isAlh) {
         struct sof_ipc4_alh_configuration_blob *alhBlob;
         copier->gtw_cfg.config_length = sizeof(struct sof_ipc4_alh_configuration_blob) / sizeof(uint32_t);
         alhBlob = (struct sof_ipc4_alh_configuration_blob *)copier->gtw_cfg.config_data;
@@ -158,7 +199,7 @@ NTSTATUS SofIpc4BuildCopierConfig(
 }
 
 static NTSTATUS SofIpc4BuildGainConfigForFormat(
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _In_ ULONG InitVal,
     _Out_writes_bytes_(MaxBuffer) PVOID GainBuffer,
     _In_ ULONG MaxBuffer,
@@ -431,26 +472,35 @@ NTSTATUS SofIpc4InitModuleInstance(
 {
 #ifdef _KERNEL_MODE
     pj_ipc4_packet packet = {0};
-    ULONG storage[64];
-    struct sof_ipc4_base_module_cfg *base = (struct sof_ipc4_base_module_cfg *)storage;
+    struct sof_ipc4_base_module_cfg *base;
+    UCHAR *storage;
+    NTSTATUS status;
+    PJ_DWORD pages;
     const pj_firmware_module *module = SofGraphModule(Ctx, ModuleId);
     const pj_firmware_profile *profile;
     pj_firmware_config config;
     pj_ipc4_status result;
-    if (!Payload || PayloadSize < sizeof(*base) || PayloadSize > sizeof(storage))
+    if (!Payload || PayloadSize < sizeof(*base) || PayloadSize > PJ_IPC4_MAX_MAILBOX_PAYLOAD)
         return STATUS_INVALID_BUFFER_SIZE;
-    if (!module || CoreId >= 32u || !(module->affinity_mask & (1u << CoreId)))
+    if (!module || CoreId != 0u)
         return STATUS_NOT_SUPPORTED;
     profile = ModuleId == SOF_IPC4_MOD_ID_COPIER ? &Ctx->CopierProfile : &Ctx->GainProfile;
+    base = ExAllocatePool2(POOL_FLAG_NON_PAGED, PayloadSize, SOF_DEVICE_TAG);
+    if (!base) return STATUS_INSUFFICIENT_RESOURCES;
+    storage = (UCHAR *)base;
     RtlCopyMemory(storage, Payload, PayloadSize);
-    if (pj_firmware_profile_config(profile, base->ibs, base->obs, &config) != PJ_CATALOG_OK)
+    if (pj_firmware_plan_ll(profile, base->ibs, base->obs, &config, &pages) != PJ_CATALOG_OK) {
+        ExFreePoolWithTag(storage, SOF_DEVICE_TAG);
         return STATUS_NOT_SUPPORTED;
+    }
     base->cpc = config.cpc;
     base->is_pages = config.instance_bytes / PAGE_SIZE +
                      (config.instance_bytes % PAGE_SIZE != 0u);
     result = pj_ipc4_module_init(SofGraphWireId(Ctx, ModuleId, InstanceId),
         InstanceId, PipelineId, CoreId, 0u, (const PJ_BYTE *)storage, PayloadSize, &packet);
-    return SofIpc4SendGraphPacket(Ctx, result, &packet);
+    status = SofIpc4SendGraphPacket(Ctx, result, &packet);
+    ExFreePoolWithTag(storage, SOF_DEVICE_TAG);
+    return status;
 #else
     SOF_IPC_MESSAGE msg = {0};
 
@@ -706,7 +756,7 @@ NTSTATUS SofIpc4CreatePlaybackPipeline(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -760,7 +810,7 @@ NTSTATUS SofIpc4CreatePlaybackPipeline(
     SofLogBreadcrumb("[15-P2] Init Host Copier succeeded\n");
 
     /* 3. Instantiate Gain Module with 0 dB */
-    status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+    status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_MUTE, gainBuffer, sizeof(gainBuffer), &gainLen);
     if (!NT_SUCCESS(status)) goto cleanup;
 
     status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
@@ -838,7 +888,7 @@ NTSTATUS SofIpc4CreateCapturePipeline(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -892,7 +942,7 @@ NTSTATUS SofIpc4CreateCapturePipeline(
     SofLogBreadcrumb("[16-C2] Init DAI Copier succeeded\n");
 
     /* 3. Instantiate Gain Module with 0 dB */
-    status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+    status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_MUTE, gainBuffer, sizeof(gainBuffer), &gainLen);
     if (!NT_SUCCESS(status)) goto cleanup;
 
     status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
@@ -971,7 +1021,7 @@ NTSTATUS SofIpc4CreateHdmiPipeline(
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
     _In_ ULONG HdmiLinkIndex,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -1023,7 +1073,7 @@ NTSTATUS SofIpc4CreateHdmiPipeline(
     }
 
     /* 3. Instantiate Gain Module with 0 dB */
-    status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+    status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_MUTE, gainBuffer, sizeof(gainBuffer), &gainLen);
     if (!NT_SUCCESS(status)) goto cleanup;
 
     status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
@@ -1060,7 +1110,8 @@ NTSTATUS SofIpc4CreateHdmiPipeline(
 
     /* 7. Set pipeline state to PAUSED */
     status = SofIpc4SetPipelineState(Ctx, PipelineId, SOF_IPC4_PIPE_PAUSED);
-    if (NT_SUCCESS(status)) {
+    if (!NT_SUCCESS(status)) goto cleanup;
+    {
         char bmsg[128];
         RtlStringCbPrintfA(bmsg, sizeof(bmsg), "[HDMI%u] Pipeline %u created and set to PAUSED (Host=%u, Gain=%u, DAI=%u)\n",
             HdmiLinkIndex, PipelineId, hostInst, gainInst, hdmiInst);
@@ -1082,231 +1133,160 @@ cleanup:
     return status;
 }
 
+/* One copier/gain/copier graph for NHLT-backed endpoints. The initial
+ * implementation admits identical host and DAI PCM geometry only. A different
+ * DAI geometry needs validated topology format conversion and clock evidence. */
+static NTSTATUS SofIpc4CreateNhltPipeline(
+    PSOF_DEVICE_CONTEXT Ctx, ULONG PipelineId, ULONG StreamTag, ULONG Bus,
+    BOOLEAN Dmic, BOOLEAN IsCapture, const SOF_AUDIO_FORMAT_PARAMS *Fmt,
+    PULONG OutHostInst, PULONG OutGainInst, PULONG OutDaiInst)
+{
+    if (OutHostInst) *OutHostInst = 0xFFFFFFFFu;
+    if (OutGainInst) *OutGainInst = 0xFFFFFFFFu;
+    if (!Ctx || !Fmt || StreamTag < 1u || StreamTag > 15u || Bus > 15u)
+        return STATUS_INVALID_PARAMETER;
+
+#ifdef _KERNEL_MODE
+    NTSTATUS status;
+    SOF_NHLT_CONFIG_KEY key = {0};
+    SOF_COPIER_PARAMS host = {0}, dai = {0};
+    UCHAR hostBuffer[sizeof(struct sof_ipc4_copier_data)];
+    UCHAR gainBuffer[sizeof(struct sof_ipc4_gain_data)];
+    UCHAR *scratch, *daiBuffer;
+    ULONG configBytes, daiBytes, hostBytes, gainBytes, chunkBytes;
+    ULONG hostInst = 0xFFFFFFFFu, gainInst = 0xFFFFFFFFu, daiInst = 0xFFFFFFFFu;
+    PJ_DWORD copierPages, gainPages;
+    pj_firmware_config config;
+
+    if (!Ctx->NhltTable || Ctx->FwState != SOF_FW_BOOT_COMPLETE)
+        return STATUS_DEVICE_NOT_READY;
+    status = SofIpc4ComputeChunkBytes(Fmt, &chunkBytes);
+    if (!NT_SUCCESS(status)) return status;
+
+    key.LinkType = Dmic ? NHLT_LINK_DMIC : NHLT_LINK_SSP;
+    key.DeviceType = Dmic ? NHLT_DEVICE_DMIC : NHLT_DEVICE_I2S;
+    key.VirtualBusId = (UCHAR)Bus;
+    key.Direction = IsCapture ? NHLT_DIRECTION_CAPTURE : NHLT_DIRECTION_RENDER;
+    key.SampleRate = Fmt->SamplingFrequency;
+    key.Channels = (USHORT)Fmt->ChannelsCount;
+    key.ContainerBits = (USHORT)Fmt->BitDepth;
+    key.ValidBits = (USHORT)Fmt->ValidBitDepth;
+
+    status = SofNhltCopyConfiguration(Ctx->NhltTable, Ctx->NhltTableSize,
+        &key, NULL, 0, &configBytes);
+    if (status != STATUS_BUFFER_TOO_SMALL) return status;
+    if (configBytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD -
+        (sizeof(struct sof_ipc4_copier_data) - sizeof(uint32_t)))
+        return STATUS_INVALID_BUFFER_SIZE;
+    if (pj_firmware_plan_ll(&Ctx->CopierProfile, chunkBytes, chunkBytes,
+                            &config, &copierPages) != PJ_CATALOG_OK ||
+        pj_firmware_plan_ll(&Ctx->GainProfile, chunkBytes, chunkBytes,
+                            &config, &gainPages) != PJ_CATALOG_OK ||
+        2u * copierPages + gainPages > 20u)
+        return STATUS_NOT_SUPPORTED;
+
+    scratch = ExAllocatePool2(POOL_FLAG_NON_PAGED,
+        configBytes + PJ_IPC4_MAX_MAILBOX_PAYLOAD, SOF_DEVICE_TAG);
+    if (!scratch) return STATUS_INSUFFICIENT_RESOURCES;
+    daiBuffer = scratch + configBytes;
+    status = SofNhltCopyConfiguration(Ctx->NhltTable, Ctx->NhltTableSize,
+        &key, scratch, configBytes, &configBytes);
+    if (!NT_SUCCESS(status)) goto done;
+    dai.NodeType = Dmic ? SOF_IPC4_GTW_DMIC :
+                   IsCapture ? SOF_IPC4_GTW_SSP_IN : SOF_IPC4_GTW_SSP_OUT;
+    dai.NodeIndex = Dmic ? SOF_IPC4_NODE_INDEX_INTEL_DMIC(Bus) :
+                         SOF_IPC4_NODE_INDEX_INTEL_SSP(Bus);
+    dai.AudioFormat = *Fmt;
+    dai.GatewayConfig = scratch;
+    dai.GatewayConfigBytes = configBytes;
+    status = SofIpc4BuildCopierConfig(&dai, daiBuffer, PJ_IPC4_MAX_MAILBOX_PAYLOAD, &daiBytes);
+    if (!NT_SUCCESS(status)) goto done;
+    host.NodeType = IsCapture ? SOF_IPC4_GTW_HOST_IN : SOF_IPC4_GTW_HOST;
+    host.NodeIndex = StreamTag - 1u;
+    host.AudioFormat = *Fmt;
+    status = SofIpc4BuildCopierConfig(&host, hostBuffer, sizeof(hostBuffer), &hostBytes);
+    if (!NT_SUCCESS(status)) goto done;
+    status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_MUTE,
+        gainBuffer, sizeof(gainBuffer), &gainBytes);
+    if (!NT_SUCCESS(status)) goto done;
+
+    status = SofIpc4CreatePipeline(Ctx, PipelineId, 0, 2u * copierPages + gainPages, 0, 0);
+    if (!NT_SUCCESS(status)) goto done;
+
+    status = SofIpc4AllocInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, &hostInst);
+    if (!NT_SUCCESS(status)) goto cleanup;
+    status = SofIpc4AllocInstanceId(Ctx, SOF_IPC4_MOD_ID_GAIN, &gainInst);
+    if (!NT_SUCCESS(status)) goto cleanup;
+    status = SofIpc4AllocInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, &daiInst);
+    if (!NT_SUCCESS(status)) goto cleanup;
+    status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, hostInst,
+        PipelineId, 0, hostBuffer, hostBytes);
+    if (!NT_SUCCESS(status)) goto cleanup;
+    status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst,
+        PipelineId, 0, gainBuffer, gainBytes);
+    if (!NT_SUCCESS(status)) goto cleanup;
+    status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, daiInst,
+        PipelineId, 0, daiBuffer, daiBytes);
+    if (!NT_SUCCESS(status)) goto cleanup;
+    status = SofIpc4BindModules(Ctx, SOF_IPC4_MOD_ID_COPIER, IsCapture ? daiInst : hostInst,
+        0, SOF_IPC4_MOD_ID_GAIN, gainInst, 0);
+    if (!NT_SUCCESS(status)) goto cleanup;
+    status = SofIpc4BindModules(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst,
+        0, SOF_IPC4_MOD_ID_COPIER, IsCapture ? hostInst : daiInst, 0);
+    if (!NT_SUCCESS(status)) goto cleanup;
+    status = SofIpc4SetPipelineState(Ctx, PipelineId, SOF_IPC4_PIPE_PAUSED);
+    if (!NT_SUCCESS(status)) goto cleanup;
+
+    if (OutHostInst) *OutHostInst = hostInst;
+    if (OutGainInst) *OutGainInst = gainInst;
+    if (OutDaiInst) *OutDaiInst = daiInst;
+    goto done;
+
+cleanup:
+    if (NT_SUCCESS(SofIpc4DeletePipeline(Ctx, PipelineId))) {
+        SofIpc4FreeInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, hostInst);
+        SofIpc4FreeInstanceId(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst);
+        SofIpc4FreeInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, daiInst);
+    }
+done:
+    ExFreePoolWithTag(scratch, SOF_DEVICE_TAG);
+    return status;
+#else
+    UNREFERENCED_PARAMETER(PipelineId);
+    UNREFERENCED_PARAMETER(Dmic);
+    UNREFERENCED_PARAMETER(IsCapture);
+    return STATUS_NOT_SUPPORTED;
+#endif
+}
+
 NTSTATUS SofIpc4CreateSspPipeline(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
     _In_ ULONG SspPort,
     _In_ BOOLEAN IsCapture,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
 )
 {
-    NTSTATUS status;
-    UCHAR copierBuffer[256];
-    ULONG copierLen;
-    UCHAR gainBuffer[128];
-    ULONG gainLen;
-    SOF_COPIER_PARAMS hostCopierParams = {0};
-    SOF_COPIER_PARAMS sspCopierParams = {0};
-    ULONG hostInst = 0xFFFFFFFFu, gainInst = 0xFFFFFFFFu, sspInst = 0xFFFFFFFFu;
-
-    if (OutHostInst) *OutHostInst = 0xFFFFFFFF;
-    if (OutGainInst) *OutGainInst = 0xFFFFFFFF;
-    if (OutDaiInst) *OutDaiInst = 0xFFFFFFFF;
-
-    /* 1. Create pipeline with priority 0, 16 memory pages, Core 0 */
-    status = SofIpc4CreatePipeline(Ctx, PipelineId, 0, 16, 0, 0);
-    if (!NT_SUCCESS(status)) {
-        char bmsg[128];
-        RtlStringCbPrintfA(bmsg, sizeof(bmsg), "[SSP%u] CreatePipeline(ID %u) failed: 0x%08x\n", SspPort, PipelineId, status);
-        SofLogBreadcrumb(bmsg);
-        return status;
-    }
-
-    status = SofIpc4AllocInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, &hostInst);
-    if (!NT_SUCCESS(status)) goto cleanup;
-    status = SofIpc4AllocInstanceId(Ctx, SOF_IPC4_MOD_ID_GAIN, &gainInst);
-    if (!NT_SUCCESS(status)) goto cleanup;
-    status = SofIpc4AllocInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, &sspInst);
-    if (!NT_SUCCESS(status)) goto cleanup;
-
-    if (!IsCapture) {
-        /* Playback: Host Copier -> Gain -> SSP DAI Copier */
-        hostCopierParams.StreamTag = StreamTag;
-        hostCopierParams.NodeType = SOF_IPC4_GTW_HOST;
-        hostCopierParams.NodeIndex = StreamTag - 1;
-        hostCopierParams.AudioFormat = *Fmt;
-        status = SofIpc4BuildCopierConfig(&hostCopierParams, copierBuffer, sizeof(copierBuffer), &copierLen);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, hostInst, PipelineId, 0, copierBuffer, copierLen);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        sspCopierParams.StreamTag = StreamTag;
-        sspCopierParams.NodeType = SOF_IPC4_GTW_SSP;
-        sspCopierParams.NodeIndex = SOF_IPC4_NODE_INDEX_INTEL_SSP(SspPort);
-        sspCopierParams.AudioFormat = *Fmt;
-        status = SofIpc4BuildCopierConfig(&sspCopierParams, copierBuffer, sizeof(copierBuffer), &copierLen);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, sspInst, PipelineId, 0, copierBuffer, copierLen);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        status = SofIpc4BindModules(Ctx, SOF_IPC4_MOD_ID_COPIER, hostInst, 0, SOF_IPC4_MOD_ID_GAIN, gainInst, 0);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        status = SofIpc4BindModules(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, 0, SOF_IPC4_MOD_ID_COPIER, sspInst, 0);
-        if (!NT_SUCCESS(status)) goto cleanup;
-    } else {
-        /* Capture: SSP DAI Copier -> Gain -> Host Copier */
-        sspCopierParams.StreamTag = StreamTag;
-        sspCopierParams.NodeType = SOF_IPC4_GTW_SSP;
-        sspCopierParams.NodeIndex = SOF_IPC4_NODE_INDEX_INTEL_SSP(SspPort);
-        sspCopierParams.AudioFormat = *Fmt;
-        status = SofIpc4BuildCopierConfig(&sspCopierParams, copierBuffer, sizeof(copierBuffer), &copierLen);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, sspInst, PipelineId, 0, copierBuffer, copierLen);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        hostCopierParams.StreamTag = StreamTag;
-        hostCopierParams.NodeType = SOF_IPC4_GTW_HOST_IN;
-        hostCopierParams.NodeIndex = StreamTag - 1;
-        hostCopierParams.AudioFormat = *Fmt;
-        status = SofIpc4BuildCopierConfig(&hostCopierParams, copierBuffer, sizeof(copierBuffer), &copierLen);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, hostInst, PipelineId, 0, copierBuffer, copierLen);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        status = SofIpc4BindModules(Ctx, SOF_IPC4_MOD_ID_COPIER, sspInst, 0, SOF_IPC4_MOD_ID_GAIN, gainInst, 0);
-        if (!NT_SUCCESS(status)) goto cleanup;
-
-        status = SofIpc4BindModules(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, 0, SOF_IPC4_MOD_ID_COPIER, hostInst, 0);
-        if (!NT_SUCCESS(status)) goto cleanup;
-    }
-
-    status = SofIpc4SetPipelineState(Ctx, PipelineId, SOF_IPC4_PIPE_PAUSED);
-    if (NT_SUCCESS(status)) {
-        char bmsg[128];
-        RtlStringCbPrintfA(bmsg, sizeof(bmsg), "[SSP%u] Pipeline %u (%s) created and set to PAUSED (Host=%u, Gain=%u, SSP=%u)\n",
-            SspPort, PipelineId, IsCapture ? "Capture" : "Playback", hostInst, gainInst, sspInst);
-        SofLogBreadcrumb(bmsg);
-    }
-
-    if (OutHostInst) *OutHostInst = hostInst;
-    if (OutGainInst) *OutGainInst = gainInst;
-    if (OutDaiInst) *OutDaiInst = sspInst;
-    return status;
-
-cleanup:
-    /* Keep IDs reserved if deletion failed: firmware may still own them. */
-    if (NT_SUCCESS(SofIpc4DeletePipeline(Ctx, PipelineId))) {
-        SofIpc4FreeInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, hostInst);
-        SofIpc4FreeInstanceId(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst);
-        SofIpc4FreeInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, sspInst);
-    }
-    return status;
+    return SofIpc4CreateNhltPipeline(Ctx, PipelineId, StreamTag, SspPort,
+        FALSE, IsCapture, Fmt, OutHostInst, OutGainInst, OutDaiInst);
 }
 
 NTSTATUS SofIpc4CreateDmicPipeline(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ ULONG PipelineId,
     _In_ ULONG StreamTag,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
 )
 {
-    NTSTATUS status;
-    UCHAR copierBuffer[256];
-    ULONG copierLen;
-    UCHAR gainBuffer[128];
-    ULONG gainLen;
-    SOF_COPIER_PARAMS dmicCopierParams = {0};
-    SOF_COPIER_PARAMS hostCopierParams = {0};
-    ULONG hostInst = 0xFFFFFFFFu, gainInst = 0xFFFFFFFFu, dmicInst = 0xFFFFFFFFu;
-
-    if (OutHostInst) *OutHostInst = 0xFFFFFFFF;
-    if (OutGainInst) *OutGainInst = 0xFFFFFFFF;
-    if (OutDaiInst) *OutDaiInst = 0xFFFFFFFF;
-
-    /* 1. Create pipeline with priority 0, 16 memory pages, Core 0 */
-    status = SofIpc4CreatePipeline(Ctx, PipelineId, 0, 16, 0, 0);
-    if (!NT_SUCCESS(status)) {
-        char bmsg[128];
-        RtlStringCbPrintfA(bmsg, sizeof(bmsg), "[DMIC] CreatePipeline(ID %u) failed: 0x%08x\n", PipelineId, status);
-        SofLogBreadcrumb(bmsg);
-        return status;
-    }
-
-    status = SofIpc4AllocInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, &dmicInst);
-    if (!NT_SUCCESS(status)) goto cleanup;
-    status = SofIpc4AllocInstanceId(Ctx, SOF_IPC4_MOD_ID_GAIN, &gainInst);
-    if (!NT_SUCCESS(status)) goto cleanup;
-    status = SofIpc4AllocInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, &hostInst);
-    if (!NT_SUCCESS(status)) goto cleanup;
-
-    /* Capture: DMIC DAI Copier -> Gain -> Host In Copier */
-    dmicCopierParams.StreamTag = StreamTag;
-    dmicCopierParams.NodeType = SOF_IPC4_GTW_DMIC;
-    dmicCopierParams.NodeIndex = SOF_IPC4_NODE_INDEX_INTEL_DMIC(0);
-    dmicCopierParams.AudioFormat = *Fmt;
-    status = SofIpc4BuildCopierConfig(&dmicCopierParams, copierBuffer, sizeof(copierBuffer), &copierLen);
-    if (!NT_SUCCESS(status)) goto cleanup;
-
-    status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, dmicInst, PipelineId, 0, copierBuffer, copierLen);
-    if (!NT_SUCCESS(status)) goto cleanup;
-
-    status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
-    if (!NT_SUCCESS(status)) goto cleanup;
-
-    status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
-    if (!NT_SUCCESS(status)) goto cleanup;
-
-    hostCopierParams.StreamTag = StreamTag;
-    hostCopierParams.NodeType = SOF_IPC4_GTW_HOST_IN;
-    hostCopierParams.NodeIndex = StreamTag - 1;
-    hostCopierParams.AudioFormat = *Fmt;
-    status = SofIpc4BuildCopierConfig(&hostCopierParams, copierBuffer, sizeof(copierBuffer), &copierLen);
-    if (!NT_SUCCESS(status)) goto cleanup;
-
-    status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, hostInst, PipelineId, 0, copierBuffer, copierLen);
-    if (!NT_SUCCESS(status)) goto cleanup;
-
-    status = SofIpc4BindModules(Ctx, SOF_IPC4_MOD_ID_COPIER, dmicInst, 0, SOF_IPC4_MOD_ID_GAIN, gainInst, 0);
-    if (!NT_SUCCESS(status)) goto cleanup;
-
-    status = SofIpc4BindModules(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, 0, SOF_IPC4_MOD_ID_COPIER, hostInst, 0);
-    if (!NT_SUCCESS(status)) goto cleanup;
-
-    status = SofIpc4SetPipelineState(Ctx, PipelineId, SOF_IPC4_PIPE_PAUSED);
-    if (NT_SUCCESS(status)) {
-        char bmsg[128];
-        RtlStringCbPrintfA(bmsg, sizeof(bmsg), "[DMIC] Pipeline %u (Capture) created and set to PAUSED (Host=%u, Gain=%u, DMIC=%u)\n",
-            PipelineId, hostInst, gainInst, dmicInst);
-        SofLogBreadcrumb(bmsg);
-    }
-
-    if (OutHostInst) *OutHostInst = hostInst;
-    if (OutGainInst) *OutGainInst = gainInst;
-    if (OutDaiInst) *OutDaiInst = dmicInst;
-    return status;
-
-cleanup:
-    /* Keep IDs reserved if deletion failed: firmware may still own them. */
-    if (NT_SUCCESS(SofIpc4DeletePipeline(Ctx, PipelineId))) {
-        SofIpc4FreeInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, hostInst);
-        SofIpc4FreeInstanceId(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst);
-        SofIpc4FreeInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, dmicInst);
-    }
-    return status;
+    return SofIpc4CreateNhltPipeline(Ctx, PipelineId, StreamTag, 0,
+        TRUE, TRUE, Fmt, OutHostInst, OutGainInst, OutDaiInst);
 }
 
 NTSTATUS SofIpc4CreateAlhPipeline(
@@ -1315,7 +1295,7 @@ NTSTATUS SofIpc4CreateAlhPipeline(
     _In_ ULONG StreamTag,
     _In_ ULONG LinkIndex,
     _In_ BOOLEAN IsCapture,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Fmt,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Fmt,
     _Out_opt_ PULONG OutHostInst,
     _Out_opt_ PULONG OutGainInst,
     _Out_opt_ PULONG OutDaiInst
@@ -1334,6 +1314,8 @@ NTSTATUS SofIpc4CreateAlhPipeline(
     if (OutHostInst) *OutHostInst = 0xFFFFFFFF;
     if (OutGainInst) *OutGainInst = 0xFFFFFFFF;
     if (OutDaiInst) *OutDaiInst = 0xFFFFFFFF;
+
+    if (LinkIndex > 15u) return STATUS_INVALID_PARAMETER;
 
     /* 1. Calculate ALH Stream ID using validated Linux kernel formula:
      * alh_stream_id = (LinkIndex * 16) + pdi_num + 3 (+ 2 if pdi_num >= 2)
@@ -1376,15 +1358,15 @@ NTSTATUS SofIpc4CreateAlhPipeline(
         status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, hostInst, PipelineId, 0, copierBuffer, copierLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
-        status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+        status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_MUTE, gainBuffer, sizeof(gainBuffer), &gainLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
         status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
         alhCopierParams.StreamTag = StreamTag;
-        alhCopierParams.NodeType = SOF_IPC4_GTW_ALH;
-        alhCopierParams.NodeIndex = 0x50 + (LinkIndex & 0x07);
+        alhCopierParams.NodeType = SOF_IPC4_GTW_ALH_OUT;
+        alhCopierParams.NodeIndex = alhStreamId;
         alhCopierParams.AlhStreamId = alhStreamId;
         alhCopierParams.AudioFormat = *Fmt;
         status = SofIpc4BuildCopierConfig(&alhCopierParams, copierBuffer, sizeof(copierBuffer), &copierLen);
@@ -1402,8 +1384,8 @@ NTSTATUS SofIpc4CreateAlhPipeline(
     } else {
         /* Capture: ALH DAI Copier -> Gain -> Host In Copier */
         alhCopierParams.StreamTag = StreamTag;
-        alhCopierParams.NodeType = SOF_IPC4_GTW_ALH;
-        alhCopierParams.NodeIndex = 0x50 + (LinkIndex & 0x07);
+        alhCopierParams.NodeType = SOF_IPC4_GTW_ALH_IN;
+        alhCopierParams.NodeIndex = alhStreamId;
         alhCopierParams.AlhStreamId = alhStreamId;
         alhCopierParams.AudioFormat = *Fmt;
         status = SofIpc4BuildCopierConfig(&alhCopierParams, copierBuffer, sizeof(copierBuffer), &copierLen);
@@ -1412,7 +1394,7 @@ NTSTATUS SofIpc4CreateAlhPipeline(
         status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_COPIER, alhInst, PipelineId, 0, copierBuffer, copierLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
-        status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_ZERO_DB, gainBuffer, sizeof(gainBuffer), &gainLen);
+        status = SofIpc4BuildGainConfigForFormat(Fmt, SOF_IPC4_VOLUME_MUTE, gainBuffer, sizeof(gainBuffer), &gainLen);
         if (!NT_SUCCESS(status)) goto cleanup;
 
         status = SofIpc4InitModuleInstance(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst, PipelineId, 0, gainBuffer, gainLen);
@@ -1436,7 +1418,8 @@ NTSTATUS SofIpc4CreateAlhPipeline(
     }
 
     status = SofIpc4SetPipelineState(Ctx, PipelineId, SOF_IPC4_PIPE_PAUSED);
-    if (NT_SUCCESS(status)) {
+    if (!NT_SUCCESS(status)) goto cleanup;
+    {
         char bmsg[128];
         RtlStringCbPrintfA(bmsg, sizeof(bmsg), "[ALH] Pipeline %u (%s, Link %u, StreamID %u) created (Host=%u, Gain=%u, ALH=%u)\n",
             PipelineId, IsCapture ? "Capture" : "Render", LinkIndex, alhStreamId, hostInst, gainInst, alhInst);

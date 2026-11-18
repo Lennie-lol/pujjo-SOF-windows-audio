@@ -118,6 +118,7 @@ pj_catalog_status pj_firmware_find_module(const PJ_BYTE *image, PJ_SIZE size,
     m=v.modules+(PJ_SIZE)i*MODULE_BYTES;
     result.module_id=i;
     result.affinity_mask=rd32(m+72u);
+    result.type=rd32(m+28u);
     result.instance_max_count=rd16(m+76u);
     result.config_count=rd16(m+70u);
     for (j=0u;j<16u;++j) result.uuid[j]=m[12u+j];
@@ -174,6 +175,7 @@ pj_catalog_status pj_firmware_load_profile(const PJ_BYTE *image, PJ_SIZE size,
     if (count>PJ_CATALOG_MAX_CONFIGS) return PJ_CATALOG_INVALID_IMAGE;
     result.module.module_id=i;
     result.module.affinity_mask=rd32(m+72u);
+    result.module.type=rd32(m+28u);
     result.module.instance_max_count=rd16(m+76u);
     result.module.config_count=(PJ_WORD)count;
     for (j=0u;j<16u;++j) result.module.uuid[j]=m[12u+j];
@@ -211,5 +213,55 @@ pj_catalog_status pj_firmware_profile_config(const pj_firmware_profile *profile,
     }
     if (!found) return PJ_CATALOG_NOT_FOUND;
     *out=result;
+    return PJ_CATALOG_OK;
+}
+
+pj_catalog_status pj_firmware_plan_ll(const pj_firmware_profile *profile,
+    PJ_DWORD ibs, PJ_DWORD obs, pj_firmware_config *out, PJ_DWORD *pipeline_pages)
+{
+    /* Low-latency task and queue accounting from core/ipc4-topology.h
+     * (Intel copyright, dual BSD/GPL). Work in bytes before rounding pages. */
+    const PJ_DWORD pipeline_object = 448u, module_item = 12u;
+    const PJ_DWORD ll_task_aligned = 128u, ll_list_item = 12u;
+    const PJ_DWORD queue_count = 8u, queue_object = 128u;
+    const PJ_DWORD page_size = 4096u;
+    const PJ_DWORD limit = 20u * page_size;
+    pj_firmware_config result = {0};
+    PJ_DWORD i, common_size, task_bytes, queue_bytes;
+    int same_size = 1, exact = 0;
+
+    if (!profile || !out || !pipeline_pages || !ibs || !obs)
+        return PJ_CATALOG_INVALID_ARGUMENT;
+    if (!profile->count || !profile->module.instance_max_count ||
+        !(profile->module.affinity_mask & 1u) || (profile->module.type & 0x60u) != 0x20u)
+        return PJ_CATALOG_NOT_FOUND;
+    if (profile->count > PJ_CATALOG_MAX_CONFIGS ||
+        profile->count != profile->module.config_count || ibs > limit || obs > limit)
+        return PJ_CATALOG_INVALID_IMAGE;
+
+    common_size = profile->configs[0].instance_bytes;
+    for (i = 0; i < profile->count; ++i) {
+        const pj_firmware_config *record = &profile->configs[i];
+        if (record->instance_bytes != common_size) same_size = 0;
+        if (record->ibs != ibs || record->obs != obs) continue;
+        if (exact && result.instance_bytes != record->instance_bytes)
+            return PJ_CATALOG_AMBIGUOUS;
+        exact = 1;
+        result.instance_bytes = record->instance_bytes;
+        if (result.cpc < record->cpc) result.cpc = record->cpc;
+    }
+    if (!exact) {
+        if (!same_size) return PJ_CATALOG_NOT_FOUND;
+        result.instance_bytes = common_size;
+    }
+    if (result.instance_bytes > limit) return PJ_CATALOG_INVALID_IMAGE;
+    task_bytes = pipeline_object + module_item + result.instance_bytes +
+                 ll_task_aligned + queue_count * module_item + ll_list_item;
+    queue_bytes = queue_count * (queue_object + ((ibs + 63u) & ~63u));
+    if (task_bytes + queue_bytes > limit) return PJ_CATALOG_INVALID_IMAGE;
+    result.ibs = ibs;
+    result.obs = obs;
+    *pipeline_pages = (task_bytes + queue_bytes + page_size - 1u) / page_size;
+    *out = result;
     return PJ_CATALOG_OK;
 }

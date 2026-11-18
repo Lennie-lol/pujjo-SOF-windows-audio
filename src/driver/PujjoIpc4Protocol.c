@@ -168,3 +168,63 @@ pj_ipc4_status pj_ipc4_large_config_set(PJ_DWORD module, PJ_DWORD instance,
                         (3u << 28) | (parameter << 20) | (PJ_DWORD)bytes,
                         payload, bytes, out);
 }
+
+pj_ipc4_status pj_ipc4_large_config_get(PJ_DWORD module, PJ_DWORD instance,
+    PJ_DWORD parameter, PJ_DWORD capacity, pj_ipc4_packet *out)
+{
+    if (!out || module > 65535u || instance > 255u || parameter > 255u || !capacity)
+        return PJ_IPC4_BAD_PARAMETER;
+    if (capacity > PJ_IPC4_MAX_MAILBOX_PAYLOAD) return PJ_IPC4_TOO_LARGE;
+    return graph_packet(PJ_IPC4_MODULE_LARGE_GET | (instance << 16) | module,
+                        (1u << 29) | (parameter << 20) | capacity, 0, 0u, out);
+}
+
+pj_ipc4_status pj_ipc4_large_reply_size(PJ_DWORD request_extension,
+    PJ_DWORD reply_extension, PJ_DWORD capacity, PJ_DWORD *bytes)
+{
+    const PJ_DWORD parameter_mask = 0x0ff00000u;
+    const PJ_DWORD size_mask = 0x000fffffu;
+    const PJ_DWORD first_block = 1u << 29;
+    const PJ_DWORD last_block = 1u << 28;
+    PJ_DWORD size;
+
+    if (!bytes || !capacity || capacity > PJ_IPC4_MAX_MAILBOX_PAYLOAD)
+        return PJ_IPC4_BAD_PARAMETER;
+    if ((request_extension & ~(parameter_mask | size_mask)) != first_block ||
+        (request_extension & size_mask) != capacity ||
+        (reply_extension & ~(parameter_mask | size_mask)) != (first_block | last_block) ||
+        (reply_extension & parameter_mask) != (request_extension & parameter_mask))
+        return PJ_IPC4_INVALID_HEADER;
+    size = reply_extension & size_mask;
+    if (size > capacity) return PJ_IPC4_BUFFER_SMALL;
+    *bytes = size;
+    return PJ_IPC4_VALID;
+}
+
+pj_ipc4_status pj_ipc4_fw_version(const PJ_BYTE *config, PJ_SIZE bytes,
+    PJ_WORD version[4])
+{
+    const PJ_BYTE *value = 0;
+    if (!config || !version || bytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD)
+        return PJ_IPC4_BAD_PARAMETER;
+    while (bytes) {
+        PJ_DWORD type, length;
+        if (bytes < 8u) return PJ_IPC4_TRUNCATED;
+        type = read_le32(config);
+        length = read_le32(config + 4u);
+        config += 8u;
+        bytes -= 8u;
+        if (length > bytes) return PJ_IPC4_TRUNCATED;
+        /* SOF_IPC4_FW_CFG_FW_VERSION, struct sof_ipc4_fw_version. */
+        if (type == 0u) {
+            if (value || length != 8u) return PJ_IPC4_INVALID_HEADER;
+            value = config;
+        }
+        config += length;
+        bytes -= length;
+    }
+    if (!value) return PJ_IPC4_INVALID_HEADER;
+    for (PJ_DWORD i = 0; i < 4u; ++i)
+        version[i] = (PJ_WORD)(value[i * 2u] | ((PJ_WORD)value[i * 2u + 1u] << 8));
+    return PJ_IPC4_VALID;
+}

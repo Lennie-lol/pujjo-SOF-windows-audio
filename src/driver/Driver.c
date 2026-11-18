@@ -416,8 +416,9 @@ SofEvtDeviceAdd(
     WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpPowerCallbacks);
     pnpPowerCallbacks.EvtDevicePrepareHardware = SofEvtDevicePrepareHardware;
     pnpPowerCallbacks.EvtDeviceReleaseHardware = SofEvtDeviceReleaseHardware;
-    pnpPowerCallbacks.EvtDeviceD0Entry         = SofEvtDeviceD0Entry;
-    pnpPowerCallbacks.EvtDeviceD0Exit          = SofEvtDeviceD0Exit;
+    /* FW_READY and stream shutdown require live WDF IRQ delivery. */
+    pnpPowerCallbacks.EvtDeviceD0EntryPostInterruptsEnabled = SofEvtDeviceD0Entry;
+    pnpPowerCallbacks.EvtDeviceD0ExitPreInterruptsDisabled  = SofEvtDeviceD0Exit;
 
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpPowerCallbacks);
 
@@ -507,6 +508,7 @@ SofEvtDeviceAdd(
 
     /* Create Interrupt Object */
     WDF_INTERRUPT_CONFIG_INIT(&interruptConfig, SofEvtInterruptIsr, SofEvtInterruptDpc);
+    interruptConfig.AutomaticSerialization = FALSE;
 
     status = WdfInterruptCreate(device, &interruptConfig, WDF_NO_OBJECT_ATTRIBUTES, &deviceContext->WdfInterrupt);
     if (!NT_SUCCESS(status)) {

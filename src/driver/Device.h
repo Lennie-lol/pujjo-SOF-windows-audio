@@ -233,6 +233,8 @@ typedef struct _SOF_DEVICE_CONTEXT {
     BOOLEAN             IpcReplyReady;
     BOOLEAN             IpcFaulted;
     ULONG               IpcRequestPrimary;
+    ULONG               IpcRequestExtension;
+    ULONG               IpcReplyCapacity;
     /** @brief Cached reply header structure from completed transaction. */
     SOF_IPC_MESSAGE     PendingReply;
     /** @brief Buffer receiving large payload data from DSP mailbox. */
@@ -245,6 +247,9 @@ typedef struct _SOF_DEVICE_CONTEXT {
     /* State Tracking */
     /** @brief TRUE if EvtDevicePrepareHardware has successfully executed. */
     BOOLEAN             HardwarePrepared;
+    BOOLEAN             DspNeedsPowerDown;
+    ULONG               StreamDescriptorMask;
+    ULONG               StreamTagMask[2];
     /** @brief Current power state (PowerDeviceD0, PowerDeviceD3, etc.). */
     DEVICE_POWER_STATE  CurrentPowerState;
     /** @brief TRUE if an on-board HDA codec was detected on the link. */
@@ -305,6 +310,8 @@ typedef struct _SOF_DEVICE_CONTEXT {
     /* ACPI NHLT Topology Info */
     /** @brief Parsed ACPI Non-HDA Link Table (NHLT) endpoint descriptor cache. */
     SOF_NHLT_INFO       NhltInfo;
+    PVOID               NhltTable;       /* Owned, immutable for the prepared device. */
+    ULONG               NhltTableSize;
 
     /* Cached Audio Control State (persists across stream sessions) */
     /** @brief Cached volume levels in decibels per endpoint and channel. */
@@ -406,10 +413,10 @@ EVT_WDF_DEVICE_PREPARE_HARDWARE SofEvtDevicePrepareHardware;
 EVT_WDF_DEVICE_RELEASE_HARDWARE SofEvtDeviceReleaseHardware;
 
 /** @brief KMDF EvtDeviceD0Entry callback powering up hardware and arming audio streams. */
-EVT_WDF_DEVICE_D0_ENTRY SofEvtDeviceD0Entry;
+EVT_WDF_DEVICE_D0_ENTRY_POST_INTERRUPTS_ENABLED SofEvtDeviceD0Entry;
 
 /** @brief KMDF EvtDeviceD0Exit callback transitioning hardware to quiescent low-power state. */
-EVT_WDF_DEVICE_D0_EXIT SofEvtDeviceD0Exit;
+EVT_WDF_DEVICE_D0_EXIT_PRE_INTERRUPTS_DISABLED SofEvtDeviceD0Exit;
 
 /** @brief High-IRQL Interrupt Service Routine (ISR) identifying doorbell events. */
 EVT_WDF_INTERRUPT_ISR SofEvtInterruptIsr;
