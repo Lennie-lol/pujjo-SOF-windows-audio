@@ -48,6 +48,7 @@ void SofLogBreadcrumb(const char* text);
 #include "Hw.h"
 #include "Ipc.h"
 #include "PujjoDmaPlan.h"
+#include "PujjoIpc4Protocol.h"
 
 /**
  * @brief Parses an SOF firmware binary and extracts manifest and version metadata.
@@ -510,7 +511,9 @@ SofConfigureCodeLoaderDma(
     PUCHAR bar0;
     PUCHAR streamRegs;
     PSOF_INTEL_DSP_BDL bdl;
-    ULONG timeout = 500;
+    ULONG timeout;
+    ULONG spibRelative;
+    ULONG capOffset;
     ULONG ctl;
     ULONG halfSize;
     pj_dma_plan plan;
@@ -540,6 +543,27 @@ SofConfigureCodeLoaderDma(
         sdOffset > Ctx->Bar0Length - SOF_HDA_ADSP_SD_ENTRY_SIZE)
         return STATUS_INVALID_BUFFER_SIZE;
 
+    /* All offsets used below must fit in the mapped BAR, including optional
+     * capabilities. Subtract before adding offsets to prevent wraparound. */
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar0Length, SOF_HDA_GCTL, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar0Length, SOF_HDA_INTCTL, 4u))
+        return STATUS_INVALID_BUFFER_SIZE;
+    capOffset = Ctx->PpCapOffset;
+    if (capOffset && (capOffset > Ctx->Bar0Length ||
+        SOF_HDA_REG_PP_PPCTL > Ctx->Bar0Length - capOffset ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar0Length,
+            capOffset + SOF_HDA_REG_PP_PPCTL, 4u)))
+        return STATUS_INVALID_BUFFER_SIZE;
+    capOffset = Ctx->SpbCapOffset;
+    spibRelative = SOF_HDA_SPIB_BASE + streamIndex * SOF_HDA_SPIB_INTERVAL + SOF_HDA_SPIB_SPIB;
+    if (capOffset && (capOffset > Ctx->Bar0Length ||
+        spibRelative > Ctx->Bar0Length - capOffset ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar0Length, capOffset + spibRelative, 4u) ||
+        SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL > Ctx->Bar0Length - capOffset ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar0Length,
+            capOffset + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL, 4u)))
+        return STATUS_INVALID_BUFFER_SIZE;
+
     bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
 
     /*
@@ -547,11 +571,14 @@ SofConfigureCodeLoaderDma(
      * If the controller is in reset, DMA engines cannot accept commands or cycle.
      */
     gctl = readl(bar0 + SOF_HDA_GCTL);
+    if (gctl == 0xFFFFFFFFu) return STATUS_DEVICE_NOT_READY;
     if (!(gctl & SOF_HDA_GCTL_RESET)) {
         writel(gctl | SOF_HDA_GCTL_RESET, bar0 + SOF_HDA_GCTL);
         KeStallExecutionProcessor(1000);
         gctl = readl(bar0 + SOF_HDA_GCTL);
     }
+    if (gctl == 0xFFFFFFFFu || !(gctl & SOF_HDA_GCTL_RESET))
+        return STATUS_DEVICE_NOT_READY;
 
     /*
      * Select Code Loader DMA Stream:
@@ -567,10 +594,6 @@ SofConfigureCodeLoaderDma(
      * Set decouple bit (1 << streamIndex) in Processing Pipe Control (PPCTL) so the
      * stream routes directly to the DSP internal FIFO instead of the external audio link.
      */
-    if (Ctx->PpCapOffset) {
-        writel(readl(bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL) | (1 << streamIndex) | SOF_HDA_PPCTL_GPROCEN | SOF_HDA_PPCTL_PIE,
-               bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL);
-    }
 
     /*
      * Build 2-entry Buffer Descriptor List (BDL):
@@ -615,21 +638,32 @@ SofConfigureCodeLoaderDma(
      * 1. Reset Stream Engine:
      * Assert SRST in SD_CTL, poll for hardware confirmation, then clear SRST and poll.
      */
+    ctl = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL));
+    if (ctl == 0xFFFFFFFFu || (ctl & SOF_HDA_SD_CTL_DMA_START))
+        return STATUS_DEVICE_BUSY;
     WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL), SOF_HDA_SD_CTL_DMA_RESET);
-    while (timeout--) {
+    for (timeout = 0; timeout < 500u; ++timeout) {
         ctl = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL));
-        if (ctl & SOF_HDA_SD_CTL_DMA_RESET)
-            break;
+        if (ctl == 0xFFFFFFFFu) return STATUS_DEVICE_NOT_READY;
+        if (ctl & SOF_HDA_SD_CTL_DMA_RESET) break;
         KeStallExecutionProcessor(10);
     }
+    if (timeout == 500u) return STATUS_IO_TIMEOUT;
 
     WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL), 0);
-    timeout = 500;
-    while (timeout--) {
+    for (timeout = 0; timeout < 500u; ++timeout) {
         ctl = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_CTL));
-        if (!(ctl & SOF_HDA_SD_CTL_DMA_RESET))
-            break;
+        if (ctl == 0xFFFFFFFFu) return STATUS_DEVICE_NOT_READY;
+        if (!(ctl & SOF_HDA_SD_CTL_DMA_RESET)) break;
         KeStallExecutionProcessor(10);
+    }
+    if (timeout == 500u || (ctl & SOF_HDA_SD_CTL_DMA_START))
+        return STATUS_IO_TIMEOUT;
+
+    /* Only decouple a stream after the controller acknowledged its reset. */
+    if (Ctx->PpCapOffset) {
+        writel(readl(bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL) | (1 << streamIndex) | SOF_HDA_PPCTL_GPROCEN | SOF_HDA_PPCTL_PIE,
+               bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL);
     }
 
     /* 2. Clear Status Flags: BCIS (buffer completion), FIFOE (FIFO error), DESE (descriptor error) */
