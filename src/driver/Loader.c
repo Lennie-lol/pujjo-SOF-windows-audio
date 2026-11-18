@@ -363,6 +363,32 @@ SofFreeDmaBuffer(
     DmaBuf->Size = 0;
 }
 
+/* Core 0 only, using the cAVS sequence in src/core/intel/hda-dsp.c.
+ * Testable independently of WDF. Caller owns the cold boot/power transition.
+ * Never write back an inaccessible register or advance on an unacknowledged step. */
+static NTSTATUS SofCavsCoreTransition(PSOF_DEVICE_CONTEXT Ctx,
+    ULONG mask, ULONG value, ULONG expectedMask, ULONG expected)
+{
+    ULONG current, attempt;
+    if (!Ctx || !Ctx->HwDesc || Ctx->HwDesc->IsAce || !Ctx->Bar4VirtualAddress)
+        return STATUS_DEVICE_NOT_READY;
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPCS, 4u))
+        return STATUS_INVALID_BUFFER_SIZE;
+    current = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPCS);
+    if (current == 0xFFFFFFFFu) return STATUS_DEVICE_NOT_READY;
+    if ((current & mask) != value)
+        SofDspWrite32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPCS,
+                     (current & ~mask) | value);
+    for (attempt = 0; attempt < 5000u; ++attempt) {
+        current = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPCS);
+        if (current == 0xFFFFFFFFu) return STATUS_DEVICE_NOT_READY;
+        if ((current & (expectedMask | mask)) == (expected | value))
+            return STATUS_SUCCESS;
+        KeStallExecutionProcessor(10);
+    }
+    return STATUS_IO_TIMEOUT;
+}
+
 /**
  * @brief Powers down the DSP subsystem, core 0, and gates domain power on Intel ACE.
  *
@@ -455,25 +481,19 @@ SofPowerDownDsp(
     } else {
         if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPCS, 4u))
             return STATUS_INVALID_BUFFER_SIZE;
-        /*
-         * cAVS power-down: Stall and reset Core 0, then clear SPA in ADSPCS.
-         */
-        SofDspUpdateBits(bar4, HDA_DSP_REG_ADSPCS,
-                         HDA_DSP_ADSPCS_CSTALL_MASK(1),
-                         HDA_DSP_ADSPCS_CSTALL_MASK(1));
-        SofDspUpdateBits(bar4, HDA_DSP_REG_ADSPCS,
-                         HDA_DSP_ADSPCS_CRST_MASK(1),
-                         HDA_DSP_ADSPCS_CRST_MASK(1));
-        SofDspUpdateBits(bar4, HDA_DSP_REG_ADSPCS,
-                         HDA_DSP_ADSPCS_SPA_MASK(1), 0);
-        KeStallExecutionProcessor(1000);
-        for (timeout = 0; timeout < 5000u; ++timeout) {
-            ULONG adspcs = SofDspRead32(bar4, HDA_DSP_REG_ADSPCS);
-            if (adspcs != 0xFFFFFFFF && !(adspcs & HDA_DSP_ADSPCS_CPA_MASK(1)))
-                break;
-            KeStallExecutionProcessor(10);
-        }
-        if (timeout == 5000u) return STATUS_IO_TIMEOUT;
+        NTSTATUS coreStatus;
+        /* Stall -> reset -> power off; require each acknowledgement. */
+        coreStatus = SofCavsCoreTransition(Ctx, HDA_DSP_ADSPCS_CSTALL_MASK(1),
+            HDA_DSP_ADSPCS_CSTALL_MASK(1), 0, 0);
+        if (!NT_SUCCESS(coreStatus)) return coreStatus;
+        coreStatus = SofCavsCoreTransition(Ctx, HDA_DSP_ADSPCS_CRST_MASK(1),
+            HDA_DSP_ADSPCS_CRST_MASK(1), HDA_DSP_ADSPCS_CSTALL_MASK(1),
+            HDA_DSP_ADSPCS_CSTALL_MASK(1));
+        if (!NT_SUCCESS(coreStatus)) return coreStatus;
+        coreStatus = SofCavsCoreTransition(Ctx, HDA_DSP_ADSPCS_SPA_MASK(1), 0,
+            HDA_DSP_ADSPCS_CPA_MASK(1) | HDA_DSP_ADSPCS_CRST_MASK(1) | HDA_DSP_ADSPCS_CSTALL_MASK(1),
+            HDA_DSP_ADSPCS_CRST_MASK(1) | HDA_DSP_ADSPCS_CSTALL_MASK(1));
+        if (!NT_SUCCESS(coreStatus)) return coreStatus;
 
         RtlStringCbPrintfA(bmsg, sizeof(bmsg),
             "[12-PWR] cAVS DSP powered down: ADSPCS=0x%08x, ROM_STS=0x%08x\n",
@@ -563,9 +583,9 @@ SofConfigureCodeLoaderDma(
                           (ULONG)FwDmaBuf->PhysicalAddress.HighPart,
                           FwDmaBuf->Size, halfSize, &plan))
         return STATUS_INVALID_BUFFER_SIZE;
-    if (Ctx->NumPlaybackStreams == 0u || Ctx->NumCaptureStreams >= 30u)
+    if (!pj_hda_stream_slot(Ctx->NumCaptureStreams, Ctx->NumPlaybackStreams,
+                            0u, 0u, Ctx->Bar0Length, &streamIndex))
         return STATUS_DEVICE_CONFIGURATION_ERROR;
-    streamIndex = Ctx->NumCaptureStreams;
     sdOffset = SOF_HDA_ADSP_LOADER_BASE + (streamIndex * SOF_HDA_ADSP_SD_ENTRY_SIZE);
     if (Ctx->Bar0Length < SOF_HDA_ADSP_SD_ENTRY_SIZE ||
         sdOffset > Ctx->Bar0Length - SOF_HDA_ADSP_SD_ENTRY_SIZE)
@@ -836,6 +856,8 @@ SofStartFirmwareBoot(
 
     if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIda, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdr, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdr, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomStatusReg, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->RomErrorReg, 4u))
         return STATUS_INVALID_BUFFER_SIZE;
@@ -956,6 +978,17 @@ SofStartFirmwareBoot(
     /* Free raw file copy */
     SofFreeFirmwareBuffer(rawFw);
 
+    /* ROM ACK is polled by this loader, never by the normal IPC DPC.
+     * Disable channel interrupts only after the firmware image is accepted. */
+    SofIpcDisableInterrupts(Ctx);
+    {
+        ULONG control = SofDspRead32(bar4, Ctx->HwDesc->HipcCtl);
+        if (control == 0xFFFFFFFFu || (control & (Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone))) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto boot_failed;
+        }
+    }
+
     /* 0. Ensure DSP is powered down and reset before configuring DMA */
     status = SofPowerDownDsp(Ctx);
     if (!NT_SUCCESS(status)) goto boot_failed;
@@ -1025,7 +1058,16 @@ SofStartFirmwareBoot(
     ipcHdr = HDA_DSP_ROM_IPC_CONTROL | HDA_DSP_ROM_IPC_PURGE_FW |
              ((streamTag - 1) << 9) | Ctx->HwDesc->HipcIdrBusy;
 
-    SofDspWrite32(bar4, Ctx->HwDesc->HipcIdr, ipcHdr);
+    {
+        ULONG doorbell = SofDspRead32(bar4, Ctx->HwDesc->HipcIdr);
+        ULONG ack = SofDspRead32(bar4, Ctx->HwDesc->HipcIda);
+        if (doorbell == 0xFFFFFFFFu || ack == 0xFFFFFFFFu ||
+            (doorbell & Ctx->HwDesc->HipcIdrBusy) || (ack & Ctx->HwDesc->HipcIdaDone)) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto boot_failed;
+        }
+        SofDspWrite32(bar4, Ctx->HwDesc->HipcIdr, ipcHdr);
+    }
 
     /*
      * 3. Power Up DSP Primary Core:
@@ -1065,33 +1107,19 @@ SofStartFirmwareBoot(
              (SofDspRead32(bar4, MTL_DSP2CXCTL_PRIMARY_CORE) & MTL_DSP2CXCTL_PRIMARY_CORE_CPA_MASK)) ? "SET" : "TIMEOUT");
         SofLogBreadcrumb(bmsg);
     } else {
-        /* cAVS: Set Core 0 SPA and release Reset/Stall */
-        SofDspUpdateBits(bar4, HDA_DSP_REG_ADSPCS,
-                         HDA_DSP_ADSPCS_SPA_MASK(1),
-                         HDA_DSP_ADSPCS_SPA_MASK(1));
-
-        for (timeout = 0; timeout < 5000u; ++timeout) {
-            ULONG power = SofDspRead32(bar4, HDA_DSP_REG_ADSPCS);
-            if (power != MAXULONG && (power & HDA_DSP_ADSPCS_CPA_MASK(1))) break;
-            KeStallExecutionProcessor(10);
-        }
-        if (timeout == 5000u) {
-            status = STATUS_IO_TIMEOUT;
-            goto boot_failed;
-        }
-
-        /* Release reset and unstall Core 0 */
-        SofDspUpdateBits(bar4, HDA_DSP_REG_ADSPCS,
-                         HDA_DSP_ADSPCS_CRST_MASK(1),
-                         HDA_DSP_ADSPCS_CRST_MASK(1));
-
-        SofDspUpdateBits(bar4, HDA_DSP_REG_ADSPCS,
-                         HDA_DSP_ADSPCS_CSTALL_MASK(1),
-                         0);
-
-        SofDspUpdateBits(bar4, HDA_DSP_REG_ADSPCS,
-                         HDA_DSP_ADSPCS_CRST_MASK(1),
-                         0);
+        /* Match the bundled cAVS reference: power up, leave reset while
+         * stalled, then unstall. Check SPA/CPA and reset/stall readback. */
+        const ULONG powered = HDA_DSP_ADSPCS_SPA_MASK(1) | HDA_DSP_ADSPCS_CPA_MASK(1);
+        const ULONG reset = HDA_DSP_ADSPCS_CRST_MASK(1);
+        const ULONG stall = HDA_DSP_ADSPCS_CSTALL_MASK(1);
+        status = SofCavsCoreTransition(Ctx, HDA_DSP_ADSPCS_SPA_MASK(1),
+            HDA_DSP_ADSPCS_SPA_MASK(1), HDA_DSP_ADSPCS_CPA_MASK(1) | reset | stall,
+            HDA_DSP_ADSPCS_CPA_MASK(1) | reset | stall);
+        if (!NT_SUCCESS(status)) goto boot_failed;
+        status = SofCavsCoreTransition(Ctx, reset, 0, powered | stall, powered | stall);
+        if (!NT_SUCCESS(status)) goto boot_failed;
+        status = SofCavsCoreTransition(Ctx, stall, 0, powered | reset, powered);
+        if (!NT_SUCCESS(status)) goto boot_failed;
     }
 
     /* Wait for ROM IPC ACK in HIPCIDA */
@@ -1119,22 +1147,32 @@ SofStartFirmwareBoot(
         SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg));
     SofLogBreadcrumb(bmsg);
 
-    /* 4. Enable Host IPC Interrupts in DSP */
-    if (Ctx->HwDesc->IsAce && Ctx->HwDesc->IntIpPtrReg) {
-        SofIpcEnableInterrupts(Ctx);
-    }
-
     /* Wait for ROM status FSR_STATE_INIT_DONE (0x1) before triggering DMA */
     for (timeout = 0; timeout < 1000u; ++timeout) {
         statusReg = SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg);
-        if (FSR_TO_STATE_CODE(statusReg) == FSR_STATE_INIT_DONE ||
-            FSR_TO_STATE_CODE(statusReg) == FSR_STATE_FW_ENTERED)
+        if (statusReg == 0xFFFFFFFFu) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto boot_failed;
+        }
+        if (FSR_TO_STATE_CODE(statusReg) == FSR_STATE_INIT_DONE)
             break;
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
     }
     if (timeout == 1000u) {
         status = STATUS_IO_TIMEOUT;
         goto boot_failed;
+    }
+
+    /* ROM ACK belongs to the loader. Refuse an uncleared ACK or a stale
+     * incoming notification before handing ownership to the runtime IPC ISR. */
+    {
+        ULONG ack = SofDspRead32(bar4, Ctx->HwDesc->HipcIda);
+        ULONG incoming = SofDspRead32(bar4, Ctx->HwDesc->HipcTdr);
+        if (ack == 0xFFFFFFFFu || incoming == 0xFFFFFFFFu ||
+            (ack & Ctx->HwDesc->HipcIdaDone) || (incoming & Ctx->HwDesc->HipcTdrBusy)) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto boot_failed;
+        }
     }
 
     /*
@@ -1147,6 +1185,15 @@ SofStartFirmwareBoot(
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
     Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS;
     KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+    SofIpcEnableInterrupts(Ctx);
+    {
+        ULONG control = SofDspRead32(bar4, Ctx->HwDesc->HipcCtl);
+        ULONG required = Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone;
+        if (control == 0xFFFFFFFFu || (control & required) != required) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto boot_failed;
+        }
+    }
     status = STATUS_SUCCESS;
     {
         ULONG ctlVal = SofCodeLoaderReadControl(streamRegs);

@@ -551,79 +551,6 @@ SofEvtDeviceReleaseHardware(
 }
 
 /**
- * @brief Performs the S0-Idle (D0i3) hardware power handshake with the DSP.
- *
- * Programs the vendor-specific D0I3C register at BAR0 offset 0x1D4A:
- * 1. Polls CIP (Command In Progress, bit 0) until hardware is ready.
- * 2. Writes I3 (bit 2): 1 to enter low-power D0i3; 0 to exit D0i3 back to D0.
- * 3. Polls CIP until the power transition handshake is completed by hardware.
- *
- * @param[in] ctx Pointer to device context.
- * @param[in] Enable TRUE to enter D0i3 (power gate); FALSE to exit D0i3 (power on).
- * @return NTSTATUS STATUS_SUCCESS or error code.
- */
-static NTSTATUS
-SofHdaSetD0i3(
-    _In_ PSOF_DEVICE_CONTEXT ctx,
-    _In_ BOOLEAN Enable
-)
-{
-    if (ctx == NULL || ctx->Bar0VirtualAddress == NULL) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    PUCHAR bar0 = (PUCHAR)ctx->Bar0VirtualAddress;
-    ULONG timeoutUs = 10000; /* 10ms */
-    ULONG elapsedUs = 0;
-    UCHAR val = 0;
-
-    /* Wait for CIP bit (bit 0) to clear before writing */
-    while (elapsedUs < timeoutUs) {
-        val = readb(bar0 + MTL_HDA_VS_D0I3C);
-        if (!(val & SOF_HDA_VS_D0I3C_CIP)) {
-            break;
-        }
-        KeStallExecutionProcessor(20);
-        elapsedUs += 20;
-    }
-
-    if (val & SOF_HDA_VS_D0I3C_CIP) {
-        SofLogBreadcrumb("[Power] Warning: CIP timeout before D0I3C update\n");
-    }
-
-    /* Update D0I3C: bit 2 is I3 */
-    val = readb(bar0 + MTL_HDA_VS_D0I3C);
-    if (Enable) {
-        val |= (UCHAR)SOF_HDA_VS_D0I3C_I3;
-    } else {
-        val &= (UCHAR)~SOF_HDA_VS_D0I3C_I3;
-    }
-    writeb(val, bar0 + MTL_HDA_VS_D0I3C);
-
-    /* Wait for CIP bit to clear after writing */
-    elapsedUs = 0;
-    while (elapsedUs < timeoutUs) {
-        val = readb(bar0 + MTL_HDA_VS_D0I3C);
-        if (!(val & SOF_HDA_VS_D0I3C_CIP)) {
-            break;
-        }
-        KeStallExecutionProcessor(20);
-        elapsedUs += 20;
-    }
-
-    val = readb(bar0 + MTL_HDA_VS_D0I3C);
-    char dmsg[128];
-    RtlStringCbPrintfA(dmsg, sizeof(dmsg),
-        "[Power] D0I3C register set to 0x%02X (D0i3 %s, CIP=%s)\n",
-        val,
-        (val & SOF_HDA_VS_D0I3C_I3) ? "ENABLED" : "DISABLED",
-        (val & SOF_HDA_VS_D0I3C_CIP) ? "BUSY" : "IDLE");
-    SofLogBreadcrumb(dmsg);
-
-    return STATUS_SUCCESS;
-}
-
-/**
  * @brief KMDF EvtDeviceD0Entry callback.
  *
  * Invoked when transitioning into the working power state (D0).
@@ -680,7 +607,6 @@ SofEvtDeviceD0Entry(
 
     /* The loader is the sole owner of the cold firmware boot sequence.
      * No speculative HDMI/HDA/SSP graph creation or codec programming here. */
-    SofIpcEnableInterrupts(ctx);
     bootStatus = SofStartFirmwareBoot(ctx, NULL);
     if (!NT_SUCCESS(bootStatus)) {
         SofLogBreadcrumb("[Power] D0 entry aborted: firmware boot failed.\n");
@@ -746,7 +672,8 @@ SofEvtDeviceD0Entry(
  *
  * Invoked when transitioning from D0 into a low-power state (D3, S0ix, S3, S4).
  * Stops the watchdog timer, pauses active streams, puts the HDA codec into D3,
- * releases USB audio offload, masks interrupts, and places the DSP into D0i3.
+ * releases USB audio offload, masks interrupts, and powers down the DSP.
+ * Retained-session resume is deliberately not qualified.
  *
  * @param[in] Device Handle to WDFDEVICE.
  * @param[in] TargetState Low-power target state (PowerDeviceD3, etc.).
@@ -825,13 +752,24 @@ SofEvtDeviceD0Exit(
         SofUsbOffloadRelease(ctx);
     }
 
-    /* Disable IPC interrupts when leaving D0 */
-    SofIpcDisableInterrupts(ctx);
-
-    /* Place DSP hardware into D0i3 low-power state */
-    SofHdaSetD0i3(ctx, TRUE);
-
-    ctx->CurrentPowerState = (DEVICE_POWER_STATE)TargetState;
+    /* Do not access the inherited Meteor Lake D0i3 register on Pujjo.
+     * Invalidate the firmware session and wake waiters before power loss. */
+    {
+        KIRQL irql;
+        NTSTATUS powerStatus;
+        KeAcquireSpinLock(&ctx->IpcLock, &irql);
+        ctx->IpcFaulted = TRUE;
+        ctx->FwState = SOF_FW_BOOT_FAILED;
+        KeSetEvent(&ctx->IpcReplyEvent, IO_NO_INCREMENT, FALSE);
+        KeSetEvent(&ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
+        KeReleaseSpinLock(&ctx->IpcLock, irql);
+        ctx->CurrentPowerState = PowerDeviceUnspecified;
+        SofIpcDisableInterrupts(ctx);
+        powerStatus = SofPowerDownDsp(ctx);
+        if (!NT_SUCCESS(powerStatus)) return powerStatus;
+    }
+    /* WDF_POWER_DEVICE_STATE is not DEVICE_POWER_STATE. Resume remains locked. */
+    ctx->CurrentPowerState = PowerDeviceUnspecified;
     return STATUS_SUCCESS;
 }
 

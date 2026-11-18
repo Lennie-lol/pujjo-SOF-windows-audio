@@ -596,6 +596,9 @@ SofIpcIsrCheck(
 
     if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
         return FALSE;
+    /* The initial ROM ACK is exclusively consumed by the passive loader. */
+    if (Ctx->FwState == SOF_FW_BOOT_NOT_STARTED)
+        return FALSE;
 
     /* Shared IRQs must never probe outside the mapped BAR. A malformed
      * descriptor fails closed without acknowledging another device's IRQ. */
@@ -680,6 +683,9 @@ SofIpcDpcHandler(
     BOOLEAN bootFault = FALSE;
 
     if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+        return;
+    /* A stale queued DPC cannot consume the initial ROM ACK. */
+    if (Ctx->FwState == SOF_FW_BOOT_NOT_STARTED)
         return;
     /* Bounds check register windows actually used by this handler. */
     if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIda, 4u) ||

@@ -53,7 +53,7 @@ print("PASS: single DPC consumer, acknowledged readiness, fault wakeup and bound
 
 device=(root/"src/driver/Device.c").read_text()
 d0=device.split("NTSTATUS\nSofEvtDeviceD0Entry(",1)[1].split("\n/**",1)[0]
-assert d0.index("if (ipcFaulted ||") < d0.index("SofIpcEnableInterrupts(ctx)")
+assert d0.index("if (ipcFaulted ||") < d0.index("SofStartFirmwareBoot(ctx, NULL)")
 assert d0.index("return bootStatus;") < d0.index("WdfTimerStart(")
 assert d0.count("ipcFaulted = ctx->IpcFaulted || ctx->FwState != SOF_FW_BOOT_COMPLETE;") == 1
 assert d0.index("return STATUS_DEVICE_NOT_READY;",d0.index("bootStatus =")) < d0.index("WdfTimerStart(")
@@ -63,7 +63,7 @@ print("PASS: D0 entry fails before starting timers when firmware is not ready")
 # D0 must not run speculative audio graphs or reuse an unverified retained DSP.
 assert "initialFwState != SOF_FW_BOOT_NOT_STARTED" in d0
 assert "PreviousState != WdfPowerDeviceD3Final" in d0
-assert d0.index("!ctx->HardwarePrepared") < d0.index("SofIpcEnableInterrupts(ctx)")
+assert d0.index("!ctx->HardwarePrepared") < d0.index("SofStartFirmwareBoot(ctx, NULL)")
 assert d0.index("ipcFaulted = ctx->IpcFaulted || ctx->FwState != SOF_FW_BOOT_COMPLETE;") < d0.index("ctx->CurrentPowerState = PowerDeviceD0;")
 for forbidden in ("SofIpc4CreateHdmiPipeline(", "SofIpc4CreatePlaybackPipeline(",
                   "SofIpc4FreeInstanceId(", "SofHdaInitCodec(", "SofHdaInitDisplayCodec(",
@@ -89,3 +89,80 @@ assert spib_stop.index("if (spbControl == 0xFFFFFFFFu)") < spib_stop.index("goto
 assert "writel(spbControl & ~(1u << streamIndex)" in spib_stop
 assert "writel(readl(" not in spib_stop
 print("PASS: confirmed DMA stop precedes SPIB teardown; inaccessible SPIB fails closed")
+
+# ROM ACK polling and runtime interrupt handling have distinct ownership.
+for body in (isr, dpc):
+    assert body.index("Ctx->FwState == SOF_FW_BOOT_NOT_STARTED") < body.index("SofDspRead32(")
+assert "SofIpcEnableInterrupts(ctx)" not in d0
+assert boot.index("SofIpcDisableInterrupts(Ctx)") < boot.index("SofDspWrite32(bar4, Ctx->HwDesc->HipcIdr, ipcHdr)")
+assert boot.index("/* Acknowledge ROM */") < boot.index("Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS") < boot.index("SofIpcEnableInterrupts(Ctx)") < boot.index("ctlVal |= SOF_HDA_SD_CTL_DMA_START")
+assert boot.count("SofIpcEnableInterrupts(Ctx)")==1
+assert "incoming & Ctx->HwDesc->HipcTdrBusy" in boot
+assert "doorbell & Ctx->HwDesc->HipcIdrBusy" in boot
+exit_body=device.split("NTSTATUS\nSofEvtDeviceD0Exit(",1)[1].split("\n/**",1)[0]
+assert "SofHdaSetD0i3(" not in device
+assert exit_body.index("Ctx->IpcFaulted = TRUE;".replace("Ctx", "ctx")) < exit_body.index("SofIpcDisableInterrupts(ctx)") < exit_body.index("powerStatus = SofPowerDownDsp(ctx)")
+print("PASS: ROM polling exclusive ownership and D0 session invalidation")
+
+# Compile and execute the real core-transition helper with a fake register.
+# It tests readback, delayed acknowledgement, disappearance and timeout, not
+# electrical power behavior or Windows ABI correctness.
+import os, shlex, subprocess, tempfile
+helper = 'static NTSTATUS SofCavsCoreTransition(' + loader.split(
+    'static NTSTATUS SofCavsCoreTransition(', 1)[1].split('\n}', 1)[0] + '\n}\n'
+fixture = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stdbool.h>
+typedef uint32_t ULONG;
+typedef int NTSTATUS;
+#define STATUS_SUCCESS 0
+#define STATUS_DEVICE_NOT_READY -1
+#define STATUS_INVALID_BUFFER_SIZE -2
+#define STATUS_IO_TIMEOUT -3
+#define HDA_DSP_REG_ADSPCS 4u
+typedef struct { int IsAce; } HW;
+typedef struct { HW *HwDesc; void *Bar4VirtualAddress; ULONG Bar4Length; } CTX, *PSOF_DEVICE_CONTEXT;
+static ULONG reg, pending, delay, reads, writes, stall_calls, vanish, stuck;
+static int pj_ipc4_mmio_span_valid(ULONG size, ULONG offset, ULONG bytes) {
+    return offset <= size && bytes <= size-offset;
+}
+static ULONG SofDspRead32(void *base, ULONG off) {
+    assert(base && off == HDA_DSP_REG_ADSPCS);
+    ++reads;
+    if (vanish && reads >= vanish) return UINT32_MAX;
+    if (delay && --delay==0 && !stuck) reg=pending;
+    return reg;
+}
+static void SofDspWrite32(void *base, ULONG off, ULONG value) {
+    assert(base && off == HDA_DSP_REG_ADSPCS);
+    ++writes; pending=value; if (!stuck) delay=3;
+}
+static void KeStallExecutionProcessor(ULONG us) { assert(us==10u);++stall_calls; }
+static void init(ULONG value) {reg=value;pending=delay=reads=writes=stall_calls=vanish=stuck=0;}
+'''
+cases = r'''
+int main(void) {
+    HW hw={0}; CTX ctx={&hw,&hw,8};
+    init(0x200); assert(SofCavsCoreTransition(&ctx,1,1,0x200,0x200)==0);
+    assert(reg==0x201 && writes==1 && stall_calls==2);
+    init(0x201); assert(SofCavsCoreTransition(&ctx,1,1,0x200,0x200)==0 && writes==0);
+    init(UINT32_MAX); assert(SofCavsCoreTransition(&ctx,1,1,0,0)==STATUS_DEVICE_NOT_READY && writes==0);
+    init(0); vanish=2; assert(SofCavsCoreTransition(&ctx,1,1,0,0)==STATUS_DEVICE_NOT_READY && writes==1);
+    init(0); stuck=1; assert(SofCavsCoreTransition(&ctx,1,1,0,0)==STATUS_IO_TIMEOUT && stall_calls==5000 && writes==1);
+    init(0); assert(SofCavsCoreTransition(&ctx,1,1,0x200,0x200)==STATUS_IO_TIMEOUT && writes==1);
+    init(0); ctx.Bar4Length=7; assert(SofCavsCoreTransition(&ctx,1,1,0,0)==STATUS_INVALID_BUFFER_SIZE && !reads && !writes);
+    init(0); ctx.Bar4Length=8; hw.IsAce=1; assert(SofCavsCoreTransition(&ctx,1,1,0,0)==STATUS_DEVICE_NOT_READY && !reads && !writes);
+    assert(SofCavsCoreTransition(0,1,1,0,0)==STATUS_DEVICE_NOT_READY);
+    return 0;
+}
+'''
+with tempfile.TemporaryDirectory(prefix='pj_cavs_core_') as d:
+    src=Path(d)/'test.c';exe=Path(d)/('test.exe' if os.name=='nt' else 'test')
+    src.write_text(fixture+helper+cases)
+    subprocess.run([os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror',
+                    *shlex.split(os.environ.get('CFLAGS','')),str(src),'-o',str(exe)],check=True,timeout=60)
+    subprocess.run([str(exe)],check=True,timeout=10)
+core_start=boot.split('/* Match the bundled cAVS reference:',1)[1].split('/* Wait for ROM IPC ACK',1)[0]
+assert core_start.index('SofCavsCoreTransition(Ctx, HDA_DSP_ADSPCS_SPA_MASK(1)') < core_start.index('SofCavsCoreTransition(Ctx, reset, 0') < core_start.index('SofCavsCoreTransition(Ctx, stall, 0')
+print('PASS: cAVS register transitions reject timeout, missing acknowledgement, and disappearing MMIO')
