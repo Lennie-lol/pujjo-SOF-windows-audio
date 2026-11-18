@@ -11,7 +11,7 @@ static void *close_worker(void *ctx) {Pj5682sSpbClose(ctx);return NULL;}
 #endif
 int main(void) {
  PJ5682S_SPB_WINDOWS spb={0};PJ1019_GPIO_WINDOWS gpio={0};pj5682s_bus bus;
- uint8_t tx[4]={0},rx[2];int owner;unsigned before;
+ uint8_t tx[4]={0,0xff},rx[2];int owner;unsigned before;
  assert(Pj5682sSpbOpen(&owner,1,0,&spb)==STATUS_INVALID_PARAMETER);
  assert(Pj5682sSpbInitialize(&owner,&spb)==0);
  assert(Pj5682sSpbInitialize(&owner,&spb)==STATUS_INVALID_PARAMETER);
@@ -20,14 +20,21 @@ int main(void) {
  fail_create=0;fail_open=1;assert(Pj5682sSpbOpen(&owner,1,0,&spb)==-11);assert(!live_targets);
  fail_open=0;assert(Pj5682sSpbOpen(&owner,1,0,&spb)==0);
  assert(Pj5682sSpbOpen(&owner,1,0,&spb)==STATUS_INVALID_DEVICE_STATE);
- Pj5682sSpbBindCallbacks(&spb,&bus);assert(bus.write_then_read && bus.write_only);
+ Pj5682sSpbBindCallbacks(&spb,&bus);assert(bus.write_then_read && !bus.write_only);
  before=sends;assert(bus.write_then_read(bus.context,tx,2,rx,2)==-1);assert(sends==before);
  assert(Pj5682sSpbSetPower(&spb,TRUE)==0);
  for(transferred=0;transferred<6;++transferred) {
   assert((bus.write_then_read(bus.context,tx,2,rx,2)==0)==(transferred==4));
-  assert((bus.write_only(bus.context,tx,4)==0)==(transferred==4));
  }
- transferred=4;fail_send=1;assert(bus.write_then_read(bus.context,tx,2,rx,2)==-1);fail_send=0;
+ transferred=4;
+ before=sends;
+ for(unsigned reg=0;reg<65536u;++reg) {
+  tx[0]=(uint8_t)(reg>>8);tx[1]=(uint8_t)reg;
+  int allowed=(reg==0xfd || reg==0xfe || reg==0xff);
+  assert((bus.write_then_read(bus.context,tx,2,rx,2)==0)==allowed);
+ }
+ assert(sends==before+3);tx[0]=0;tx[1]=0xff;
+ fail_send=1;assert(bus.write_then_read(bus.context,tx,2,rx,2)==-1);fail_send=0;
  for(unsigned i=0;i<1000;++i) {
   assert(Pj5682sSpbSetPower(&spb,FALSE)==0);
   before=sends;assert(bus.write_then_read(bus.context,tx,2,rx,2)==-1);assert(before==sends);
