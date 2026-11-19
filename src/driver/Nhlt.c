@@ -215,6 +215,7 @@ static void SofNhltMatchPcm(
     };
     SOF_NHLT_MATCH *match = (SOF_NHLT_MATCH *)Context;
     const SOF_NHLT_CONFIG_KEY *key = match->Key;
+    ULONG frameBytes;
 
     if (!Format || Endpoint->LinkType != key->LinkType ||
         Endpoint->VirtualBusId != key->VirtualBusId ||
@@ -225,6 +226,12 @@ static void SofNhltMatchPcm(
         Format->Format.nChannels != key->Channels ||
         Format->Format.wBitsPerSample != key->ContainerBits ||
         Format->Samples.wValidBitsPerSample != key->ValidBits)
+        return;
+
+    frameBytes = (ULONG)key->Channels * (key->ContainerBits / 8u);
+    if (Format->Format.nBlockAlign != frameBytes ||
+        key->SampleRate > 0xffffffffu / frameBytes ||
+        Format->Format.nAvgBytesPerSec != key->SampleRate * frameBytes)
         return;
 
     if (match->Endpoint) {
@@ -263,6 +270,7 @@ NTSTATUS SofNhltCopyConfiguration(
     if (!ConfigBytes) return STATUS_INVALID_PARAMETER;
     *ConfigBytes = 0;
     if (!Key || (!Config && Capacity) || !Key->SampleRate || !Key->Channels ||
+        Key->ContainerBits < 8u || (Key->ContainerBits & 7u) != 0u ||
         !Key->ValidBits || Key->ValidBits > Key->ContainerBits)
         return STATUS_INVALID_PARAMETER;
 

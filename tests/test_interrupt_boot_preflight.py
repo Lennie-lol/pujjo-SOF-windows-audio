@@ -43,10 +43,11 @@ assert "status != STATUS_SUCCESS || Ctx->IpcFaulted" in boot
 assert "Ctx->IpcTxBusy = FALSE" not in boot
 assert "Ctx->IpcFaulted = FALSE" not in boot
 publish=dpc.split("if (bootReady || bootFault)",1)[1]
-assert dpc.index("SofDspWrite32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTda") < dpc.index("Ctx->FwState = SOF_FW_BOOT_COMPLETE")
-assert publish.index("KeAcquireSpinLock(&Ctx->IpcLock") < publish.index("Ctx->FwState = SOF_FW_BOOT_COMPLETE") < publish.index("KeReleaseSpinLock(&Ctx->IpcLock")
+assert dpc.index("SofDspWrite32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTda") < dpc.index("Ctx->FwState = SOF_FW_BOOT_READY_RECEIVED")
+assert publish.index("KeAcquireSpinLock(&Ctx->IpcLock") < publish.index("Ctx->FwState = SOF_FW_BOOT_READY_RECEIVED") < publish.index("KeReleaseSpinLock(&Ctx->IpcLock")
 assert "bootReady && !Ctx->IpcFaulted" in publish
 assert "else if (bootFault)" in publish
+assert "Ctx->FwState = SOF_FW_BOOT_COMPLETE" not in dpc
 assert "KeSetEvent(&Ctx->FwReadyEvent" in publish.split("else if (bootFault)",1)[1]
 assert "Restore DONE even for a BUSY-only IRQ" in dpc
 print("PASS: single DPC consumer, acknowledged readiness, fault wakeup and bounded boot wait")

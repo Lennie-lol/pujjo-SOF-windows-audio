@@ -894,7 +894,7 @@ SofIpcDpcHandler(
         KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
         if (bootReady && !Ctx->IpcFaulted &&
             Ctx->FwState == SOF_FW_BOOT_IN_PROGRESS) {
-            Ctx->FwState = SOF_FW_BOOT_COMPLETE;
+            Ctx->FwState = SOF_FW_BOOT_READY_RECEIVED;
             KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
         } else if (bootFault) {
             /* Wake the loader promptly; the fault state is already latched. */
@@ -936,7 +936,8 @@ SofIpcSendWhilePowered(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ PSOF_IPC_MESSAGE Msg,
     _Inout_opt_ PSOF_IPC_MESSAGE Reply,
-    _In_ ULONG TimeoutMs
+    _In_ ULONG TimeoutMs,
+    _In_ SOF_FW_BOOT_STATE RequiredState
 )
 {
     KIRQL oldIrql;
@@ -951,8 +952,7 @@ SofIpcSendWhilePowered(
         return STATUS_INVALID_PARAMETER;
     if (KeGetCurrentIrql() != PASSIVE_LEVEL)
         return STATUS_INVALID_DEVICE_STATE;
-    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc || !Ctx->ReplyBuffer ||
-        Ctx->FwState != SOF_FW_BOOT_COMPLETE)
+    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc || !Ctx->ReplyBuffer)
         return STATUS_DEVICE_NOT_READY;
     if ((Msg->Primary & PJ_IPC4_RESERVED_MASK) != 0u ||
         pj_ipc4_is_reply(Msg->Primary) || pj_ipc4_is_notification(Msg->Primary))
@@ -989,7 +989,7 @@ SofIpcSendWhilePowered(
 
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
 
-    if (Ctx->IpcFaulted || Ctx->FwState != SOF_FW_BOOT_COMPLETE) {
+    if (Ctx->IpcFaulted || Ctx->FwState != RequiredState) {
         KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
         return STATUS_DEVICE_NOT_READY;
     }
@@ -1117,8 +1117,43 @@ SofIpcSendMessage(
     if (KeGetCurrentIrql() != PASSIVE_LEVEL) return STATUS_INVALID_DEVICE_STATE;
     if (!ExAcquireRundownProtection(&Ctx->IpcRundown))
         return STATUS_DEVICE_NOT_READY;
-    status = SofIpcSendWhilePowered(Ctx, Msg, Reply, TimeoutMs);
+    status = SofIpcSendWhilePowered(Ctx, Msg, Reply, TimeoutMs, SOF_FW_BOOT_COMPLETE);
     ExReleaseRundownProtection(&Ctx->IpcRundown);
+    return status;
+}
+
+NTSTATUS SofIpcGetBootFirmwareVersion(
+    _In_ PSOF_DEVICE_CONTEXT Ctx,
+    _Out_writes_(4) USHORT Version[4]
+)
+{
+    pj_ipc4_packet packet;
+    SOF_IPC_MESSAGE request = {0}, reply = {0};
+    NTSTATUS status;
+
+    if (!Ctx || !Version) return STATUS_INVALID_PARAMETER;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) return STATUS_INVALID_DEVICE_STATE;
+    if (pj_ipc4_large_config_get(SOF_IPC4_MOD_INIT_BASEFW_MOD_ID,
+            SOF_IPC4_MOD_INIT_BASEFW_INSTANCE_ID, SOF_IPC4_FW_PARAM_FW_CONFIG,
+            PJ_IPC4_MAX_MAILBOX_PAYLOAD, &packet) != PJ_IPC4_VALID)
+        return STATUS_INVALID_PARAMETER;
+
+    request.Primary = packet.primary;
+    request.Extension = packet.extension;
+    reply.PayloadSize = PJ_IPC4_MAX_MAILBOX_PAYLOAD;
+    reply.Payload = ExAllocatePool2(POOL_FLAG_NON_PAGED, reply.PayloadSize, SOF_DEVICE_TAG);
+    if (!reply.Payload) return STATUS_INSUFFICIENT_RESOURCES;
+
+    status = STATUS_DEVICE_NOT_READY;
+    if (ExAcquireRundownProtection(&Ctx->IpcRundown)) {
+        status = SofIpcSendWhilePowered(Ctx, &request, &reply, 500,
+                                        SOF_FW_BOOT_READY_RECEIVED);
+        ExReleaseRundownProtection(&Ctx->IpcRundown);
+    }
+    if (NT_SUCCESS(status) &&
+        pj_ipc4_fw_version(reply.Payload, reply.PayloadSize, Version) != PJ_IPC4_VALID)
+        status = STATUS_DEVICE_PROTOCOL_ERROR;
+    ExFreePoolWithTag(reply.Payload, SOF_DEVICE_TAG);
     return status;
 }
 

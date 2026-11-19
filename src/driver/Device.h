@@ -93,7 +93,9 @@ typedef enum _SOF_FW_BOOT_STATE {
     SOF_FW_BOOT_IN_PROGRESS,
     /** @brief Firmware boot handshake timed out or ROM reported error code in FSR. */
     SOF_FW_BOOT_FAILED,
-    /** @brief DSP firmware sent FW_READY notification; IPC4 message pump operational. */
+    /* FW_READY acknowledged; only the loader may query the running version. */
+    SOF_FW_BOOT_READY_RECEIVED,
+    /** @brief The running firmware version matches the reviewed image. */
     SOF_FW_BOOT_COMPLETE
 } SOF_FW_BOOT_STATE;
 
