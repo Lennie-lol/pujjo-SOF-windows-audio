@@ -286,6 +286,46 @@ NTSTATUS SofNhltCopyConfiguration(
     return STATUS_SUCCESS;
 }
 
+/* The generated header is reviewed as driver source, never read from a
+ * registry path or replaced independently of the signed driver. */
+#ifdef _KERNEL_MODE
+#ifdef PUJJO_REVIEWED_TOPOLOGY_NHLT
+#include "PujjoReviewedTopologyNhlt.h"
+#endif
+static NTSTATUS SofNhltCopyFallback(NTSTATUS AcpiStatus, const UCHAR *Table,
+                                    ULONG Size, PVOID *Buffer, PULONG Bytes)
+{
+    SOF_NHLT_INFO info;
+    PVOID copy;
+    NTSTATUS status;
+    if (!Buffer || !Bytes) return STATUS_INVALID_PARAMETER;
+    *Buffer = NULL;
+    *Bytes = 0;
+    if (NT_SUCCESS(AcpiStatus)) return STATUS_INVALID_PARAMETER;
+    if (AcpiStatus != STATUS_NOT_FOUND && AcpiStatus != STATUS_OBJECT_NAME_NOT_FOUND)
+        return AcpiStatus;
+    if (!Table || !Size) return STATUS_NOT_FOUND;
+    status = SofNhltParse(Table, Size, &info);
+    if (!NT_SUCCESS(status)) return status;
+    copy = ExAllocatePool2(POOL_FLAG_NON_PAGED, Size, SOF_NHLT_TAG);
+    if (!copy) return STATUS_INSUFFICIENT_RESOURCES;
+    RtlCopyMemory(copy, Table, Size);
+    *Buffer = copy;
+    *Bytes = Size;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS SofNhltQueryPujjoFallback(NTSTATUS AcpiStatus, PVOID *Buffer, PULONG Bytes)
+{
+#ifdef PUJJO_REVIEWED_TOPOLOGY_NHLT
+    return SofNhltCopyFallback(AcpiStatus, PujjoTopologyNhlt, (ULONG)sizeof(PujjoTopologyNhlt),
+                               Buffer, Bytes);
+#else
+    return SofNhltCopyFallback(AcpiStatus, NULL, 0, Buffer, Bytes);
+#endif
+}
+#endif
+
 NTSTATUS SofNhltQueryAcpiTable(
     _Out_ PVOID *NhltBufferOut,
     _Out_ PULONG NhltSizeOut
