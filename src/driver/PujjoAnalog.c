@@ -137,6 +137,58 @@ static NTSTATUS StopRoute(PSOF_DEVICE_CONTEXT parent, PUJJO_ANALOG_LEASE *lease,
     return status;
 }
 
+/* Both publication and each new stream must match the reviewed record.
+ * A matching format alone cannot qualify clock divisors or reserved bits. */
+static NTSTATUS VerifySspConfiguration(PSOF_DEVICE_CONTEXT parent,
+                                       const PUJJO_ANALOG_PROFILE *profile)
+{
+    SOF_NHLT_CONFIG_KEY key = {0};
+    UCHAR actual[PUJJO_REVIEWED_SSP_BYTES];
+    ULONG blobBytes = 0;
+    BOOLEAN nonzero = FALSE;
+    NTSTATUS status;
+
+    if (!parent->NhltTable || !parent->NhltTableSize)
+        return STATUS_DEVICE_NOT_READY;
+    for (ULONG i = 0; i < sizeof(profile->VerifiedSspConfig); ++i)
+        if (profile->VerifiedSspConfig[i]) nonzero = TRUE;
+    if (!nonzero) return STATUS_NOT_SUPPORTED;
+    key.LinkType = NHLT_LINK_SSP;
+    key.VirtualBusId = (UCHAR)profile->VerifiedSsp;
+    key.Direction = profile->Role == PujjoAudioHeadsetMic ?
+        NHLT_DIRECTION_CAPTURE : NHLT_DIRECTION_RENDER;
+    key.DeviceType = NHLT_DEVICE_I2S;
+    key.SampleRate = profile->Format.Rate;
+    key.Channels = profile->Format.Channels;
+    key.ContainerBits = profile->Format.ContainerBits;
+    key.ValidBits = profile->Format.ValidBits;
+    status = SofNhltCopyConfiguration(parent->NhltTable, parent->NhltTableSize,
+                                       &key, actual, (ULONG)sizeof(actual), &blobBytes);
+    if (!NT_SUCCESS(status)) return status;
+    if (blobBytes != sizeof(actual) || (blobBytes & 3u) ||
+        blobBytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD -
+            (sizeof(struct sof_ipc4_copier_data) - sizeof(ULONG)))
+        return STATUS_INVALID_BUFFER_SIZE;
+    return RtlEqualMemory(actual, profile->VerifiedSspConfig, sizeof(actual)) ?
+        STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+}
+
+/* Firmware may acknowledge RUN without implementing its requested delay.
+ * Keep the route muted while a separately reviewed host-side delay elapses.
+ * Elapsed time is not proof that an electrical clock is present. */
+static NTSTATUS WaitForHeadsetClock(const PUJJO_ANALOG_PROFILE *profile)
+{
+    LARGE_INTEGER interval;
+    if (profile->Role == PujjoAudioSpeaker)
+        return profile->HeadsetClockSettleMs == 0u ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+    if (!profile->HeadsetClockSettleMs ||
+        profile->HeadsetClockSettleMs > PUJJO_HEADSET_SETTLE_MAX_MS)
+        return STATUS_NOT_SUPPORTED;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) return STATUS_INVALID_DEVICE_STATE;
+    interval.QuadPart = -(LONGLONG)profile->HeadsetClockSettleMs * 10000LL;
+    return KeDelayExecutionThread(KernelMode, FALSE, &interval);
+}
+
 static NTSTATUS AnalogGetFormat(PVOID context, PUJJO_AUDIO_FORMAT *format)
 {
     PUJJO_ANALOG_CHILD *child = context;
@@ -169,6 +221,8 @@ static NTSTATUS AnalogAllocate(PVOID context, ULONG requested, PUJJO_AUDIO_BUFFE
         status = STATUS_DEVICE_BUSY;
         goto Done;
     }
+    status = VerifySspConfiguration(parent, profile);
+    if (!NT_SUCCESS(status)) goto Done;
     SofIpc4BuildDefaultStereoFormat(profile->Format.Rate, profile->Format.ContainerBits, &format);
     format.ValidBitDepth = profile->Format.ValidBits;
     if (!pj_pcm_notification_ring(format.SamplingFrequency, format.ChannelsCount,
@@ -264,6 +318,8 @@ static NTSTATUS AnalogSetState(PVOID context, PVOID handle, ULONG state)
     if (NT_SUCCESS(status) && !lease->Stream->IsCapture)
         status = SofWaveRtSetVolume(lease->Stream, -1, profile->MaximumPlaybackGain);
     if (NT_SUCCESS(status)) status = SofWaveRtSetState(lease->Stream, KSSTATE_RUN);
+    if (NT_SUCCESS(status)) status = WaitForHeadsetClock(profile);
+    if (NT_SUCCESS(status) && !RouteOnline(parent)) status = STATUS_DEVICE_NOT_READY;
     if (NT_SUCCESS(status)) {
         settings.DspMuted = 1u;
         settings.Codec.dsp_muted = 1u;
@@ -390,13 +446,11 @@ static NTSTATUS PublishAnalogChildLocked(PSOF_DEVICE_CONTEXT parent,
         RTL_CONSTANT_STRING(L"HeadsetMic"),
         RTL_CONSTANT_STRING(L"Speaker")
     };
-    SOF_NHLT_CONFIG_KEY key = {0};
     PUJJO_AUDIO_BUS bus = {0};
     WDF_QUERY_INTERFACE_CONFIG query;
     WDF_OBJECT_ATTRIBUTES attributes;
     PWDFDEVICE_INIT init;
     WDFDEVICE child = NULL;
-    ULONG blobBytes;
     NTSTATUS status;
     PUJJO_AUDIO_ROLE role;
 
@@ -416,6 +470,11 @@ static NTSTATUS PublishAnalogChildLocked(PSOF_DEVICE_CONTEXT parent,
         (parent->AnalogPublished & (1u << role)))
         return STATUS_DEVICE_NOT_READY;
 
+    if ((role == PujjoAudioSpeaker && profile->HeadsetClockSettleMs != 0u) ||
+        (role != PujjoAudioSpeaker && (!profile->HeadsetClockSettleMs ||
+         profile->HeadsetClockSettleMs > PUJJO_HEADSET_SETTLE_MAX_MS)))
+        return STATUS_NOT_SUPPORTED;
+
     if (role == PujjoAudioSpeaker &&
         ((profile->Peripheral.SdbPolarity != PujjoAnalogSdbActiveLow &&
           profile->Peripheral.SdbPolarity != PujjoAnalogSdbActiveHigh) ||
@@ -433,20 +492,8 @@ static NTSTATUS PublishAnalogChildLocked(PSOF_DEVICE_CONTEXT parent,
             (role == PujjoAudioHeadsetMic ? PJ5682S_ROUTE_ADC : PJ5682S_ROUTE_DAC)))
         return STATUS_NOT_SUPPORTED;
 
-    key.LinkType = NHLT_LINK_SSP;
-    key.VirtualBusId = (UCHAR)profile->VerifiedSsp;
-    key.Direction = role == PujjoAudioHeadsetMic ? NHLT_DIRECTION_CAPTURE : NHLT_DIRECTION_RENDER;
-    key.DeviceType = NHLT_DEVICE_I2S;
-    key.SampleRate = profile->Format.Rate;
-    key.Channels = profile->Format.Channels;
-    key.ContainerBits = profile->Format.ContainerBits;
-    key.ValidBits = profile->Format.ValidBits;
-    status = SofNhltCopyConfiguration(parent->NhltTable, parent->NhltTableSize,
-                                       &key, NULL, 0, &blobBytes);
-    if (status != STATUS_BUFFER_TOO_SMALL) return status;
-    if ((blobBytes & 3u) || blobBytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD -
-            (sizeof(struct sof_ipc4_copier_data) - sizeof(ULONG)))
-        return STATUS_INVALID_BUFFER_SIZE;
+    status = VerifySspConfiguration(parent, profile);
+    if (!NT_SUCCESS(status)) return status;
 
     init = WdfPdoInitAllocate(parent->WdfDevice);
     if (!init) return STATUS_INSUFFICIENT_RESOURCES;

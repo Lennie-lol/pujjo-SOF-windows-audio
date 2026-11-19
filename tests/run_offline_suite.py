@@ -5,7 +5,7 @@ import argparse, json, os, re, subprocess, sys
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 SUITES=[
- 'tests/test_topology_fallback.py',
+ 'tests/test_topology_fallback.py','tests/test_ssp_profile_contract.py',
  'tests/test_kmdf_security.py','tests/test_bringup_static.py',
  'tests/run_bringup_tests.py','tests/test_pujjo_sof_fw_static.py',
  'tests/run_pujjo_sof_fw_tests.py','tests/test_rt1019p_static.py',
