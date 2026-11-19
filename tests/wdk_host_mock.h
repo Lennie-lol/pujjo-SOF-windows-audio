@@ -38,6 +38,15 @@ typedef struct {int direction;void *buffer;ULONG length;} SPB_TRANSFER_LIST_ENTR
 #define STATUS_SUCCESS 0
 #define STATUS_INVALID_PARAMETER -1
 #define STATUS_INVALID_DEVICE_STATE -2
+#define STATUS_ACCESS_DENIED -3
+#define STATUS_IO_DEVICE_ERROR -4
+#define KernelMode 0
+typedef struct {long long QuadPart;} LARGE_INTEGER;
+static int fail_delay, delays;
+static NTSTATUS KeDelayExecutionThread(int mode, int alertable, LARGE_INTEGER *delay) {
+ (void)mode;(void)alertable;assert(delay->QuadPart<=-3000000 && delay->QuadPart>=-20000000);
+ ++delays;return fail_delay?-13:0;
+}
 #define NT_SUCCESS(x) ((x)>=0)
 #define WDF_NO_HANDLE NULL
 #define WDF_NO_OBJECT_ATTRIBUTES NULL

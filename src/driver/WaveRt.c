@@ -174,7 +174,7 @@ static NTSTATUS SofWaveRtApplyCachedGain(PSOF_WAVERT_STREAM Stream, BOOLEAN Mute
     return status;
 }
 
-NTSTATUS SofWaveRtCreateStream(
+static NTSTATUS SofWaveRtCreateStreamCore(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
     _In_ SOF_ENDPOINT_TYPE EndpointType,
     _In_ BOOLEAN IsCapture,
@@ -182,6 +182,7 @@ NTSTATUS SofWaveRtCreateStream(
     _In_ const PSOF_AUDIO_FORMAT_PARAMS Format,
     _In_ ULONG BufferSizeBytes,
     _In_ ULONG PeriodMs,
+    _In_ ULONG VerifiedSspPort,
     _Out_ PSOF_WAVERT_STREAM *StreamOut
 )
 {
@@ -209,20 +210,31 @@ NTSTATUS SofWaveRtCreateStream(
     return STATUS_NOT_SUPPORTED;
 #endif
     /* Creation is serialized by the parent audio bus. */
-    if (Ctx == NULL || !Ctx->AudioOnline || Ctx->AudioDmaFaulted ||
-        Ctx->FwState != SOF_FW_BOOT_COMPLETE)
+    if (Ctx == NULL || Ctx->AudioDmaFaulted || Ctx->FwState != SOF_FW_BOOT_COMPLETE)
         return STATUS_DEVICE_NOT_READY;
-    if (EndpointType != SOF_ENDPOINT_DMIC_PDM)
+    if (EndpointType == SOF_ENDPOINT_DMIC_PDM) {
+        if (!Ctx->AudioOnline) return STATUS_DEVICE_NOT_READY;
+        if (!IsCapture) return STATUS_INVALID_PARAMETER;
+        directionSlot = 0;
+    }
+#ifdef PUJJO_ENABLE_EXPERIMENTAL_ANALOG
+    else if (EndpointType == SOF_ENDPOINT_PUJJO_HEADPHONE && !IsCapture && VerifiedSspPort == 0) {
+        directionSlot = 0;
+    } else if (EndpointType == SOF_ENDPOINT_PUJJO_HEADSET_MIC && IsCapture && VerifiedSspPort == 0) {
+        directionSlot = 1;
+    } else if (EndpointType == SOF_ENDPOINT_PUJJO_SPEAKER && !IsCapture && VerifiedSspPort == 1) {
+        directionSlot = 1;
+    }
+#endif
+    else {
         return STATUS_NOT_SUPPORTED;
-
-    if (!IsCapture) return STATUS_INVALID_PARAMETER;
+    }
     if (Format->SamplingFrequency != 48000u ||
         (Format->BitDepth != 16u && Format->BitDepth != 32u) ||
         (Format->ValidBitDepth != 16u && Format->ValidBitDepth != 24u &&
          Format->ValidBitDepth != 32u) ||
         (Format->BitDepth == 32u && Format->ValidBitDepth == 16u))
         return STATUS_NOT_SUPPORTED;
-    directionSlot = 0;
     if (StreamTag && StreamTag != directionSlot + 1u)
         return STATUS_INVALID_PARAMETER;
     if (!Ctx->Bar0VirtualAddress || !pj_hda_stream_slot(Ctx->NumCaptureStreams,
@@ -294,6 +306,14 @@ NTSTATUS SofWaveRtCreateStream(
      * actual bounded capability-derived descriptor. */
     stream->StreamIndex = descriptorIndex;
     stream->StreamTag = directionSlot + 1u;
+#ifdef PUJJO_ENABLE_EXPERIMENTAL_ANALOG
+    switch (EndpointType) {
+    case SOF_ENDPOINT_PUJJO_HEADPHONE: stream->PipelineId = SOF_PIPELINE_ID_PUJJO_HEADPHONE; break;
+    case SOF_ENDPOINT_PUJJO_HEADSET_MIC: stream->PipelineId = SOF_PIPELINE_ID_PUJJO_HEADSET_MIC; break;
+    case SOF_ENDPOINT_PUJJO_SPEAKER: stream->PipelineId = SOF_PIPELINE_ID_PUJJO_SPEAKER; break;
+    default: break;
+    }
+#endif
 #endif
     stream->Format = *Format;
     stream->BufferSizeBytes = BufferSizeBytes;
@@ -408,6 +428,18 @@ NTSTATUS SofWaveRtCreateStream(
                                            &stream->HostCopierInstance, &stream->GainInstance, &stream->DaiCopierInstance);
         /* Propagate a failed pipeline; never report silent success. */
         break;
+    case SOF_ENDPOINT_PUJJO_HEADPHONE:
+    case SOF_ENDPOINT_PUJJO_HEADSET_MIC:
+    case SOF_ENDPOINT_PUJJO_SPEAKER:
+#if defined(_KERNEL_MODE) && defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG)
+        status = SofIpc4CreateSspPipeline(Ctx, stream->PipelineId, stream->StreamTag,
+            VerifiedSspPort, IsCapture, Format, &stream->HostCopierInstance,
+            &stream->GainInstance, &stream->DaiCopierInstance);
+#else
+        UNREFERENCED_PARAMETER(VerifiedSspPort);
+        status = STATUS_NOT_SUPPORTED;
+#endif
+        break;
     case SOF_ENDPOINT_I2S_SSP2:
         /* Pujjo safety: RT5682/RT1019 initialization and validated SSP port
          * routing are not yet implemented. Never claim playback succeeded. */
@@ -463,6 +495,27 @@ NTSTATUS SofWaveRtCreateStream(
     *StreamOut = stream;
     return STATUS_SUCCESS;
 }
+
+NTSTATUS SofWaveRtCreateStream(PSOF_DEVICE_CONTEXT Ctx, SOF_ENDPOINT_TYPE Endpoint,
+    BOOLEAN IsCapture, ULONG StreamTag, const PSOF_AUDIO_FORMAT_PARAMS Format,
+    ULONG BufferBytes, ULONG PeriodMs, PSOF_WAVERT_STREAM *Stream)
+{
+    return SofWaveRtCreateStreamCore(Ctx, Endpoint, IsCapture, StreamTag, Format,
+                                      BufferBytes, PeriodMs, 0xffffffffu, Stream);
+}
+
+#if defined(_KERNEL_MODE) && defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG)
+NTSTATUS SofWaveRtCreateSspStream(PSOF_DEVICE_CONTEXT Ctx, SOF_ENDPOINT_TYPE Endpoint,
+    ULONG VerifiedPort, const SOF_AUDIO_FORMAT_PARAMS *Format, ULONG BufferBytes,
+    ULONG PeriodMs, PSOF_WAVERT_STREAM *Stream)
+{
+    if (Endpoint != SOF_ENDPOINT_PUJJO_HEADPHONE && Endpoint != SOF_ENDPOINT_PUJJO_HEADSET_MIC &&
+        Endpoint != SOF_ENDPOINT_PUJJO_SPEAKER)
+        return STATUS_INVALID_PARAMETER;
+    return SofWaveRtCreateStreamCore(Ctx, Endpoint, Endpoint == SOF_ENDPOINT_PUJJO_HEADSET_MIC,
+        0, (PSOF_AUDIO_FORMAT_PARAMS)Format, BufferBytes, PeriodMs, VerifiedPort, Stream);
+}
+#endif
 
 /**
  * @brief Teardown and deallocation of a WaveRT stream instance.
@@ -1121,7 +1174,10 @@ static PUCHAR SofWaveRtGetPplcAddress(
 {
 #ifdef _KERNEL_MODE
     if (Stream != NULL && Stream->DeviceContext != NULL && Stream->DeviceContext->Bar0VirtualAddress != NULL) {
-        if (Stream->EndpointType == SOF_ENDPOINT_DMIC_PDM || Stream->EndpointType == SOF_ENDPOINT_I2S_SSP2) {
+        if (Stream->EndpointType == SOF_ENDPOINT_DMIC_PDM || Stream->EndpointType == SOF_ENDPOINT_I2S_SSP2 ||
+            Stream->EndpointType == SOF_ENDPOINT_PUJJO_HEADPHONE ||
+            Stream->EndpointType == SOF_ENDPOINT_PUJJO_HEADSET_MIC ||
+            Stream->EndpointType == SOF_ENDPOINT_PUJJO_SPEAKER) {
             return NULL;
         }
         PSOF_DEVICE_CONTEXT ctx = Stream->DeviceContext;

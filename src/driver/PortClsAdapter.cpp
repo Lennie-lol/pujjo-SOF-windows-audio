@@ -257,6 +257,61 @@ static const PCFILTER_DESCRIPTOR TopologyFilter = {
     RTL_NUMBER_OF(TopologyCategories), TopologyCategories
 };
 
+static BOOLEAN IsCaptureRole(PUJJO_AUDIO_ROLE role)
+{
+    return role == PujjoAudioDmic || role == PujjoAudioHeadsetMic;
+}
+
+static const PCPIN_DESCRIPTOR RenderPins[] = {
+    {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
+        KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_NONE, &KSCATEGORY_AUDIO, nullptr, 0}},
+    {1, 1, 0, nullptr, {0, nullptr, 0, nullptr, 1, CaptureRanges,
+        KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_SINK, &KSCATEGORY_AUDIO, nullptr, 0}}
+};
+static const PCCONNECTION_DESCRIPTOR RenderConnections[] = {{PCFILTER_NODE, 1, PCFILTER_NODE, 0}};
+static const GUID RenderCategories[] = {
+    STATICGUIDOF(KSCATEGORY_AUDIO), STATICGUIDOF(KSCATEGORY_RENDER), STATICGUIDOF(KSCATEGORY_REALTIME)
+};
+static const PCFILTER_DESCRIPTOR RenderFilter = {
+    0, nullptr, sizeof(PCPIN_DESCRIPTOR), RTL_NUMBER_OF(RenderPins), RenderPins,
+    0, 0, nullptr, RTL_NUMBER_OF(RenderConnections), RenderConnections,
+    RTL_NUMBER_OF(RenderCategories), RenderCategories
+};
+
+static const PCPIN_DESCRIPTOR HeadsetTopologyPins[] = {
+    {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
+        KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_NONE, &KSNODETYPE_MICROPHONE, nullptr, 0}},
+    {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
+        KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_NONE, &KSCATEGORY_AUDIO, nullptr, 0}}
+};
+static const PCPIN_DESCRIPTOR HeadphoneTopologyPins[] = {
+    {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
+        KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_NONE, &KSNODETYPE_HEADPHONES, nullptr, 0}},
+    {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
+        KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_NONE, &KSCATEGORY_AUDIO, nullptr, 0}}
+};
+static const PCPIN_DESCRIPTOR SpeakerTopologyPins[] = {
+    {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
+        KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_NONE, &KSNODETYPE_SPEAKER, nullptr, 0}},
+    {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
+        KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_NONE, &KSCATEGORY_AUDIO, nullptr, 0}}
+};
+static const PCFILTER_DESCRIPTOR HeadsetTopologyFilter = {
+    0, nullptr, sizeof(PCPIN_DESCRIPTOR), RTL_NUMBER_OF(HeadsetTopologyPins), HeadsetTopologyPins,
+    0, 0, nullptr, RTL_NUMBER_OF(PinConnections), PinConnections,
+    RTL_NUMBER_OF(TopologyCategories), TopologyCategories
+};
+static const PCFILTER_DESCRIPTOR HeadphoneTopologyFilter = {
+    0, nullptr, sizeof(PCPIN_DESCRIPTOR), RTL_NUMBER_OF(HeadphoneTopologyPins), HeadphoneTopologyPins,
+    0, 0, nullptr, RTL_NUMBER_OF(RenderConnections), RenderConnections,
+    RTL_NUMBER_OF(TopologyCategories), TopologyCategories
+};
+static const PCFILTER_DESCRIPTOR SpeakerTopologyFilter = {
+    0, nullptr, sizeof(PCPIN_DESCRIPTOR), RTL_NUMBER_OF(SpeakerTopologyPins), SpeakerTopologyPins,
+    0, 0, nullptr, RTL_NUMBER_OF(RenderConnections), RenderConnections,
+    RTL_NUMBER_OF(TopologyCategories), TopologyCategories
+};
+
 class DmicWave final : public IMiniportWaveRT {
     LONG m_references = 1;
     PUJJO_AUDIO_BUS m_bus;
@@ -288,7 +343,7 @@ public:
     STDMETHODIMP GetDescription(PPCFILTER_DESCRIPTOR *Out) override
     {
         if (!Out) return STATUS_INVALID_PARAMETER;
-        *Out = (PPCFILTER_DESCRIPTOR)&WaveFilter;
+        *Out = (PPCFILTER_DESCRIPTOR)(IsCaptureRole(m_format.Role) ? &WaveFilter : &RenderFilter);
         return STATUS_SUCCESS;
     }
     STDMETHODIMP Init(PUNKNOWN, PRESOURCELIST, PPORTWAVERT Port) override
@@ -349,14 +404,16 @@ public:
     {
         if (!Out) return STATUS_INVALID_PARAMETER;
         *Out = nullptr;
-        if (!Capture || Pin != DMIC_CAPTURE_PIN) return STATUS_NOT_SUPPORTED;
+        if ((!!Capture) != IsCaptureRole(m_format.Role) || Pin != DMIC_CAPTURE_PIN)
+            return STATUS_NOT_SUPPORTED;
         NTSTATUS status = ValidateFormat(Format, m_format);
         if (!NT_SUCCESS(status)) return status;
-        PUJJO_AUDIO_FORMAT active;
+        PUJJO_AUDIO_FORMAT active = {};
         status = m_bus.GetFormat(m_bus.Header.Context, &active);
         if (!NT_SUCCESS(status)) return status;
         if (active.Rate != m_format.Rate || active.Channels != m_format.Channels ||
-            active.ContainerBits != m_format.ContainerBits || active.ValidBits != m_format.ValidBits)
+            active.ContainerBits != m_format.ContainerBits || active.ValidBits != m_format.ValidBits ||
+            active.Role != m_format.Role)
             return STATUS_DEVICE_NOT_READY;
         auto stream = new (POOL_FLAG_NON_PAGED, AUDIO_POOL_TAG) DmicStream(m_bus, m_format);
         if (!stream) return STATUS_INSUFFICIENT_RESOURCES;
@@ -367,8 +424,11 @@ public:
 
 class DmicTopology final : public IMiniportTopology {
     LONG m_references = 1;
+    PUJJO_AUDIO_ROLE m_role;
 
 public:
+    explicit DmicTopology(PUJJO_AUDIO_ROLE Role) : m_role(Role) {}
+
     STDMETHODIMP QueryInterface(REFIID Id, PVOID *Out) override
     {
         if (!Out) return STATUS_INVALID_PARAMETER;
@@ -390,7 +450,12 @@ public:
     STDMETHODIMP GetDescription(PPCFILTER_DESCRIPTOR *Out) override
     {
         if (!Out) return STATUS_INVALID_PARAMETER;
-        *Out = (PPCFILTER_DESCRIPTOR)&TopologyFilter;
+        switch (m_role) {
+        case PujjoAudioHeadphone: *Out = (PPCFILTER_DESCRIPTOR)&HeadphoneTopologyFilter; break;
+        case PujjoAudioHeadsetMic: *Out = (PPCFILTER_DESCRIPTOR)&HeadsetTopologyFilter; break;
+        case PujjoAudioSpeaker: *Out = (PPCFILTER_DESCRIPTOR)&SpeakerTopologyFilter; break;
+        default: *Out = (PPCFILTER_DESCRIPTOR)&TopologyFilter; break;
+        }
         return STATUS_SUCCESS;
     }
     STDMETHODIMP Init(PUNKNOWN, PRESOURCELIST, PPORTTOPOLOGY Port) override
@@ -470,7 +535,7 @@ static VOID UnregisterPort(PDEVICE_OBJECT Device, PPORT Port)
 static NTSTATUS StartDevice(PDEVICE_OBJECT Device, PIRP Irp, PRESOURCELIST Resources)
 {
     PUJJO_AUDIO_BUS bus = {};
-    PUJJO_AUDIO_FORMAT format;
+    PUJJO_AUDIO_FORMAT format = {};
     NTSTATUS status = QueryAudioBus(Device, &bus);
     if (!NT_SUCCESS(status)) return status;
     if (bus.Header.Size != sizeof(bus) || bus.Header.Version != PUJJO_AUDIO_INTERFACE_VERSION ||
@@ -484,20 +549,34 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT Device, PIRP Irp, PRESOURCELIST Resou
     PPORT topologyPort = nullptr, wavePort = nullptr;
     DmicWave *wave = nullptr;
     DmicTopology *topology = nullptr;
+    static const PCWSTR topologyNames[] = {
+        L"DmicTopology", L"HeadphoneTopology", L"HeadsetMicTopology", L"SpeakerTopology"
+    };
+    static const PCWSTR waveNames[] = {
+        L"DmicWave", L"HeadphoneWave", L"HeadsetMicWave", L"SpeakerWave"
+    };
     status = bus.GetFormat(bus.Header.Context, &format);
+    if (NT_SUCCESS(status) && (unsigned)format.Role >= RTL_NUMBER_OF(waveNames))
+        status = STATUS_NOT_SUPPORTED;
     if (NT_SUCCESS(status)) {
-        topology = new (POOL_FLAG_NON_PAGED, AUDIO_POOL_TAG) DmicTopology;
+        topology = new (POOL_FLAG_NON_PAGED, AUDIO_POOL_TAG) DmicTopology(format.Role);
         wave = new (POOL_FLAG_NON_PAGED, AUDIO_POOL_TAG) DmicWave(bus, format);
         if (!topology || !wave) status = STATUS_INSUFFICIENT_RESOURCES;
     }
     if (NT_SUCCESS(status))
-        status = RegisterPort(Device, Irp, Resources, CLSID_PortTopology, L"DmicTopology",
+        status = RegisterPort(Device, Irp, Resources, CLSID_PortTopology, topologyNames[format.Role],
                               topology, &topologyPort);
     if (NT_SUCCESS(status))
-        status = RegisterPort(Device, Irp, Resources, CLSID_PortWaveRT, L"DmicWave", wave, &wavePort);
-    if (NT_SUCCESS(status))
-        status = PcRegisterPhysicalConnection(Device, topologyPort, DMIC_TOPO_BRIDGE,
-                                              wavePort, DMIC_WAVE_BRIDGE);
+        status = RegisterPort(Device, Irp, Resources, CLSID_PortWaveRT, waveNames[format.Role],
+                              wave, &wavePort);
+    if (NT_SUCCESS(status)) {
+        if (IsCaptureRole(format.Role))
+            status = PcRegisterPhysicalConnection(Device, topologyPort, DMIC_TOPO_BRIDGE,
+                                                  wavePort, DMIC_WAVE_BRIDGE);
+        else
+            status = PcRegisterPhysicalConnection(Device, wavePort, DMIC_WAVE_BRIDGE,
+                                                  topologyPort, DMIC_TOPO_BRIDGE);
+    }
 
     if (!NT_SUCCESS(status)) {
         if (wavePort) UnregisterPort(Device, wavePort);

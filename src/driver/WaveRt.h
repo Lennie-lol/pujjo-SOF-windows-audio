@@ -68,6 +68,9 @@ extern "C" {
 #define SOF_PIPELINE_ID_SSP_CAPTURE         8   /**< I2S SSP Capture Pipeline ID */
 #define SOF_PIPELINE_ID_SDW_PLAYBACK        9   /**< SoundWire Playback Pipeline ID */
 #define SOF_PIPELINE_ID_SDW_CAPTURE         10  /**< SoundWire Capture Pipeline ID */
+#define SOF_PIPELINE_ID_PUJJO_HEADPHONE      11
+#define SOF_PIPELINE_ID_PUJJO_HEADSET_MIC    12
+#define SOF_PIPELINE_ID_PUJJO_SPEAKER        13
 
 /**
  * @def SOF_HDA_STREAM_REG_OFFSET
@@ -224,6 +227,12 @@ NTSTATUS SofWaveRtCreateStream(
     _In_ ULONG PeriodMs,
     _Out_ PSOF_WAVERT_STREAM *StreamOut
 );
+#if defined(_KERNEL_MODE) && defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG)
+NTSTATUS SofWaveRtCreateSspStream(PSOF_DEVICE_CONTEXT Ctx, SOF_ENDPOINT_TYPE Endpoint,
+    ULONG VerifiedPort, const SOF_AUDIO_FORMAT_PARAMS *Format, ULONG BufferBytes,
+    ULONG PeriodMs, PSOF_WAVERT_STREAM *Stream);
+#endif
+
 
 /**
  * @brief Frees a WaveRT stream instance and cleans up allocated resources.

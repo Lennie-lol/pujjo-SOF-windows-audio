@@ -14,7 +14,15 @@ assert 'RESOURCE_HUB_CREATE_PATH_FROM_ID' in backend
 assert 'WdfIoTargetOpen' in backend
 assert 'GENERIC_WRITE' in backend
 assert 'Pj1019GpioWrite' not in probe
-assert 'Pj1019GpioOpen' not in probe
+# The default PnP callbacks cannot open GPIO. The opt-in query-interface
+# callback may open it after board, resource, mute and polarity checks.
+runtime = probe.split('#ifdef PJ_PERIPHERAL_RUNTIME\nstatic VOID RuntimeLock', 1)[1]
+runtime, pnp = runtime.split('#endif\n\nEVT_WDF_DRIVER_DEVICE_ADD', 1)
+assert runtime.count('Pj1019GpioOpen(') == 1
+assert 'Pj1019GpioOpen(' not in pnp
+assert runtime.index('profile->GainLimitApplied != 1u') < runtime.index('Pj1019GpioOpen(')
+assert 'defined(PJ_TARGET_AMP) && defined(PJ1019_ENABLE_CONTROL)' in probe
+
 assert 'PJ1019_TEST_ONLY_CALLBACKS' not in proj
 assert 'PJ1019_TEST_BUILD' not in proj
 assert 'src\\driver\\peripheral\\PujjoRt1019pGpioWindows.c' in proj
@@ -25,4 +33,4 @@ assert 'PjHardwareIdMatches(Device)' in probe
 assert 'pj_validate_resources(PJ_PROBE_AMP' in probe
 for banned in ('gpio_set_value', 'GPIO_PIN_75', 'GPIO_PIN_NUMBER 75'):
     assert banned not in backend
-print('PASS: no amplifier activation path linked to PnP; signed/installed artifacts absent')
+print('PASS: amplifier activation guarded and separate from default PnP; signed/installed artifacts absent')

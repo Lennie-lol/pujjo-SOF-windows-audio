@@ -52,7 +52,7 @@ def main():
                     results.append(dict(test=label,status=status,exit_code=rc))
                     print(status,label,flush=True)
                 # Execute full transport sources and coordinator as well as parser bodies.
-                for runner in ('run_loader_transport_tests.py','run_windows_transport_tests.py','run_bringup_tests.py','run_dma_tests.py','run_nhlt_bounds_tests.py','run_ipc4_protocol_tests.py','run_dma_plan_tests.py'):
+                for runner in ('run_loader_transport_tests.py','run_windows_transport_tests.py','run_bringup_tests.py','run_dma_tests.py','run_nhlt_bounds_tests.py','run_ipc4_protocol_tests.py','run_dma_plan_tests.py','run_codec_control_tests.py'):
                     env=dict(os.environ,CC=cc,CFLAGS=shlex.join(flags))
                     cmd=[sys.executable,'tests/'+runner]
                     run=subprocess.run(cmd,cwd=ROOT,env=env,capture_output=True,text=True,timeout=120)

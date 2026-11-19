@@ -34,7 +34,8 @@ for project in root.glob('*.vcxproj'):
     for node in tree.findall('.//m:PreprocessorDefinitions',ns):
         definitions=node.text or ''
         for flag in ['PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT','PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED',
-                     'PUJJO_ENABLE_EXPERIMENTAL_AUDIO',
+                     'PUJJO_ENABLE_EXPERIMENTAL_AUDIO','PUJJO_ENABLE_EXPERIMENTAL_ANALOG',
+                     'PJ5682S_ENABLE_CONTROL','PJ1019_ENABLE_CONTROL',
                      'PJ5682S_ENABLE_READONLY_PROBE','PJ5682S_TEST_ONLY_WRITES',
                      'PJ1019_TEST_ONLY_CALLBACKS','PJ1019_TEST_BUILD']:
             assert flag not in definitions,(project,flag)

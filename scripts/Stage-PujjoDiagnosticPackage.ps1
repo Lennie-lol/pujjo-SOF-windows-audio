@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory)] [string]$BinaryDirectory,
     [Parameter(Mandatory)] [string]$OutputDirectory,
     [Parameter(Mandatory)] [ValidatePattern('^[0-9a-f]{40}$')] [string]$SourceRevision,
-    [string]$KitVersion = '10.0.26100.0'
+    [string]$KitVersion = '10.0.26100.0',
+    [switch]$CodecIdentity
 )
 $ErrorActionPreference = 'Stop'
 $kitRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
@@ -16,7 +17,12 @@ $inf2Cat = Join-Path $kitRoot "bin\$KitVersion\x86\Inf2Cat.exe"
 if (!$infVerif) { throw "InfVerif is missing from WDK $KitVersion" }
 if (!(Test-Path -LiteralPath $inf2Cat -PathType Leaf)) { throw "Missing WDK tool $inf2Cat" }
 
-$names = @('pujjo_rt5682_probe', 'pujjo_rt1019_probe')
+$names = if ($CodecIdentity) { @('pujjo_rt5682_probe') } else { @('pujjo_rt5682_probe', 'pujjo_rt1019_probe') }
+$purpose = if ($CodecIdentity) {
+    'Optional RT5682S identity-only SPB diagnostic variant.'
+} else {
+    'The packages contain resource probes only.'
+}
 $templates = Join-Path $PSScriptRoot '..\packaging\diagnostics'
 $output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
 if (Test-Path -LiteralPath $output) { throw 'Output must be a new directory' }
@@ -24,7 +30,7 @@ New-Item -ItemType Directory -Path $output | Out-Null
 Set-Content -LiteralPath (Join-Path $output 'UNSIGNED-SUBMISSION-ONLY.txt') -Value @(
     "Source revision $SourceRevision"
     'Unsigned diagnostic submission input. Catalog signing and kernel-policy verification are required.'
-    'The packages contain resource probes only.'
+    $purpose
 )
 
 foreach ($name in $names) {

@@ -5,6 +5,9 @@
 #include "WaveRt.h"
 #include "PujjoDmaPlan.h"
 #include "PujjoIpc4Protocol.h"
+#ifdef PUJJO_ENABLE_EXPERIMENTAL_ANALOG
+#include "PujjoAnalog.h"
+#endif
 
 #define AUDIO_INTERFACE_TAG 'iAuP'
 
@@ -189,6 +192,10 @@ NTSTATUS SofDisconnectAudioChild(PSOF_DEVICE_CONTEXT Ctx)
     AudioSetPositionEnabled(Ctx, FALSE);
     if (Ctx->DmicStream)
         status = SofWaveRtDetachStream(Ctx->DmicStream);
+#ifdef PUJJO_ENABLE_EXPERIMENTAL_ANALOG
+    NTSTATUS analogStatus = SofDisconnectAnalogLocked(Ctx);
+    if (NT_SUCCESS(status)) status = analogStatus;
+#endif
     AudioUnlock(Ctx);
     return status;
 }

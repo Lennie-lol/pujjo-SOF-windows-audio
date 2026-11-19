@@ -105,17 +105,20 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           foreach ($case in @(
-            @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_ENABLE_EXPERIMENTAL_AUDIO' },
-            @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_READONLY_PROBE' }
+            @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_ENABLE_EXPERIMENTAL_AUDIO /DPUJJO_ENABLE_EXPERIMENTAL_ANALOG' },
+            @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_READONLY_PROBE'; Name='codec-identity' },
+            @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_CONTROL'; Name='codec-runtime' },
+            @{ Project='pujjo_rt1019_probe'; Defines='/DPJ1019_ENABLE_CONTROL'; Name='amp-runtime' }
           )) {
             $env:CL = $case.Defines
-            $objects = Join-Path $env:RUNNER_TEMP ("compile-only-" + $case.Project)
+            $variant = if ($case.Name) { $case.Name } else { $case.Project }
+            $objects = Join-Path $env:RUNNER_TEMP ("compile-only-" + $variant)
             msbuild "$($case.Project).vcxproj" /t:ClCompile /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 "/p:IntDir=$objects/" /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:minimal
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $expected = if ($case.Project -eq 'sof_dsp') { 'Loader.obj' } else { 'PujjoPeripheralKmdf.obj' }
             if (!(Get-ChildItem $objects -Filter $expected -Recurse)) { throw "Missing compile-only object $expected" }
             if ($case.Project -eq 'sof_dsp') {
-              foreach ($object in @('PujjoAudioBus.obj', 'WaveRt.obj')) {
+              foreach ($object in @('PujjoAudioBus.obj', 'WaveRt.obj', 'PujjoAnalog.obj')) {
                 if (!(Get-ChildItem $objects -Filter $object -Recurse)) { throw "Missing guarded object $object" }
               }
             }
@@ -140,6 +143,24 @@ jobs:
         run: |
           $revision = (git rev-parse HEAD).Trim()
           ./scripts/Stage-PujjoDiagnosticPackage.ps1 -BinaryDirectory bin/x64/Release -OutputDirectory "$env:RUNNER_TEMP/pujjo-diagnostics" -SourceRevision $revision
+      - name: Build and verify separate codec identity diagnostic
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $revision = (git rev-parse HEAD).Trim()
+          $build = "$env:RUNNER_TEMP/pujjo-identity-build"
+          $env:CL = '/DPJ5682S_ENABLE_READONLY_PROBE'
+          msbuild pujjo_rt5682_probe.vcxproj /t:Rebuild /p:Configuration=Release /p:Platform=x64 "/p:OutDir=$build/bin/" "/p:IntDir=$build/obj/" /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/Stage-PujjoDiagnosticPackage.ps1 -BinaryDirectory "$build/bin" -OutputDirectory "$env:RUNNER_TEMP/pujjo-codec-identity" -SourceRevision $revision -CodecIdentity
+      - name: Upload unsigned codec identity submission input
+        if: success() && matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pujjo-codec-identity-UNSIGNED-SUBMISSION
+          path: ${{ runner.temp }}/pujjo-codec-identity/
+          if-no-files-found: error
       - name: Upload unsigned diagnostic submission input
         if: success() && matrix.configuration == 'Release'
         uses: actions/upload-artifact@v4
