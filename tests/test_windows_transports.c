@@ -100,12 +100,12 @@ int main(void) {
  assert(sends==before);
  pll_profile.pll2_qualified=1;
  pll_profile.pll2_settle_ms=25;
- before=delays;
+ const int delays_before=delays;
  assert(Pj5682sSpbStartControl(&spb,&pll_profile,&codec_program)==0);
- assert(delays==before+2);
+ assert(delays==delays_before+2);
  assert(codec_registers[0x9b]==0x0203 && codec_registers[0x65]==0x50a0);
  assert(codec_registers[0x80]==0x4000 && codec_registers[0x73]==0x1021);
- assert(Pj5682sSpbStopControl(&spb)==0 && delays==before+3);
+ assert(Pj5682sSpbStopControl(&spb)==0 && delays==delays_before+3);
  assert(codec_registers[0x9b]==0 && codec_registers[0x65]==0 &&
         codec_registers[0x80]==0 && codec_registers[0x63]==0);
  spb_written_count=3;

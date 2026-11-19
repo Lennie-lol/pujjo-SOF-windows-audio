@@ -116,7 +116,7 @@ pj5682s_status pj5682s_control_start_clocked(pj5682s_control *state, const pj568
     const pj5682s_control_profile *profile, pj5682s_wait clock_wait)
 {
     pj_rt5682s_i2s_plan framing;
-    pj_rt5682s_pll2_plan pll;
+    pj_rt5682s_pll2_plan pll = {0};
     pj_clock_register_update updates[PJ5682S_MAX_START_WRITES];
     unsigned count = 0, settle_after = 0;
     unsigned use_pll;

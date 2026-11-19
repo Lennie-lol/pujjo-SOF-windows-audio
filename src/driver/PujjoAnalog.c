@@ -139,6 +139,43 @@ static NTSTATUS StopRoute(PSOF_DEVICE_CONTEXT parent, PUJJO_ANALOG_LEASE *lease,
 
 /* Both publication and each new stream must match the reviewed record.
  * A matching format alone cannot qualify clock divisors or reserved bits. */
+static ULONG SspWord(const UCHAR *blob, ULONG word)
+{
+    const UCHAR *p = blob + word * 4u;
+    return (ULONG)p[0] | ((ULONG)p[1] << 8) |
+        ((ULONG)p[2] << 16) | ((ULONG)p[3] << 24);
+}
+
+/* Validate the bare IPC4 v1.5 geometry independently of the byte allowlist.
+ * These are recovery-topology constraints, not electrical qualification.
+ * Only the reviewed profile may select the clock sources or other bits. */
+static BOOLEAN SspGeometryMatches(const PUJJO_ANALOG_PROFILE *profile)
+{
+    const UCHAR *p = profile->VerifiedSspConfig;
+    ULONG ssc0, width, slot, div;
+    if (profile->Role == PujjoAudioSpeaker) {
+        if (profile->VerifiedSsp != 1u) return FALSE;
+        slot = 32u;
+        div = 8u;
+    } else if (profile->Role == PujjoAudioHeadphone ||
+               profile->Role == PujjoAudioHeadsetMic) {
+        if (profile->VerifiedSsp != 0u) return FALSE;
+        slot = 25u;
+        div = 16u;
+    } else return FALSE;
+    if (SspWord(p, 1u) != 0xee000105u ||
+        SspWord(p, 2u) != PUJJO_REVIEWED_SSP_BYTES ||
+        SspWord(p, 22u) != 1u) return FALSE;
+    ssc0 = SspWord(p, 11u);
+    width = (ssc0 & 15u) + 1u + ((ssc0 & 0x100000u) ? 16u : 0u);
+    return width == 24u && ((ssc0 >> 8) & 0xfffu) + 1u == div &&
+        ((SspWord(p, 14u) >> 16) & 0x3fu) == slot &&
+        (SspWord(p, 15u) & 0xffu) == 3u &&
+        (SspWord(p, 16u) & 0xffu) == 3u &&
+        (SspWord(p, 21u) & 1u) != 0u &&
+        (SspWord(p, 23u) & 0xfffu) == 0u;
+}
+
 static NTSTATUS VerifySspConfiguration(PSOF_DEVICE_CONTEXT parent,
                                        const PUJJO_ANALOG_PROFILE *profile)
 {
@@ -152,7 +189,7 @@ static NTSTATUS VerifySspConfiguration(PSOF_DEVICE_CONTEXT parent,
         return STATUS_DEVICE_NOT_READY;
     for (ULONG i = 0; i < sizeof(profile->VerifiedSspConfig); ++i)
         if (profile->VerifiedSspConfig[i]) nonzero = TRUE;
-    if (!nonzero) return STATUS_NOT_SUPPORTED;
+    if (!nonzero || !SspGeometryMatches(profile)) return STATUS_NOT_SUPPORTED;
     key.LinkType = NHLT_LINK_SSP;
     key.VirtualBusId = (UCHAR)profile->VerifiedSsp;
     key.Direction = profile->Role == PujjoAudioHeadsetMic ?
@@ -488,6 +525,12 @@ static NTSTATUS PublishAnalogChildLocked(PSOF_DEVICE_CONTEXT parent,
          !profile->Peripheral.CodecAnalog.count ||
          profile->Peripheral.CodecAnalog.count > PJ5682S_MAX_ANALOG_STEPS ||
          profile->Peripheral.Codec.lrclk_hz != profile->Format.Rate ||
+         profile->Peripheral.Codec.slot_bits != 25u ||
+         profile->Peripheral.Codec.bclk_hz != 2400000u ||
+         profile->Peripheral.Codec.mclk_hz != 19200000u ||
+         profile->Peripheral.Codec.pll2_qualified != 1u ||
+         !profile->Peripheral.Codec.pll2_settle_ms ||
+         profile->Peripheral.Codec.pll2_settle_ms > PUJJO_HEADSET_SETTLE_MAX_MS ||
          profile->Peripheral.Codec.routes !=
             (role == PujjoAudioHeadsetMic ? PJ5682S_ROUTE_ADC : PJ5682S_ROUTE_DAC)))
         return STATUS_NOT_SUPPORTED;

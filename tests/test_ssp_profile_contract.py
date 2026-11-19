@@ -20,12 +20,13 @@ assert run.index("SofWaveRtSetMute(lease->Stream, TRUE)") < run.index("SofWaveRt
 assert "StopRoute(parent, lease, KSSTATE_STOP)" in run
 
 # Compile the actual production helpers against host fixture types, not WDK.
-helpers = source[source.index("static NTSTATUS VerifySspConfiguration"):source.index("static NTSTATUS AnalogGetFormat")]
+helpers = source[source.index("static ULONG SspWord"):source.index("static NTSTATUS AnalogGetFormat")]
 prefix = r'''
 #include <assert.h>
 #include <string.h>
 #include <stdbool.h>
-typedef unsigned long ULONG;
+#include <stdint.h>
+typedef uint32_t ULONG;
 typedef unsigned char UCHAR;
 typedef int BOOLEAN;
 typedef long long LONGLONG;
@@ -70,16 +71,30 @@ static int KeDelayExecutionThread(int mode, int alertable, LARGE_INTEGER *interv
 }
 '''
 suffix = r'''
+static void word(unsigned n, uint32_t v) {
+    for (unsigned i=0;i<4;++i) blob[n*4+i]=(UCHAR)(v>>(8*i));
+}
+static void geometry(unsigned speaker) {
+    memset(blob,0,sizeof(blob));
+    word(1,0xee000105u); word(2,96); word(11,0x100007u | ((speaker?7u:15u)<<8));
+    word(14,(speaker?32u:25u)<<16); word(15,3); word(16,3);
+    word(21,1); word(22,1); word(23,0);
+}
 int main(void) {
     DEVICE d={blob,96};
     PUJJO_ANALOG_PROFILE p={0};
     p.Role=PujjoAudioHeadsetMic; p.Format.Rate=48000; p.Format.Channels=2; p.Format.ContainerBits=32; p.Format.ValidBits=24;
     assert(VerifySspConfiguration(&d,&p)==STATUS_NOT_SUPPORTED);
-    memset(blob,0x5a,sizeof(blob)); memcpy(p.VerifiedSspConfig,blob,96);
+    geometry(0); memcpy(p.VerifiedSspConfig,blob,96);
     assert(VerifySspConfiguration(&d,&p)==0);
     assert(observed.LinkType==3 && observed.VirtualBusId==0 && observed.Direction==1 && observed.ValidBits==24);
     p.Role=PujjoAudioSpeaker; p.VerifiedSsp=1;
+    assert(VerifySspConfiguration(&d,&p)==STATUS_NOT_SUPPORTED);
+    geometry(1); memcpy(p.VerifiedSspConfig,blob,96);
     assert(VerifySspConfiguration(&d,&p)==0 && observed.VirtualBusId==1 && observed.Direction==0);
+    word(14,25u<<16); memcpy(p.VerifiedSspConfig,blob,96);
+    assert(VerifySspConfiguration(&d,&p)==STATUS_NOT_SUPPORTED);
+    geometry(1); memcpy(p.VerifiedSspConfig,blob,96);
     blob[95]^=1; assert(VerifySspConfiguration(&d,&p)==STATUS_NOT_SUPPORTED); blob[95]^=1;
     length=95; assert(VerifySspConfiguration(&d,&p)==STATUS_INVALID_BUFFER_SIZE); length=96;
     lookup_status=-7; assert(VerifySspConfiguration(&d,&p)==-7); lookup_status=0;

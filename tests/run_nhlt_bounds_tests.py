@@ -6,6 +6,7 @@ import os
 import subprocess
 import shlex
 import tempfile
+from test_prepare_ssp_candidate import blob, table, build
 
 root = Path(__file__).resolve().parents[1]
 header = (root / "src/driver/Nhlt.h").read_text()
@@ -56,6 +57,11 @@ typedef struct {
     UCHAR SubFormat[16];
 } WAVEFORMATEXTENSIBLE;
 '''
+const_names = ("ssp_table", "ssp0_expected", "ssp1_expected")
+ssp0, ssp1 = blob(0), blob(1)
+ssp_table, _ = build(table(0, ssp0), table(1, ssp1), ssp0, ssp1)
+fixture = "\n".join("static const UCHAR %s[] = {%s};" % (name, ",".join(map(str, data)))
+                    for name, data in zip(const_names, (ssp_table, ssp0, ssp1))) + "\n"
 main = r'''
 static void fix_checksum(UCHAR *buf, ULONG size) {
     ULONG i; UCHAR sum=0;
@@ -168,8 +174,33 @@ static void test_lookup(void) {
     assert(counts[0]==1u && counts[1]==1u);
 }
 
+static void test_generated_ssp(void) {
+    SOF_NHLT_INFO info;
+    SOF_NHLT_CONFIG_KEY key={NHLT_LINK_SSP,0,NHLT_DIRECTION_RENDER,NHLT_DEVICE_I2S,48000,2,32,24};
+    UCHAR actual[96];
+    ULONG length=0;
+    assert(SofNhltParse(ssp_table,sizeof(ssp_table),&info)==STATUS_SUCCESS);
+    assert(info.TotalEndpoints==3u && info.ExternalCodecPresent);
+    assert(SofNhltCopyConfiguration(ssp_table,sizeof(ssp_table),&key,actual,96,&length)==STATUS_SUCCESS);
+    assert(length==96 && !memcmp(actual,ssp0_expected,96));
+    key.Direction=NHLT_DIRECTION_CAPTURE;
+    assert(SofNhltCopyConfiguration(ssp_table,sizeof(ssp_table),&key,actual,96,&length)==STATUS_SUCCESS);
+    assert(length==96 && !memcmp(actual,ssp0_expected,96));
+    key.VirtualBusId=1;
+    assert(SofNhltCopyConfiguration(ssp_table,sizeof(ssp_table),&key,actual,96,&length)==STATUS_NOT_FOUND);
+    key.Direction=NHLT_DIRECTION_RENDER;
+    assert(SofNhltCopyConfiguration(ssp_table,sizeof(ssp_table),&key,actual,96,&length)==STATUS_SUCCESS);
+    assert(length==96 && !memcmp(actual,ssp1_expected,96));
+    key.ValidBits=32;
+    assert(SofNhltCopyConfiguration(ssp_table,sizeof(ssp_table),&key,actual,96,&length)==STATUS_NOT_FOUND);
+    key.ValidBits=24;
+    key.ContainerBits=24;
+    assert(SofNhltCopyConfiguration(ssp_table,sizeof(ssp_table),&key,actual,96,&length)==STATUS_NOT_FOUND);
+    puts("PASS: candidate generator to production NHLT parser, exact SSP PCM selection");
+}
 int main(void) {
     test_lookup();
+    test_generated_ssp();
     UCHAR bytes[1200]={0}; SOF_NHLT_INFO info;
     const ULONG first=(ULONG)sizeof(ACPI_NHLT_HEADER)+1u;
     ACPI_NHLT_HEADER *h=(ACPI_NHLT_HEADER*)bytes;
@@ -210,7 +241,7 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix="pj_nhlt_") as temp:
     src = Path(temp) / "nhlt.c"
     exe = Path(temp) / ("nhlt.exe" if os.name == "nt" else "nhlt")
-    src.write_text(shim + consts + packed + "\n#pragma pack(pop)\n" + info + body + main)
+    src.write_text(shim + consts + packed + "\n#pragma pack(pop)\n" + info + body + fixture + main)
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
                     *shlex.split(os.environ.get("CFLAGS", "")), str(src), "-o", str(exe)], check=True, timeout=40)
     subprocess.run([str(exe)], check=True, timeout=15)
