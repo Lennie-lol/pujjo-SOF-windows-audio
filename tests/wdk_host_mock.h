@@ -109,6 +109,7 @@ static pthread_mutex_t rendezvous=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t condition=PTHREAD_COND_INITIALIZER;
 static int block_send, entered, release_send;
 #endif
+static UCHAR last_gpio_value;
 static NTSTATUS WdfIoTargetSendIoctlSynchronously(WDFIOTARGET target,void *request,int code,
  WDF_MEMORY_DESCRIPTOR *input,void *output,WDF_REQUEST_SEND_OPTIONS *opts,ULONG_PTR *bytes) {
  (void)request;(void)output;assert(target && target->open);assert(opts->Timeout==-10000000);
@@ -123,6 +124,7 @@ static NTSTATUS WdfIoTargetSendIoctlSynchronously(WDFIOTARGET target,void *reque
   ((uint8_t*)e[1].buffer)[1]=0x49;
  } else if(code==IOCTL_GPIO_WRITE_PINS) {
   assert(input->size==1 && *(UCHAR*)input->buffer<=1);
+  last_gpio_value=*(UCHAR*)input->buffer;
  }
 #ifdef PJ_HOST_THREADS
  assert(!pthread_mutex_lock(&rendezvous));

@@ -4,8 +4,7 @@
  * @brief DriverEntry, SafeBootPolicy Engine, and Device Creation for SOF Windows Driver.
  *
  * Implements the driver lifecycle, the 3-Tier Safety Canary watchdog to prevent
- * boot-loop crashes, WDM IRP preprocessing for PortCls COM interfaces, and WDF
- * device initialization.
+ * boot-loop crashes and WDF device initialization.
  *
  * Safety Canary Architecture:
  * - Tier 0 (FORCED_SAFE): Audio DSP hardware is bypassed; driver acts as a stub.
@@ -422,71 +421,6 @@ SofEvtDeviceAdd(
 
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpPowerCallbacks);
 
-    /*
-     * Register WDM IRP Preprocess Callbacks for PortCls KS audio interfaces.
-     * PortCls handles IRP_MJ_CREATE, IRP_MJ_CLOSE, IRP_MJ_CLEANUP, and IRP_MJ_DEVICE_CONTROL
-     * for all KS subdevice filters, pins, and nodes.
-     */
-    status = WdfDeviceInitAssignWdmIrpPreprocessCallback(
-        DeviceInit,
-        SofEvtDeviceWdmIrpPreprocess,
-        IRP_MJ_CREATE,
-        NULL,
-        0
-    );
-    if (!NT_SUCCESS(status)) {
-        SofLogBreadcrumb("[5b] Assign CREATE preprocess failed!\n");
-        return status;
-    }
-
-    status = WdfDeviceInitAssignWdmIrpPreprocessCallback(
-        DeviceInit,
-        SofEvtDeviceWdmIrpPreprocess,
-        IRP_MJ_CLOSE,
-        NULL,
-        0
-    );
-    if (!NT_SUCCESS(status)) {
-        SofLogBreadcrumb("[5c] Assign CLOSE preprocess failed!\n");
-        return status;
-    }
-
-    status = WdfDeviceInitAssignWdmIrpPreprocessCallback(
-        DeviceInit,
-        SofEvtDeviceWdmIrpPreprocess,
-        IRP_MJ_CLEANUP,
-        NULL,
-        0
-    );
-    if (!NT_SUCCESS(status)) {
-        SofLogBreadcrumb("[5d] Assign CLEANUP preprocess failed!\n");
-        return status;
-    }
-
-    status = WdfDeviceInitAssignWdmIrpPreprocessCallback(
-        DeviceInit,
-        SofEvtDeviceWdmIrpPreprocess,
-        IRP_MJ_DEVICE_CONTROL,
-        NULL,
-        0
-    );
-    if (!NT_SUCCESS(status)) {
-        SofLogBreadcrumb("[5e] Assign DEVICE_CONTROL preprocess failed!\n");
-        return status;
-    }
-
-    /* Configure KMDF File Object handling so KMDF creates internal file packages (m_PkgMap) */
-    WDF_FILEOBJECT_CONFIG fileConfig;
-    WDF_FILEOBJECT_CONFIG_INIT(
-        &fileConfig,
-        WDF_NO_EVENT_CALLBACK,
-        WDF_NO_EVENT_CALLBACK,
-        WDF_NO_EVENT_CALLBACK
-    );
-    fileConfig.FileObjectClass = WdfFileObjectWdfCannotUseFsContexts;
-    fileConfig.AutoForwardCleanupClose = WdfFalse;
-    WdfDeviceInitSetFileObjectConfig(DeviceInit, &fileConfig, WDF_NO_OBJECT_ATTRIBUTES);
-
     /* Allocate Device Context */
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&deviceAttributes, SOF_DEVICE_CONTEXT);
     deviceAttributes.SynchronizationScope = WdfSynchronizationScopeNone;
@@ -504,6 +438,8 @@ SofEvtDeviceAdd(
     deviceContext = GetDeviceContext(device);
     RtlZeroMemory(deviceContext, sizeof(SOF_DEVICE_CONTEXT));
     deviceContext->WdfDevice = device;
+    KeInitializeMutex(&deviceContext->AudioMutex, 0);
+    KeInitializeSpinLock(&deviceContext->AudioPositionLock);
     deviceContext->CurrentPowerState = PowerDeviceD3;
 
     /* Create Interrupt Object */
@@ -536,28 +472,6 @@ SofEvtDeviceAdd(
 
     /* Initialize HDA Verb SpinLock */
     KeInitializeSpinLock(&deviceContext->HdaVerbLock);
-
-    /* Create Jack Poll Timer (runs at PASSIVE_LEVEL, re-armed periodically) */
-    {
-        WDF_TIMER_CONFIG timerConfig;
-        WDF_OBJECT_ATTRIBUTES timerAttributes;
-
-        WDF_TIMER_CONFIG_INIT(&timerConfig, SofEvtJackPollTimer);
-        timerConfig.AutomaticSerialization = FALSE;
-        WDF_OBJECT_ATTRIBUTES_INIT(&timerAttributes);
-        timerAttributes.ParentObject = device;
-        timerAttributes.ExecutionLevel = WdfExecutionLevelPassive;
-
-        status = WdfTimerCreate(&timerConfig, &timerAttributes, &deviceContext->JackPollTimer);
-        if (!NT_SUCCESS(status)) {
-            char tmsg[128];
-            RtlStringCbPrintfA(tmsg, sizeof(tmsg), "[Device] Failed to create JackPollTimer: 0x%08X\n", status);
-            SofLogBreadcrumb(tmsg);
-            deviceContext->JackPollTimer = NULL;
-        } else {
-            SofLogBreadcrumb("[Device] JackPollTimer created successfully (passive one-shot re-armed)\n");
-        }
-    }
 
     /* Create Watchdog Health Timer (one-shot, runs at PASSIVE_LEVEL to reset ConsecutiveCrashCount) */
     {
@@ -652,201 +566,4 @@ SofEvtDriverUnload(
     UNREFERENCED_PARAMETER(Driver);
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] Driver unloaded.\n");
-}
-
-/**
- * @brief WDM IRP Preprocess Hook for PortCls KS audio interfaces.
- *
- * Routes audio I/O requests (IRP_MJ_CREATE, IRP_MJ_CLOSE, IRP_MJ_CLEANUP,
- * IRP_MJ_DEVICE_CONTROL) to PortCls via PcDispatchIrp while shielding KMDF
- * internal bookkeeping from reference count underflow.
- *
- * @param[in] Device Handle to WDFDEVICE.
- * @param[in,out] Irp Pointer to IRP to process.
- * @return NTSTATUS Dispatch status code.
- */
-NTSTATUS
-SofEvtDeviceWdmIrpPreprocess(
-    _In_ WDFDEVICE Device,
-    _Inout_ PIRP Irp
-)
-{
-    __try {
-        if (Device == NULL || Irp == NULL) {
-            if (Irp != NULL) {
-                Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-                Irp->IoStatus.Information = 0;
-                IoCompleteRequest(Irp, IO_NO_INCREMENT);
-            }
-            return STATUS_INVALID_PARAMETER;
-        }
-
-        PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
-        if (irpSp == NULL) {
-            Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
-            Irp->IoStatus.Information = 0;
-            IoCompleteRequest(Irp, IO_NO_INCREMENT);
-            return STATUS_INVALID_DEVICE_REQUEST;
-        }
-
-        PFILE_OBJECT fileObject = irpSp->FileObject;
-        PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
-        PDEVICE_OBJECT wdmFdo = WdfDeviceWdmGetDeviceObject(Device);
-        BOOLEAN isKsRequest = FALSE;
-
-        if (fileObject != NULL) {
-            if (irpSp->MajorFunction == IRP_MJ_CREATE) {
-                /* Subdevice create: FileName is non-empty (e.g. \Wave) or RelatedFileObject is set (Pin create) */
-                if (fileObject->FileName.Length > 0 || fileObject->RelatedFileObject != NULL) {
-                    isKsRequest = TRUE;
-                } else {
-                    /* Root device open (e.g. audiodg or control query opening wdmFdo) */
-                    Irp->IoStatus.Status = STATUS_SUCCESS;
-                    Irp->IoStatus.Information = 0;
-                    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                    return STATUS_SUCCESS;
-                }
-            } else if (irpSp->MajorFunction == IRP_MJ_CLEANUP) {
-                /*
-                 * Cleanup for both subdevices and root device: complete immediately with SUCCESS.
-                 * ks.sys does not implement IRP_MJ_CLEANUP (it rejects Major 0x12 with STATUS_INVALID_DEVICE_REQUEST).
-                 * Ensure fileObject->DeviceObject points to wdmFdo so the I/O Manager decrements wdmFdo on delete.
-                 */
-                if (fileObject->DeviceObject != wdmFdo) {
-                    fileObject->DeviceObject = wdmFdo;
-                }
-                Irp->IoStatus.Status = STATUS_SUCCESS;
-                Irp->IoStatus.Information = 0;
-                IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                return STATUS_SUCCESS;
-            } else if (irpSp->MajorFunction == IRP_MJ_CLOSE) {
-                /* Subdevice close: FsContext is populated by ks.sys on Create */
-                if (fileObject->FsContext != NULL) {
-                    isKsRequest = TRUE;
-                } else {
-                    /* Root device handle close: complete immediately to avoid KMDF m_PkgMap lookup crash (0x3B) */
-                    if (fileObject->DeviceObject != wdmFdo) {
-                        fileObject->DeviceObject = wdmFdo;
-                    }
-                    Irp->IoStatus.Status = STATUS_SUCCESS;
-                    Irp->IoStatus.Information = 0;
-                    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                    return STATUS_SUCCESS;
-                }
-            } else if (fileObject->FsContext != NULL) {
-                /* KS IOCTLs, Property queries, etc. with valid FsContext */
-                isKsRequest = TRUE;
-            }
-        }
-
-        if (isKsRequest) {
-            /* Route KS Audio request to PortCls default dispatch handler */
-            if (ctx == NULL || !ctx->PortClsRegistered || ctx->AudioPortClsDevice == NULL) {
-                Irp->IoStatus.Status = STATUS_DEVICE_NOT_READY;
-                Irp->IoStatus.Information = 0;
-                IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                return STATUS_DEVICE_NOT_READY;
-            }
-
-            PDEVICE_OBJECT dispatchDevice = ctx->AudioPortClsDevice;
-
-            /* Align DeviceObject ONLY in the current IRP stack location so ks.sys sees the valid KsDeviceHeader.
-             * DO NOT modify fileObject->DeviceObject! The I/O Manager tracks device object references
-             * using fileObject->DeviceObject and calls IopDecrementDeviceObjectRef on deletion.
-             * If fileObject->DeviceObject is changed to dispatchDevice, dispatchDevice's refcount drops
-             * below 0 triggering BugCheck 0x18 (REFERENCE_BY_POINTER).
-             */
-            irpSp->DeviceObject = dispatchDevice;
-
-            if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
-                char imsg[128];
-                RtlStringCbPrintfA(imsg, sizeof(imsg), "[IRP] KS Major=%u start (Len=%u, Related=%p)\n",
-                                   irpSp->MajorFunction,
-                                   fileObject ? fileObject->FileName.Length : 0,
-                                   fileObject ? fileObject->RelatedFileObject : NULL);
-                SofLogBreadcrumb(imsg);
-
-                if (irpSp->MajorFunction == IRP_MJ_CREATE && fileObject != NULL) {
-                    char pmsg[256];
-                    RtlStringCbPrintfA(pmsg, sizeof(pmsg),
-                        "[PinCreate] FileName=%wZ, Related=%p\n",
-                        &fileObject->FileName, fileObject->RelatedFileObject);
-                    SofLogBreadcrumb(pmsg);
-
-                    if (fileObject->RelatedFileObject != NULL && Irp->AssociatedIrp.SystemBuffer != NULL) {
-                        PFILE_FULL_EA_INFORMATION ea = (PFILE_FULL_EA_INFORMATION)Irp->AssociatedIrp.SystemBuffer;
-                        if (ea->EaValueLength >= sizeof(KSPIN_CONNECT)) {
-                            PKSPIN_CONNECT pinConnect = (PKSPIN_CONNECT)(ea->EaName + ea->EaNameLength + 1);
-                            RtlStringCbPrintfA(pmsg, sizeof(pmsg),
-                                "[PinConnect] PinId=%u, iface={%08X-%04X-%04X}, med={%08X-%04X-%04X}\n",
-                                pinConnect->PinId,
-                                pinConnect->Interface.Set.Data1, pinConnect->Interface.Set.Data2, pinConnect->Interface.Set.Data3,
-                                pinConnect->Medium.Set.Data1, pinConnect->Medium.Set.Data2, pinConnect->Medium.Set.Data3);
-                            SofLogBreadcrumb(pmsg);
-                        }
-                    }
-                }
-
-                if (irpSp->MajorFunction == IRP_MJ_DEVICE_CONTROL) {
-                    ULONG ioctl = irpSp->Parameters.DeviceIoControl.IoControlCode;
-                    PVOID inBuf = irpSp->Parameters.DeviceIoControl.Type3InputBuffer;
-                    if (inBuf == NULL) {
-                        inBuf = Irp->AssociatedIrp.SystemBuffer;
-                    }
-                    char pmsg[256];
-                    pmsg[0] = '\0';
-                    if (inBuf != NULL &&
-                        irpSp->Parameters.DeviceIoControl.InputBufferLength >= sizeof(KSPROPERTY)) {
-                        PKSPROPERTY prop = (PKSPROPERTY)inBuf;
-                        RtlStringCbPrintfA(pmsg, sizeof(pmsg),
-                            "[KSProp] IOCTL=0x%08X Set={%08X-%04X-%04X} Id=%u Flags=0x%x InLen=%u OutLen=%u\n",
-                            ioctl, prop->Set.Data1, prop->Set.Data2, prop->Set.Data3, prop->Id, prop->Flags,
-                            irpSp->Parameters.DeviceIoControl.InputBufferLength,
-                            irpSp->Parameters.DeviceIoControl.OutputBufferLength);
-                    } else {
-                        RtlStringCbPrintfA(pmsg, sizeof(pmsg),
-                            "[KSIoctl] IOCTL=0x%08X InLen=%u OutLen=%u\n",
-                            ioctl,
-                            irpSp->Parameters.DeviceIoControl.InputBufferLength,
-                            irpSp->Parameters.DeviceIoControl.OutputBufferLength);
-                    }
-                    SofLogBreadcrumb(pmsg);
-                }
-            }
-
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] PcDispatchIrp: Major=%u Dev=%p File=%p FsCtx=%p\n",
-                       irpSp->MajorFunction, dispatchDevice, fileObject, fileObject ? fileObject->FsContext : NULL);
-
-            /* Legacy path remains unreachable while PortCls registration is
-             * locked. Do not mutate the I/O manager's file-object ownership. */
-            NTSTATUS dispStatus = PcDispatchIrp(dispatchDevice, Irp);
-
-            if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
-                char omsg[128];
-                RtlStringCbPrintfA(omsg, sizeof(omsg), "[IRP] KS Major=%u done: 0x%08x\n",
-                                   irpSp->MajorFunction, dispStatus);
-                SofLogBreadcrumb(omsg);
-            }
-
-            return dispStatus;
-        }
-
-        /* Pass non-audio / raw device requests back to KMDF */
-        return WdfDeviceWdmDispatchPreprocessedIrp(Device, Irp);
-
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        NTSTATUS exc = GetExceptionCode();
-        char xmsg[128];
-        RtlStringCbPrintfA(xmsg, sizeof(xmsg), "[SEH] Exception 0x%08x caught in SofEvtDeviceWdmIrpPreprocess!\n", exc);
-        SofLogBreadcrumb(xmsg);
-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "%s", xmsg);
-
-        if (Irp != NULL) {
-            Irp->IoStatus.Status = exc;
-            Irp->IoStatus.Information = 0;
-            IoCompleteRequest(Irp, IO_NO_INCREMENT);
-        }
-        return exc;
-    }
 }

@@ -32,11 +32,6 @@
 #include "PujjoDmaPlan.h"
 
 #ifdef _KERNEL_MODE
-/* No runtime registry flag can qualify the inherited WaveRT implementation. */
-static BOOLEAN SofWaveRtHardwareBackendVerified(VOID)
-{
-    return FALSE;
-}
 #define SOF_HDA_PERIOD_COMPLETE 0x04u
 
 static PUCHAR SofWaveRtHdaDescriptor(PSOF_WAVERT_STREAM Stream)
@@ -210,10 +205,13 @@ NTSTATUS SofWaveRtCreateStream(
                        BufferSizeBytes, &periodBytes))
         return STATUS_INVALID_PARAMETER;
 #ifdef _KERNEL_MODE
-    /* Require a qualified DMA/PortCls ownership path before activation. */
-    if (Ctx == NULL || Ctx->FwState != SOF_FW_BOOT_COMPLETE ||
-        !SofWaveRtHardwareBackendVerified())
-        return STATUS_NOT_SUPPORTED;
+#ifndef PUJJO_ENABLE_EXPERIMENTAL_AUDIO
+    return STATUS_NOT_SUPPORTED;
+#endif
+    /* Creation is serialized by the parent audio bus. */
+    if (Ctx == NULL || !Ctx->AudioOnline || Ctx->AudioDmaFaulted ||
+        Ctx->FwState != SOF_FW_BOOT_COMPLETE)
+        return STATUS_DEVICE_NOT_READY;
     if (EndpointType != SOF_ENDPOINT_DMIC_PDM)
         return STATUS_NOT_SUPPORTED;
 
@@ -491,7 +489,10 @@ NTSTATUS SofWaveRtFreeStream(
 #endif
     /* Stop stream and reset pipeline. Cancel regardless of registered events
      * and drain queued/running notification DPCs before freeing their context. */
-    status = SofWaveRtSetState(Stream, KSSTATE_STOP);
+#ifdef _KERNEL_MODE
+    if (!Stream->Detached)
+#endif
+        status = SofWaveRtSetState(Stream, KSSTATE_STOP);
     Stream->IsActive = FALSE;
 #ifdef _KERNEL_MODE
     KeCancelTimer(&Stream->NotificationTimer);
@@ -509,6 +510,9 @@ NTSTATUS SofWaveRtFreeStream(
     /* IPC4 deletes all internal routes with the pipeline. Send explicit
      * unbind only for links across pipelines, which this graph has none of. */
     if (Stream->DeviceContext != NULL &&
+#ifdef _KERNEL_MODE
+        !Stream->Detached &&
+#endif
         Stream->HostCopierInstance != 0xFFFFFFFFu) {
         deleteStatus = SofIpc4DeletePipeline(Stream->DeviceContext, Stream->PipelineId);
         /* Keep DSP IDs reserved if deletion failed; firmware may still own them. */
@@ -536,19 +540,30 @@ NTSTATUS SofWaveRtFreeStream(
 #ifdef _KERNEL_MODE
     BOOLEAN stopped = !Stream->DescriptorPublished;
     PSOF_DEVICE_CONTEXT ctx = Stream->DeviceContext;
-    if (!stopped) {
+    WDFCOMMONBUFFER ring = Stream->RingAllocation.CommonBuffer;
+    WDFCOMMONBUFFER bdl = Stream->BdlAllocation.CommonBuffer;
+    if (!stopped && !Stream->Detached) {
         NTSTATUS resetStatus = SofWaveRtResetHdaStream(Stream);
         stopped = NT_SUCCESS(resetStatus);
         if (NT_SUCCESS(status)) status = resetStatus;
     }
+    if (Stream->Mdl) IoFreeMdl(Stream->Mdl);
     if (stopped) {
-        if (NT_SUCCESS(status) && NT_SUCCESS(deleteStatus))
+        if (NT_SUCCESS(status) && NT_SUCCESS(deleteStatus) && !Stream->Detached)
             SofWaveRtReleaseDescriptor(Stream);
-        SofFreeDmaBuffer(ctx, &Stream->BdlAllocation);
-        SofFreeDmaBuffer(ctx, &Stream->RingAllocation);
+        if (ctx->HardwarePrepared) {
+            SofFreeDmaBuffer(ctx, &Stream->BdlAllocation);
+            SofFreeDmaBuffer(ctx, &Stream->RingAllocation);
+        }
     } else {
-        /* Keep both WDF children until device destruction. */
+        /* Quarantine this descriptor and both allocations for device removal. */
+        ctx->AudioDmaFaulted = TRUE;
         status = STATUS_DEVICE_NOT_READY;
+    }
+    if (Stream->BuffersLeased) {
+        WdfObjectDereference(bdl);
+        WdfObjectDereference(ring);
+        WdfObjectDereference(ctx->DmaEnabler);
     }
 
     ExFreePoolWithTag(Stream, SOF_DEVICE_TAG);
@@ -564,6 +579,28 @@ NTSTATUS SofWaveRtFreeStream(
 
     return NT_SUCCESS(status) ? deleteStatus : status;
 }
+
+#ifdef _KERNEL_MODE
+NTSTATUS SofWaveRtDetachStream(PSOF_WAVERT_STREAM Stream)
+{
+    NTSTATUS status, resetStatus;
+    if (Stream->Detached) return STATUS_SUCCESS;
+
+    status = SofWaveRtSetState(Stream, KSSTATE_STOP);
+    Stream->IsActive = FALSE;
+    KeCancelTimer(&Stream->NotificationTimer);
+    KeRemoveQueueDpc(&Stream->NotificationDpc);
+    KeFlushQueuedDpcs();
+    if (Stream->DescriptorPublished) {
+        resetStatus = SofWaveRtResetHdaStream(Stream);
+        if (NT_SUCCESS(status)) status = resetStatus;
+    }
+    if (Stream->DescriptorPublished)
+        Stream->DeviceContext->AudioDmaFaulted = TRUE;
+    Stream->Detached = TRUE;
+    return status;
+}
+#endif
 
 /**
  * @brief Controls stream state transitions (RUN, PAUSE, STOP, ACQUIRE).
@@ -663,6 +700,8 @@ NTSTATUS SofWaveRtSetState(
     case KSSTATE_PAUSE:
 #ifdef _KERNEL_MODE
         KeCancelTimer(&Stream->NotificationTimer);
+        KeRemoveQueueDpc(&Stream->NotificationDpc);
+        KeFlushQueuedDpcs();
 #endif
         if (Stream->HostCopierInstance != 0xFFFFFFFF) {
             /* Set DSP Pipeline state to PAUSED */
@@ -691,6 +730,8 @@ NTSTATUS SofWaveRtSetState(
     case KSSTATE_ACQUIRE:
 #ifdef _KERNEL_MODE
         KeCancelTimer(&Stream->NotificationTimer);
+        KeRemoveQueueDpc(&Stream->NotificationDpc);
+        KeFlushQueuedDpcs();
 #endif
         Stream->LinearPositionBytes = 0;
         if (Stream->HostCopierInstance != 0xFFFFFFFF) {
@@ -973,6 +1014,14 @@ NTSTATUS SofWaveRtConfigureHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     ppctl = (PUCHAR)ctx->Bar0VirtualAddress + ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL;
     ctl = readl(ppctl);
     if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
+    if (!Stream->DescriptorPublished) {
+        ULONG descriptor = readl(regs + SOF_HDA_ADSP_REG_SD_CTL);
+        if (descriptor == MAXULONG) return STATUS_DEVICE_NOT_READY;
+        if ((descriptor & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)) ||
+            readl(regs + SOF_HDA_ADSP_REG_SD_BDLPL) ||
+            readl(regs + SOF_HDA_ADSP_REG_SD_BDLPU))
+            return STATUS_DEVICE_BUSY;
+    }
     format = SofHdaComputeFormatWord(Stream->Format.SamplingFrequency,
         Stream->Format.ValidBitDepth, Stream->Format.ChannelsCount);
     if (!format) return STATUS_NOT_SUPPORTED;
@@ -1039,6 +1088,9 @@ NTSTATUS SofWaveRtResetHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     if (NT_SUCCESS(status)) {
         writel(0, regs + SOF_HDA_ADSP_REG_SD_BDLPL);
         writel(0, regs + SOF_HDA_ADSP_REG_SD_BDLPU);
+        if (readl(regs + SOF_HDA_ADSP_REG_SD_BDLPL) ||
+            readl(regs + SOF_HDA_ADSP_REG_SD_BDLPU))
+            return STATUS_DEVICE_NOT_READY;
         Stream->DescriptorPublished = FALSE;
     }
     return status;

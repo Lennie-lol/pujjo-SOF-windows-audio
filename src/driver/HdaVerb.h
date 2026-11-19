@@ -325,14 +325,7 @@ VOID SofHdaParseEldAudioCapabilities(
     _Out_ PULONG MaxChannels
 );
 
-/**
- * @brief Polls jack presence state on active audio pins and notifies PortCls on changes.
- *
- * @param[in] Ctx Pointer to SOF device context.
- */
-VOID SofCheckAndNotifyJackPresence(
-    _In_ PSOF_DEVICE_CONTEXT Ctx
-);
+
 
 #ifdef __cplusplus
 }

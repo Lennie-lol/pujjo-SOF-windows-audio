@@ -76,3 +76,32 @@ pj_clk_status pj_rt5682s_plan_pll2(unsigned measured_mclk_hz,
     out->count=5;
     return PJ_CLK_OK;
 }
+
+pj_clk_status pj_rt5682s_plan_i2s_receiver(unsigned slot_bits, unsigned measured_bclk_hz,
+    unsigned measured_lrclk_hz, unsigned inverted_bclk, pj_rt5682s_i2s_plan *out)
+{
+    PJ_WORD slot;
+    if (!out) return PJ_CLK_BAD_FORMAT;
+    out->count = 0;
+    if (!measured_bclk_hz || !measured_lrclk_hz) return PJ_CLK_NEED_MEASUREMENT;
+    if (measured_lrclk_hz != 48000u || inverted_bclk > 1u ||
+        (slot_bits != 24u && slot_bits != 32u) ||
+        measured_bclk_hz != measured_lrclk_hz * 2u * slot_bits)
+        return PJ_CLK_BAD_FORMAT;
+
+    /* AIF1 field encodings from Linux v6.13 rt5682s.h. Set TDM disable,
+     * stereo 24-bit data and actual slot width, then select clock receiver
+     * with measured BCLK polarity and standard I2S frame polarity. */
+    slot = (PJ_WORD)(slot_bits == 24u ? 2u : 3u);
+    out->writes[0].reg = 0x007bu;
+    out->writes[0].mask = 0x0080u;
+    out->writes[0].value = 0u;
+    out->writes[1].reg = 0x0070u;
+    out->writes[1].mask = 0x77f7u;
+    out->writes[1].value = (PJ_WORD)((slot << 12) | (slot << 8) | 0x0020u);
+    out->writes[2].reg = 0x007eu;
+    out->writes[2].mask = 0xf837u;
+    out->writes[2].value = (PJ_WORD)((inverted_bclk << 15) | (slot << 4));
+    out->count = 3u;
+    return PJ_CLK_OK;
+}

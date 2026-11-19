@@ -23,7 +23,7 @@
 #include "Loader.h"
 #include "Topo.h"
 #include "WaveRt.h"
-#include "PortClsAdapter.h"
+#include "PujjoAudioBus.h"
 #include "HdaBusInterface.h"
 #include "HdaVerb.h"
 #include <ntstrsafe.h>
@@ -393,7 +393,7 @@ static NTSTATUS SofQuiesceDeviceStreams(PSOF_DEVICE_CONTEXT Ctx, BOOLEAN Release
     PVOID *slots[] = {
         &Ctx->PlaybackStream, &Ctx->CaptureStream,
         &Ctx->HdmiStreams[0], &Ctx->HdmiStreams[1], &Ctx->HdmiStreams[2],
-        &Ctx->DmicStream, &Ctx->SspPlaybackStream, &Ctx->SspCaptureStream
+        &Ctx->SspPlaybackStream, &Ctx->SspCaptureStream
     };
     NTSTATUS status = STATUS_SUCCESS;
 
@@ -437,7 +437,7 @@ SofEvtDeviceReleaseHardware(
                "[SOF] SofEvtDeviceReleaseHardware starting...\n");
     SofLogBreadcrumb("[Teardown] SofEvtDeviceReleaseHardware starting...\n");
 
-    NTSTATUS status = SofUnregisterPortClsSubdevices(Device, ctx);
+    NTSTATUS status = SofDisconnectAudioChild(ctx);
     NTSTATUS streamStatus = SofQuiesceDeviceStreams(ctx, TRUE);
     if (NT_SUCCESS(status)) status = streamStatus;
     if (ctx->DspNeedsPowerDown) {
@@ -543,9 +543,11 @@ SofEvtDeviceD0Entry(
         return STATUS_DEVICE_NOT_READY;
     }
 
-    if (g_CanaryArmed && ctx->EnablePortCls != 0) {
-        NTSTATUS portStatus = SofRegisterPortClsSubdevices(Device, ctx);
-        if (!NT_SUCCESS(portStatus)) {
+    if (g_CanaryArmed && ctx->ArmedTesting != 0 && ctx->EnablePortCls != 0) {
+        NTSTATUS portStatus = SofPublishAudioChild(ctx);
+        if (portStatus == STATUS_NOT_FOUND) {
+            SofLogBreadcrumb("[Power] No qualifying DMIC format. Audio child omitted.\n");
+        } else if (!NT_SUCCESS(portStatus)) {
             SofLogBreadcrumb("[Power] Requested PortCls registration failed.\n");
             SofIpcDisableInterrupts(ctx);
             NTSTATUS powerStatus = SofPowerDownDsp(ctx);
@@ -616,9 +618,6 @@ SofEvtDeviceD0Exit(
         SofLogBreadcrumb(xmsg);
     }
 
-    InterlockedExchange(&ctx->JackPolling, FALSE);
-    if (ctx->JackPollTimer) WdfTimerStop(ctx->JackPollTimer, TRUE);
-
     /* Stop Watchdog Health Timer when leaving D0 */
     if (ctx->WatchdogHealthTimer) {
         WdfTimerStop(ctx->WatchdogHealthTimer, TRUE);
@@ -637,7 +636,9 @@ SofEvtDeviceD0Exit(
         }
     }
 
-    NTSTATUS streamStatus = SofQuiesceDeviceStreams(ctx, FALSE);
+    NTSTATUS streamStatus = SofDisconnectAudioChild(ctx);
+    NTSTATUS otherStatus = SofQuiesceDeviceStreams(ctx, FALSE);
+    if (NT_SUCCESS(streamStatus)) streamStatus = otherStatus;
 
     /* Do not access the inherited Meteor Lake D0i3 register on Pujjo.
      * Invalidate the firmware session and wake waiters before power loss. */
@@ -659,32 +660,6 @@ SofEvtDeviceD0Exit(
     /* WDF_POWER_DEVICE_STATE is not DEVICE_POWER_STATE. Resume remains locked. */
     ctx->CurrentPowerState = PowerDeviceUnspecified;
     return streamStatus;
-}
-
-/**
- * @brief Periodic WDF timer callback executed at PASSIVE_LEVEL for jack polling.
- *
- * Checks ELD / Pin Sense registers on HDMI/DP display codecs and analog jacks,
- * firing IPortEvents notifications to Windows Audio service when headphones or
- * displays are plugged/unplugged. Re-arms itself for 1000ms.
- *
- * @param[in] Timer Handle to WDFTIMER.
- */
-VOID
-SofEvtJackPollTimer(
-    _In_ WDFTIMER Timer
-)
-{
-    WDFDEVICE device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
-    PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(device);
-    if (ctx && InterlockedCompareExchange(&ctx->JackPolling, 0, 0)) {
-        if (ctx->PortEvents != NULL) {
-            SofCheckAndNotifyJackPresence(ctx);
-        }
-
-        /* Passive timers cannot be periodic in KMDF; re-arm for next tick */
-        WdfTimerStart(Timer, WDF_REL_TIMEOUT_IN_MS(1000));
-    }
 }
 
 /**

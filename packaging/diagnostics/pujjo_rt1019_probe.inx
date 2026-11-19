@@ -1,0 +1,51 @@
+; SPDX-License-Identifier: BSD-3-Clause
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider=%Provider%
+CatalogFile=pujjo_rt1019_probe.cat
+DriverVer=11/19/2026,0.0.1.0
+PnpLockdown=1
+
+[Manufacturer]
+%Provider%=Models,NTamd64.10.0...22000
+
+[Models.NTamd64.10.0...22000]
+%Device%=Probe,ACPI\RTL1019
+
+[DestinationDirs]
+DriverFiles=13
+
+[SourceDisksNames]
+1=%Disk%
+
+[SourceDisksFiles]
+pujjo_rt1019_probe.sys=1
+
+[Probe.NT]
+CopyFiles=DriverFiles
+
+[DriverFiles]
+pujjo_rt1019_probe.sys
+
+[Probe.NT.Services]
+AddService=pujjo_rt1019_probe,0x00000002,Service
+
+[Service]
+DisplayName=%Device%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\pujjo_rt1019_probe.sys
+
+[Probe.NT.Wdf]
+KmdfService=pujjo_rt1019_probe,Wdf
+
+[Wdf]
+KmdfLibraryVersion=1.33
+
+[Strings]
+Provider="Sound Open Firmware"
+Device="Pujjo RT1019P Resource Diagnostic"
+Disk="Pujjo resource diagnostic media"

@@ -53,18 +53,7 @@ EVT_WDF_DRIVER_DEVICE_ADD SofEvtDeviceAdd;
  */
 EVT_WDF_DRIVER_UNLOAD SofEvtDriverUnload;
 
-/**
- * @brief WDM IRP Preprocess callback for PortCls KS audio interfaces.
- *
- * Intercepts IRP_MJ_CREATE, IRP_MJ_CLOSE, IRP_MJ_CLEANUP, and IRP_MJ_DEVICE_CONTROL,
- * routing KS filter/pin/property requests to PortCls (PcDispatchIrp) while preserving
- * KMDF internal object lifecycle.
- *
- * @param[in] Device Handle to the WDFDEVICE object.
- * @param[in,out] Irp Pointer to the I/O Request Packet.
- * @return NTSTATUS Status of the dispatched IRP.
- */
-EVT_WDFDEVICE_WDM_IRP_PREPROCESS SofEvtDeviceWdmIrpPreprocess;
+
 
 /**
  * @brief Timer callback executed 10 seconds after D0Entry to reset the crash counter.

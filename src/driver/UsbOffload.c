@@ -25,16 +25,6 @@
 static const GUID GUID_DEVINTERFACE_USB_SIDEBAND_AUDIO_HS_HCIBYPASS = 
     { 0x02baa4b5, 0x33b5, 0x4d97, { 0xae, 0x4f, 0xe8, 0x6d, 0xde, 0x17, 0x53, 0x6f } };
 
-/* Forward declaration of PortCls notification helpers */
-#ifdef __cplusplus
-extern "C" {
-#endif
-void SofPortClsNotifyUsbOffloadArrival(PSOF_DEVICE_CONTEXT Ctx);
-void SofPortClsNotifyUsbOffloadRemoval(PSOF_DEVICE_CONTEXT Ctx);
-#ifdef __cplusplus
-}
-#endif
-
 /**
  * @brief Synchronously sends a Kernel DeviceIoControl IRP to the Sideband Audio stack.
  *
@@ -290,9 +280,6 @@ SofUsbOffloadClaimDevice(
     }
     KeReleaseSpinLock(&Ctx->UsbOffloadState.Lock, oldIrql);
 
-    /* 5. Notify PortCls Adapter to expose the dynamic CUBILUX CA7 offload endpoint */
-    SofPortClsNotifyUsbOffloadArrival(Ctx);
-
     return STATUS_SUCCESS;
 }
 
@@ -353,8 +340,6 @@ SofUsbOffloadUnclaimDevice(
         ObDereferenceObject(fileObj);
     }
 
-    /* Notify PortCls Adapter of removal */
-    SofPortClsNotifyUsbOffloadRemoval(Ctx);
     SofLogBreadcrumb("[USB-Offload] Device unclaim complete.\n");
 }
 

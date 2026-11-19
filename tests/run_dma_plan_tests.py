@@ -93,8 +93,8 @@ device=(root/"src/driver/Device.c").read_text().split("SofEvtDevicePrepareHardwa
 assert device.index("!SofHardwareDevelopmentAllowed()")<device.index("WdfFdoQueryForInterface")
 wave=(root/"src/driver/WaveRt.c").read_text()
 assert "stream->PeriodSizeBytes = periodBytes;" in wave
-assert "!SofWaveRtHardwareBackendVerified()" in wave
-assert wave.index("!SofWaveRtHardwareBackendVerified()") < wave.index("pj_hda_stream_slot(") < wave.index("ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(SOF_WAVERT_STREAM)")
+assert "#ifndef PUJJO_ENABLE_EXPERIMENTAL_AUDIO" in wave
+assert wave.index("#ifndef PUJJO_ENABLE_EXPERIMENTAL_AUDIO") < wave.index("pj_hda_stream_slot(") < wave.index("ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(SOF_WAVERT_STREAM)")
 assert "stream->StreamIndex = descriptorIndex;" in wave
 assert "operating in silence capture mode" not in wave
 for name in ("Driver.c","PortClsAdapter.cpp"):
@@ -257,9 +257,9 @@ volume=wave.split("NTSTATUS SofWaveRtSetVolume(",1)[1].split("\n}",1)[0]
 assert volume.index("if (!NT_SUCCESS(status)) return status;") < volume.index("Stream->VolumeLevelDb[0] = VolumeDb;")
 mute=wave.split("NTSTATUS SofWaveRtSetMute(",1)[1].split("\n}",1)[0]
 assert mute.index("if (!NT_SUCCESS(status)) return status;") < mute.index("Stream->MasterMute = Mute;")
-port=(root/"src/driver/PortClsAdapter.cpp").read_text()
-for call in ("SofWaveRtGetVolume","SofWaveRtSetVolume","SofWaveRtGetMute","SofWaveRtSetMute"):
-    assert "NTSTATUS status = "+call+"(" in port
+bus=(root/"src/driver/PujjoAudioBus.c").read_text()
+assert bus.index("status = SofWaveRtSetMute(stream, FALSE);") < bus.index(
+    "if (!NT_SUCCESS(status) && !NT_SUCCESS(SofWaveRtSetState(stream, KSSTATE_STOP)))")
 print("PASS: gain error propagation, per-channel restoration and control publication")
 
 for name in ("RegisterNotificationEvent", "UnregisterNotificationEvent", "SignalNotification"):
@@ -280,7 +280,7 @@ reset = wave.split("NTSTATUS SofWaveRtResetHdaStream(",1)[1].split("\n}",1)[0]
 assert reset.index("SofWaveRtStopHdaStream") < reset.index("SOF_HDA_SD_CTL_DMA_RESET")
 assert reset.index("if (NT_SUCCESS(status))") < reset.index("SOF_HDA_ADSP_REG_SD_BDLPL")
 assert free.index("stopped = NT_SUCCESS(resetStatus)") < free.index("if (stopped)") < free.index("SofFreeDmaBuffer")
-assert "NTSTATUS status = streamObj->SetFormat(DataFormat)" in port
+assert "NTSTATUS status = ValidateFormat(Format, m_format);" in (root/"src/driver/PortClsAdapter.cpp").read_text()
 
 # Execute the copier serializer with the wire declarations used by the driver.
 topo_h = (root/"src/driver/Topo.h").read_text()

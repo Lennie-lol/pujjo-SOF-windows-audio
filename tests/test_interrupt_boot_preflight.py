@@ -59,7 +59,7 @@ assert "EvtDeviceD0ExitPreInterruptsDisabled  = SofEvtDeviceD0Exit;" in driver
 assert "interruptConfig.AutomaticSerialization = FALSE;" in driver
 d0=device.split("NTSTATUS\nSofEvtDeviceD0Entry(",1)[1].split("\n/**",1)[0]
 assert d0.index("if (ipcFaulted ||") < d0.index("SofStartFirmwareBoot(ctx, NULL)")
-assert d0.index("return bootStatus;") < d0.index("SofRegisterPortClsSubdevices(") < d0.index("WdfTimerStart(")
+assert d0.index("return bootStatus;") < d0.index("SofPublishAudioChild(") < d0.index("WdfTimerStart(")
 assert d0.index("if (!NT_SUCCESS(portStatus))") < d0.index("return NT_SUCCESS(powerStatus) ? portStatus : powerStatus;")
 assert "SofSdwEnumerateChildren(" not in device and "SofHdaSendVerb(" not in device
 assert "SofVerifyAdlNIpc4Candidate(rawFw, rawFwSize)" in boot
@@ -90,7 +90,7 @@ assert "SofFreeDmaBuffer" not in boot.split("dma_unconfirmed:",1)[1]
 assert "ExWaitForRundownProtectionRelease" in ipc
 entry = ipc.split("NTSTATUS\nSofIpcSendMessage(",1)[1].split("\n}",1)[0]
 assert entry.index("ExAcquireRundownProtection") < entry.index("SofIpcSendWhilePowered") < entry.index("ExReleaseRundownProtection")
-assert "WdfTimerStop(ctx->JackPollTimer, TRUE)" in device
+assert device.index("SofDisconnectAudioChild(ctx)", device.index("SofEvtDeviceD0Exit(")) < device.index("powerStatus = SofPowerDownDsp(ctx)", device.index("SofEvtDeviceD0Exit("))
 
 # SPIB teardown follows confirmed RUN clear and rejects inaccessible MMIO.
 spib_stop = stop.split("if (Ctx->SpbCapOffset)",1)[1]

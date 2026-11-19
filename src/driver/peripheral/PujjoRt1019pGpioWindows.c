@@ -42,14 +42,15 @@ NTSTATUS Pj1019GpioSetPower(PJ1019_GPIO_WINDOWS *gpio, BOOLEAN powered)
 }
 
 NTSTATUS Pj1019GpioOpen(WDFDEVICE device, ULONG idLow, ULONG idHigh,
-                        PJ1019_GPIO_WINDOWS *gpio)
+                        PJ1019_SDB_POLARITY Polarity, PJ1019_GPIO_WINDOWS *gpio)
 {
     DECLARE_UNICODE_STRING_SIZE(path, RESOURCE_HUB_PATH_SIZE);
     WDF_IO_TARGET_OPEN_PARAMS params;
     WDFIOTARGET target = WDF_NO_HANDLE;
     NTSTATUS status;
     PAGED_CODE();
-    if (!device || !gpio || !gpio->Lock || gpio->Owner != device)
+    if (!device || !gpio || !gpio->Lock || gpio->Owner != device ||
+        (Polarity != Pj1019SdbActiveLow && Polarity != Pj1019SdbActiveHigh))
         return STATUS_INVALID_PARAMETER;
     WdfWaitLockAcquire(gpio->Lock, NULL);
     if (gpio->Opened || gpio->Target) {
@@ -68,6 +69,7 @@ NTSTATUS Pj1019GpioOpen(WDFDEVICE device, ULONG idLow, ULONG idHigh,
         return status;
     }
     gpio->Target = target;
+    gpio->Polarity = Polarity;
     gpio->Opened = TRUE;
     gpio->Powered = FALSE;
     WdfWaitLockRelease(gpio->Lock);
@@ -85,13 +87,14 @@ void Pj1019GpioClose(PJ1019_GPIO_WINDOWS *gpio)
         WdfObjectDelete(gpio->Target);
     }
     gpio->Target = WDF_NO_HANDLE;
+    gpio->Polarity = Pj1019SdbUnverified;
     gpio->Opened = FALSE;
     WdfWaitLockRelease(gpio->Lock);
 }
 
-NTSTATUS Pj1019GpioWrite(PJ1019_GPIO_WINDOWS *gpio, BOOLEAN physicalHigh)
+NTSTATUS Pj1019GpioWrite(PJ1019_GPIO_WINDOWS *gpio, BOOLEAN enabled)
 {
-    UCHAR value = physicalHigh ? 1u : 0u;
+    UCHAR value;
     WDF_MEMORY_DESCRIPTOR input;
     WDF_REQUEST_SEND_OPTIONS options;
     NTSTATUS status;
@@ -101,6 +104,7 @@ NTSTATUS Pj1019GpioWrite(PJ1019_GPIO_WINDOWS *gpio, BOOLEAN physicalHigh)
     if (!gpio->Opened || !gpio->Target || !gpio->Powered) {
         WdfWaitLockRelease(gpio->Lock); return STATUS_INVALID_DEVICE_STATE;
     }
+    value = (!!enabled == (gpio->Polarity == Pj1019SdbActiveHigh)) ? 1u : 0u;
     WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&input, &value, sizeof(value));
     WDF_REQUEST_SEND_OPTIONS_INIT(&options, WDF_REQUEST_SEND_OPTION_TIMEOUT);
     options.Timeout = WDF_REL_TIMEOUT_IN_MS(PJ1019_GPIO_TIMEOUT_MS);

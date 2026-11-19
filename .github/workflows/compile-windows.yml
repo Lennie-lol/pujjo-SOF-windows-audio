@@ -105,7 +105,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           foreach ($case in @(
-            @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED' },
+            @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_ENABLE_EXPERIMENTAL_AUDIO' },
             @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_READONLY_PROBE' }
           )) {
             $env:CL = $case.Defines
@@ -114,12 +114,17 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $expected = if ($case.Project -eq 'sof_dsp') { 'Loader.obj' } else { 'PujjoPeripheralKmdf.obj' }
             if (!(Get-ChildItem $objects -Filter $expected -Recurse)) { throw "Missing compile-only object $expected" }
+            if ($case.Project -eq 'sof_dsp') {
+              foreach ($object in @('PujjoAudioBus.obj', 'WaveRt.obj')) {
+                if (!(Get-ChildItem $objects -Filter $object -Recurse)) { throw "Missing guarded object $object" }
+              }
+            }
           }
       - name: Verify all expected unsigned development products
         shell: pwsh
         run: |
           $output = 'bin/x64/${{ matrix.configuration }}'
-          foreach ($name in @('sof_core.lib', 'sof_dsp.sys', 'pujjo_rt5682_probe.sys', 'pujjo_rt1019_probe.sys')) {
+          foreach ($name in @('sof_core.lib', 'sof_dsp.sys', 'pujjo_audio.sys', 'pujjo_rt5682_probe.sys', 'pujjo_rt1019_probe.sys')) {
             $file = Join-Path $output $name
             if (!(Test-Path $file) -or (Get-Item $file).Length -eq 0) { throw "Missing build product: $file" }
             Get-FileHash $file -Algorithm SHA256 | Format-List | Out-File build-logs/products.txt -Append
@@ -129,6 +134,19 @@ jobs:
             }
           }
           'NOT INSTALLABLE - NOT HARDWARE VERIFIED. Unsigned compile-only development products.' | Set-Content "$output/NOT-INSTALLABLE.txt"
+      - name: Verify read-only diagnostic INFs and generate unsigned catalogs
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $revision = (git rev-parse HEAD).Trim()
+          ./scripts/Stage-PujjoDiagnosticPackage.ps1 -BinaryDirectory bin/x64/Release -OutputDirectory "$env:RUNNER_TEMP/pujjo-diagnostics" -SourceRevision $revision
+      - name: Upload unsigned diagnostic submission input
+        if: success() && matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pujjo-resource-diagnostics-UNSIGNED-SUBMISSION
+          path: ${{ runner.temp }}/pujjo-diagnostics/
+          if-no-files-found: error
       - name: Preserve logs even when checks or compilation fail
         if: always()
         uses: actions/upload-artifact@v4

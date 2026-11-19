@@ -24,7 +24,6 @@
 #include <wdf.h>
 #include <ntstrsafe.h>
 #include "HdaVerb.h"
-#include "PortClsAdapter.h"
 
 void SofLogBreadcrumb(const char* text);
 
@@ -953,55 +952,5 @@ NTSTATUS SofHdaStopDisplayConverter(
     return STATUS_SUCCESS;
 }
 
-VOID SofCheckAndNotifyJackPresence(
-    _In_ PSOF_DEVICE_CONTEXT Ctx
-)
-{
-    if (!Ctx || !Ctx->PortEvents) {
-        return;
-    }
-
-    /* HDMI Pins: Pin 5 = HDMI 1, Pin 7 = HDMI 2, Pin 9 = HDMI 3 */
-    for (ULONG i = 0; i < 3; i++) {
-        ULONG bridgePinId = 5 + (i * 2);
-        BOOLEAN newConnected = FALSE;
-
-        BOOLEAN eldValid = FALSE;
-        if (Ctx->CurrentPowerState != PowerDeviceD0 || !Ctx->IDispCodecPresent ||
-            i >= Ctx->DisplayPinCount) continue;
-        if (!NT_SUCCESS(SofHdaGetDisplayPinSense(Ctx, 2, Ctx->DisplayPinNid[i],
-                                                 &newConnected, &eldValid)))
-            continue;
-
-        /* Check for state transition */
-        if (newConnected != Ctx->DisplayConnected[i]) {
-            char msg[128];
-            RtlStringCbPrintfA(msg, sizeof(msg),
-                "[Jack] HDMI %u (Pin %u) connection state changed: %s -> %s\n",
-                i + 1, bridgePinId,
-                Ctx->DisplayConnected[i] ? "CONNECTED" : "UNPLUGGED",
-                newConnected ? "CONNECTED" : "UNPLUGGED");
-            SofLogBreadcrumb(msg);
-
-            Ctx->DisplayConnected[i] = newConnected;
-
-            /* If newly connected in physical hardware mode, re-read ELD if valid */
-            if (newConnected && eldValid) {
-                UCHAR eldBuf[128];
-                ULONG actualEld = 0;
-                if (NT_SUCCESS(SofHdaGetDisplayEld(Ctx, 2, Ctx->DisplayPinNid[i],
-                        eldBuf, sizeof(eldBuf), &actualEld)) && actualEld >= 20) {
-                    SofHdaParseMonitorName(eldBuf, actualEld, Ctx->DisplayMonitorName[i], 32);
-                    SofHdaParseEldAudioCapabilities(eldBuf, actualEld,
-                        &Ctx->DisplaySampleRates[i], &Ctx->DisplayBitDepths[i],
-                        &Ctx->DisplayMaxChannels[i]);
-                }
-            }
-
-            /* Signal PortCls / AudioEndpointBuilder */
-            SofPortClsNotifyJackPresence(Ctx, bridgePinId);
-        }
-    }
-}
 
 #endif /* _KERNEL_MODE */

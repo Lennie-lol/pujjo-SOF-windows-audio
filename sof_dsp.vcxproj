@@ -75,7 +75,7 @@
     <Link>
       <SubSystem>Native</SubSystem>
       <Driver>Driver</Driver>
-      <AdditionalDependencies>portcls.lib;Aux_Klib.lib;ks.lib;Cng.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Aux_Klib.lib;ks.lib;Cng.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
     </Link>
@@ -96,7 +96,7 @@
     <Link>
       <SubSystem>Native</SubSystem>
       <Driver>Driver</Driver>
-      <AdditionalDependencies>portcls.lib;Aux_Klib.lib;ks.lib;Cng.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Aux_Klib.lib;ks.lib;Cng.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
     </Link>
@@ -115,7 +115,7 @@
     <ClInclude Include="src\driver\Topo.h" />
     <ClInclude Include="src\driver\WaveRt.h" />
     <ClInclude Include="src\driver\Nhlt.h" />
-    <ClInclude Include="src\driver\PortClsAdapter.h" />
+    <ClInclude Include="src\driver\PujjoAudioBus.h" />
     <ClInclude Include="src\driver\HdaVerb.h" />
     <ClInclude Include="src\driver\HdaBusInterface.h" />
     <ClInclude Include="src\driver\SdwController.h" />
@@ -137,7 +137,7 @@
     <ClCompile Include="src\driver\Topo.c" />
     <ClCompile Include="src\driver\WaveRt.c" />
     <ClCompile Include="src\driver\Nhlt.c" />
-    <ClCompile Include="src\driver\PortClsAdapter.cpp" />
+    <ClCompile Include="src\driver\PujjoAudioBus.c" />
     <ClCompile Include="src\driver\HdaVerb.c" />
     <ClCompile Include="src\driver\HdaBusInterface.c" />
     <ClCompile Include="src\driver\SdwController.c" />
