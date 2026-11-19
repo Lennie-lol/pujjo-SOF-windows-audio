@@ -12,6 +12,11 @@
 #include "PujjoRt5682sSpbWindows.h"
 #define PJ5682S_SPB_TIMEOUT_MS 1000
 
+#ifdef PJ5682S_ENABLE_CONTROL
+static NTSTATUS StopControlLocked(PJ5682S_SPB_WINDOWS *state);
+static int ControlDelay(void *context, unsigned milliseconds);
+#endif
+
 NTSTATUS Pj5682sSpbInitialize(WDFDEVICE device, PJ5682S_SPB_WINDOWS *state)
 {
     WDF_OBJECT_ATTRIBUTES attributes;
@@ -36,7 +41,17 @@ NTSTATUS Pj5682sSpbSetPower(PJ5682S_SPB_WINDOWS *state, BOOLEAN powered)
     if (!state || !state->Lock) return STATUS_INVALID_PARAMETER;
     WdfWaitLockAcquire(state->Lock, NULL);
     if (powered && !state->Opened) status = STATUS_INVALID_DEVICE_STATE;
-    else state->Powered = powered;
+    else {
+#ifdef PJ5682S_ENABLE_CONTROL
+        if (state->Powered && !powered) status = StopControlLocked(state);
+        if (!state->Powered && powered && state->Control.count) {
+            /* A previous D0 exit could not recover the modified registers. */
+            state->Powered = TRUE;
+            status = StopControlLocked(state);
+        }
+#endif
+        state->Powered = powered && NT_SUCCESS(status);
+    }
     WdfWaitLockRelease(state->Lock);
     return status;
 }
@@ -76,11 +91,16 @@ NTSTATUS Pj5682sSpbOpen(WDFDEVICE device, ULONG idLow, ULONG idHigh,
     WdfWaitLockRelease(state->Lock);
     return STATUS_SUCCESS;
 }
-void Pj5682sSpbClose(PJ5682S_SPB_WINDOWS *state)
+NTSTATUS Pj5682sSpbClose(PJ5682S_SPB_WINDOWS *state)
 {
+    NTSTATUS status = STATUS_SUCCESS;
     PAGED_CODE();
-    if (!state || !state->Lock) return;
+    if (!state || !state->Lock) return STATUS_INVALID_PARAMETER;
     WdfWaitLockAcquire(state->Lock, NULL);
+#ifdef PJ5682S_ENABLE_CONTROL
+    if (state->Control.count)
+        status = state->Powered ? StopControlLocked(state) : STATUS_DEVICE_NOT_READY;
+#endif
     state->Powered = FALSE;
     if (state->Target) {
         WdfIoTargetClose(state->Target);
@@ -89,6 +109,7 @@ void Pj5682sSpbClose(PJ5682S_SPB_WINDOWS *state)
     state->Target=WDF_NO_HANDLE;
     state->Opened=FALSE;
     WdfWaitLockRelease(state->Lock);
+    return status;
 }
 
 /* reg16 then 2-byte repeated-start read (single atomic SPB sequence). */
@@ -151,3 +172,150 @@ void Pj5682sSpbBindCallbacks(PJ5682S_SPB_WINDOWS *state, pj5682s_bus *bus)
     bus->write_only=NULL;
     WdfWaitLockRelease(state->Lock);
 }
+
+#ifdef PJ5682S_ENABLE_CONTROL
+/* Private transport for typed operations. Diagnostic callbacks retain the
+ * original identity-only whitelist and cannot reach these writes. */
+static int ControlRegister(PJ_WORD reg)
+{
+    switch (reg) {
+    case 0x0010: case 0x0026: case 0x0029: case 0x002b: case 0x0061: case 0x0070:
+    case 0x0073: case 0x007b: case 0x007e: case 0x0080:
+        return 1;
+    default:
+        return pj5682s_analog_mask(reg) != 0;
+    }
+}
+
+static int ControlRead(void *context, const PJ_BYTE *address, PJ_SIZE addressBytes,
+                        PJ_BYTE *data, PJ_SIZE dataBytes)
+{
+    PJ5682S_SPB_WINDOWS *state = context;
+    SPB_TRANSFER_LIST_AND_ENTRIES(2) sequence;
+    WDF_MEMORY_DESCRIPTOR descriptor;
+    WDF_REQUEST_SEND_OPTIONS options;
+    ULONG_PTR transferred = 0;
+    PJ_BYTE result[2] = {0};
+    NTSTATUS status;
+    PJ_WORD reg;
+
+    if (!state->Opened || !state->Powered || !state->Target ||
+        !address || !data || addressBytes != 2 || dataBytes != 2)
+        return -1;
+    reg = pj5682s_decode_value(address);
+    if (!ControlRegister(reg) && reg != PJ5682S_DEVICE_ID_REGISTER &&
+        reg != 0x00f0u && reg != 0x0011u)
+        return -1;
+
+    SPB_TRANSFER_LIST_INIT(&sequence.List, 2);
+    sequence.List.Transfers[0] = SPB_TRANSFER_LIST_ENTRY_INIT_SIMPLE(
+        SpbTransferDirectionToDevice, 0, (PVOID)address, 2);
+    sequence.List.Transfers[1] = SPB_TRANSFER_LIST_ENTRY_INIT_SIMPLE(
+        SpbTransferDirectionFromDevice, 0, result, sizeof(result));
+    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&descriptor, &sequence, sizeof(sequence));
+    WDF_REQUEST_SEND_OPTIONS_INIT(&options, WDF_REQUEST_SEND_OPTION_TIMEOUT);
+    options.Timeout = WDF_REL_TIMEOUT_IN_MS(PJ5682S_SPB_TIMEOUT_MS);
+    status = WdfIoTargetSendIoctlSynchronously(state->Target, WDF_NO_HANDLE,
+        IOCTL_SPB_EXECUTE_SEQUENCE, &descriptor, NULL, &options, &transferred);
+    if (!NT_SUCCESS(status) || transferred != sizeof(result) + addressBytes)
+        return -1;
+    RtlCopyMemory(data, result, sizeof(result));
+    return 0;
+}
+
+static int ControlWrite(void *context, const PJ_BYTE *data, PJ_SIZE bytes)
+{
+    PJ5682S_SPB_WINDOWS *state = context;
+    WDF_MEMORY_DESCRIPTOR descriptor;
+    WDF_REQUEST_SEND_OPTIONS options;
+    ULONG_PTR transferred = 0;
+    NTSTATUS status;
+
+    if (!state->Opened || !state->Powered || !state->Target ||
+        !data || bytes != 4 || !ControlRegister(pj5682s_decode_value(data)))
+        return -1;
+    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&descriptor, (PVOID)data, 4u);
+    WDF_REQUEST_SEND_OPTIONS_INIT(&options, WDF_REQUEST_SEND_OPTION_TIMEOUT);
+    options.Timeout = WDF_REL_TIMEOUT_IN_MS(PJ5682S_SPB_TIMEOUT_MS);
+    status = WdfIoTargetSendWriteSynchronously(state->Target, WDF_NO_HANDLE,
+                                               &descriptor, NULL, &options, &transferred);
+    return NT_SUCCESS(status) && transferred == bytes ? 0 : -1;
+}
+
+static NTSTATUS ControlStatus(pj5682s_status status)
+{
+    switch (status) {
+    case PJ5682S_OK: return STATUS_SUCCESS;
+    case PJ5682S_WRITE_LOCKED: return STATUS_ACCESS_DENIED;
+    case PJ5682S_BAD_ARGUMENT: return STATUS_INVALID_PARAMETER;
+    case PJ5682S_INCORRECT_STATE: return STATUS_INVALID_DEVICE_STATE;
+    case PJ5682S_WRONG_CHIP: return STATUS_DEVICE_CONFIGURATION_ERROR;
+    case PJ5682S_VERIFY_FAILED: return STATUS_DEVICE_PROTOCOL_ERROR;
+    default: return STATUS_IO_DEVICE_ERROR;
+    }
+}
+
+static NTSTATUS StopControlLocked(PJ5682S_SPB_WINDOWS *state)
+{
+    const pj5682s_bus bus = {state, ControlRead, ControlWrite};
+    return ControlStatus(pj5682s_control_stop(&state->Control, &bus));
+}
+
+NTSTATUS Pj5682sSpbStartControl(PJ5682S_SPB_WINDOWS *state,
+                                const pj5682s_control_profile *profile,
+                                const pj5682s_analog_program *program)
+{
+    const pj5682s_bus bus = {state, ControlRead, ControlWrite};
+    NTSTATUS status = STATUS_DEVICE_NOT_READY;
+    PAGED_CODE();
+    if (!state || !state->Lock || !profile) return STATUS_INVALID_PARAMETER;
+    pj5682s_status valid = pj5682s_validate_analog(program);
+    if (valid != PJ5682S_OK) return ControlStatus(valid);
+    WdfWaitLockAcquire(state->Lock, NULL);
+    if (state->Opened && state->Powered) {
+        status = ControlStatus(pj5682s_control_start(&state->Control, &bus, profile));
+        if (NT_SUCCESS(status))
+            status = ControlStatus(pj5682s_control_analog(&state->Control, &bus, program, ControlDelay));
+    }
+    WdfWaitLockRelease(state->Lock);
+    return status;
+}
+
+NTSTATUS Pj5682sSpbStopControl(PJ5682S_SPB_WINDOWS *state)
+{
+    NTSTATUS status;
+    PAGED_CODE();
+    if (!state || !state->Lock) return STATUS_INVALID_PARAMETER;
+    WdfWaitLockAcquire(state->Lock, NULL);
+    status = StopControlLocked(state);
+    WdfWaitLockRelease(state->Lock);
+    return status;
+}
+
+static int ControlDelay(void *context, unsigned milliseconds)
+{
+    LARGE_INTEGER delay;
+    UNREFERENCED_PARAMETER(context);
+    delay.QuadPart = WDF_REL_TIMEOUT_IN_MS(milliseconds);
+    return NT_SUCCESS(KeDelayExecutionThread(KernelMode, FALSE, &delay)) ? 0 : -1;
+}
+
+NTSTATUS Pj5682sSpbGetJack(PJ5682S_SPB_WINDOWS *state, pj5682s_jack_query query,
+                           pj5682s_jack *jack)
+{
+    const pj5682s_bus bus = {state, ControlRead, ControlWrite};
+    NTSTATUS status = STATUS_DEVICE_NOT_READY;
+    PAGED_CODE();
+    if (!state || !state->Lock || !jack ||
+        (unsigned)query > Pj5682sJackReadClassified) return STATUS_INVALID_PARAMETER;
+    WdfWaitLockAcquire(state->Lock, NULL);
+    if (state->Opened && state->Powered) {
+        pj5682s_status result = query == Pj5682sJackClassify ?
+            pj5682s_control_classify(&state->Control, &bus, ControlDelay, jack) :
+            pj5682s_control_jack(&state->Control, &bus, query == Pj5682sJackReadClassified, jack);
+        status = ControlStatus(result);
+    }
+    WdfWaitLockRelease(state->Lock);
+    return status;
+}
+#endif

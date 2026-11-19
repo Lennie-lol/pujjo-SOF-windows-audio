@@ -10,12 +10,22 @@ typedef enum _PJ1019_SDB_POLARITY {
     Pj1019SdbActiveHigh
 } PJ1019_SDB_POLARITY;
 
+typedef struct _PJ1019_RUNTIME_PROFILE {
+    BOOLEAN BoardQualified;
+    BOOLEAN DspMuted;
+    BOOLEAN GainLimitApplied;
+    ULONG CalibrationMs;
+} PJ1019_RUNTIME_PROFILE;
+
 typedef struct _PJ1019_GPIO_WINDOWS {
     WDFWAITLOCK Lock; /* device-parented; survives resource rebalance */
     WDFDEVICE Owner;
     WDFIOTARGET Target;
     BOOLEAN Opened;
     BOOLEAN Powered;
+    BOOLEAN ShutdownConfirmed;
+    BOOLEAN Calibrated;
+    BOOLEAN Faulted;
     PJ1019_SDB_POLARITY Polarity;
 } PJ1019_GPIO_WINDOWS;
 /* Caller must validate: Google Pujjo SMBIOS, RTL1019 PnP hardware ID,
@@ -31,7 +41,9 @@ NTSTATUS Pj1019GpioSetPower(PJ1019_GPIO_WINDOWS *gpio, BOOLEAN powered);
 _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS Pj1019GpioOpen(WDFDEVICE device, ULONG idLow, ULONG idHigh,
                         PJ1019_SDB_POLARITY Polarity, PJ1019_GPIO_WINDOWS *gpio);
-void Pj1019GpioClose(PJ1019_GPIO_WINDOWS *gpio);
-/* Logical SDB enables stay separate from the measured pin level. */
-NTSTATUS Pj1019GpioWrite(PJ1019_GPIO_WINDOWS *gpio, BOOLEAN enabled);
+NTSTATUS Pj1019GpioClose(PJ1019_GPIO_WINDOWS *gpio);
+/* The DSP owner holds mute before calling StartMuted or Shutdown. Only
+ * StartMuted may assert SDB. Shutdown also works after a latched fault. */
+NTSTATUS Pj1019GpioStartMuted(PJ1019_GPIO_WINDOWS *gpio, const PJ1019_RUNTIME_PROFILE *profile);
+NTSTATUS Pj1019GpioShutdown(PJ1019_GPIO_WINDOWS *gpio);
 #endif

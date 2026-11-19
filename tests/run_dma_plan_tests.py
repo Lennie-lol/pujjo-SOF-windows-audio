@@ -251,7 +251,7 @@ apply=wave.split("static NTSTATUS SofWaveRtApplyCachedGain(",1)[1].split("\n}",1
 assert "Stream->Format.ChannelsCount != 2u" in apply
 assert "1u, Stream->VolumeLevelDb[1]" in apply
 assert apply.index("if (!NT_SUCCESS(status))") < apply.index("(void)SofIpc4SetMute")
-create=wave.split("NTSTATUS SofWaveRtCreateStream(",1)[1].split("\n}",1)[0]
+create=wave.split("NTSTATUS SofWaveRtCreateStreamCore(",1)[1].split("\n}",1)[0]
 assert create.index("status = SofWaveRtApplyCachedGain") < create.index("SofWaveRtConfigureHdaStream(stream)") < create.index("stream->IsActive = TRUE;")
 volume=wave.split("NTSTATUS SofWaveRtSetVolume(",1)[1].split("\n}",1)[0]
 assert volume.index("if (!NT_SUCCESS(status)) return status;") < volume.index("Stream->VolumeLevelDb[0] = VolumeDb;")

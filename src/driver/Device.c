@@ -24,6 +24,9 @@
 #include "Topo.h"
 #include "WaveRt.h"
 #include "PujjoAudioBus.h"
+#ifdef PUJJO_ENABLE_EXPERIMENTAL_ANALOG
+#include "PujjoAnalog.h"
+#endif
 #include "HdaBusInterface.h"
 #include "HdaVerb.h"
 #include <ntstrsafe.h>
@@ -555,6 +558,10 @@ SofEvtDeviceD0Entry(
         }
     }
     ctx->CurrentPowerState = PowerDeviceD0;
+#ifdef PUJJO_ENABLE_EXPERIMENTAL_ANALOG
+    if (g_CanaryArmed && ctx->ArmedTesting && ctx->EnablePortCls)
+        SofPublishApprovedAnalogChildren(ctx);
+#endif
     SofLogBreadcrumb("[Power] DSP firmware reported FW_READY.\n");
 
     /* Start Watchdog Health Timer (10s countdown to confirm healthy D0 uptime) */

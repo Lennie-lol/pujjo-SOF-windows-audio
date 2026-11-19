@@ -331,6 +331,11 @@ typedef struct _SOF_DEVICE_CONTEXT {
     BOOLEAN             AudioOnline;
     BOOLEAN             AudioPositionEnabled;
     BOOLEAN             AudioDmaFaulted;
+#ifdef PUJJO_ENABLE_EXPERIMENTAL_ANALOG
+    struct _PUJJO_ANALOG_LEASE *AnalogLease;
+    BOOLEAN             AnalogClosed;
+    ULONG               AnalogPublished;
+#endif
 #endif
 #ifdef _KERNEL_MODE
     EX_RUNDOWN_REF      IpcRundown;

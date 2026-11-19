@@ -38,6 +38,19 @@ typedef struct {int direction;void *buffer;ULONG length;} SPB_TRANSFER_LIST_ENTR
 #define STATUS_SUCCESS 0
 #define STATUS_INVALID_PARAMETER -1
 #define STATUS_INVALID_DEVICE_STATE -2
+#define STATUS_ACCESS_DENIED -3
+#define STATUS_IO_DEVICE_ERROR -4
+#define STATUS_DEVICE_NOT_READY -5
+#define STATUS_DEVICE_CONFIGURATION_ERROR -6
+#define STATUS_DEVICE_PROTOCOL_ERROR -7
+#define UNREFERENCED_PARAMETER(x) ((void)(x))
+#define KernelMode 0
+typedef struct {long long QuadPart;} LARGE_INTEGER;
+static int fail_delay, delays;
+static NTSTATUS KeDelayExecutionThread(int mode, int alertable, LARGE_INTEGER *delay) {
+ (void)mode;(void)alertable;assert(delay->QuadPart<0 && delay->QuadPart>=-20000000);
+ ++delays;return fail_delay?-13:0;
+}
 #define NT_SUCCESS(x) ((x)>=0)
 #define WDF_NO_HANDLE NULL
 #define WDF_NO_OBJECT_ATTRIBUTES NULL
@@ -52,6 +65,7 @@ typedef struct {int direction;void *buffer;ULONG length;} SPB_TRANSFER_LIST_ENTR
 #define WDF_REQUEST_SEND_OPTION_TIMEOUT 1
 #define WDF_REL_TIMEOUT_IN_MS(x) (-(long long)(x)*10000)
 #define RtlZeroMemory(p,n) memset(p,0,n)
+#define RtlCopyMemory(d,s,n) memcpy(d,s,n)
 #define WDF_OBJECT_ATTRIBUTES_INIT(p) memset(p,0,sizeof(*(p)))
 #define WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(p,b,n) ((p)->buffer=(b),(p)->size=(n))
 #define WDF_REQUEST_SEND_OPTIONS_INIT(p,f) ((p)->Timeout=0)
@@ -110,6 +124,17 @@ static pthread_cond_t condition=PTHREAD_COND_INITIALIZER;
 static int block_send, entered, release_send;
 #endif
 static UCHAR last_gpio_value;
+static int emulate_codec;
+static uint16_t codec_registers[65536];
+static ULONG_PTR spb_written_count = 4;
+static NTSTATUS WdfIoTargetSendWriteSynchronously(WDFIOTARGET target,void *request,
+ WDF_MEMORY_DESCRIPTOR *input,void *offset,WDF_REQUEST_SEND_OPTIONS *opts,ULONG_PTR *bytes) {
+ (void)request;(void)offset;assert(target && target->open && emulate_codec);
+ assert(opts->Timeout==-10000000 && input->size==4);
+ const uint8_t *tx=input->buffer;
+ codec_registers[(tx[0]<<8)|tx[1]]=(uint16_t)((tx[2]<<8)|tx[3]);
+ ++sends;*bytes=spb_written_count;return fail_send?-12:0;
+}
 static NTSTATUS WdfIoTargetSendIoctlSynchronously(WDFIOTARGET target,void *request,int code,
  WDF_MEMORY_DESCRIPTOR *input,void *output,WDF_REQUEST_SEND_OPTIONS *opts,ULONG_PTR *bytes) {
  (void)request;(void)output;assert(target && target->open);assert(opts->Timeout==-10000000);
@@ -118,10 +143,12 @@ static NTSTATUS WdfIoTargetSendIoctlSynchronously(WDFIOTARGET target,void *reque
   assert(e[0].direction==SpbTransferDirectionToDevice && e[0].length==2);
   assert(e[1].direction==SpbTransferDirectionFromDevice && e[1].length==2);
   const uint8_t *index=e[0].buffer;
-  assert(index[0]==0 && (index[1]==0xfd || index[1]==0xfe || index[1]==0xff));
-  /* Model a controller that modifies the output even on short/error returns. */
-  ((uint8_t*)e[1].buffer)[0]=0x67;
-  ((uint8_t*)e[1].buffer)[1]=0x49;
+  /* Model a controller that modifies output even on short/error returns. */
+  uint16_t value=0x6749;
+  if(emulate_codec) value=codec_registers[(index[0]<<8)|index[1]];
+  else assert(index[0]==0 && (index[1]==0xfd || index[1]==0xfe || index[1]==0xff));
+  ((uint8_t*)e[1].buffer)[0]=(uint8_t)(value>>8);
+  ((uint8_t*)e[1].buffer)[1]=(uint8_t)value;
  } else if(code==IOCTL_GPIO_WRITE_PINS) {
   assert(input->size==1 && *(UCHAR*)input->buffer<=1);
   last_gpio_value=*(UCHAR*)input->buffer;

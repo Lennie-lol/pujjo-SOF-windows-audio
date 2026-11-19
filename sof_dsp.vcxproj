@@ -116,6 +116,8 @@
     <ClInclude Include="src\driver\WaveRt.h" />
     <ClInclude Include="src\driver\Nhlt.h" />
     <ClInclude Include="src\driver\PujjoAudioBus.h" />
+    <ClInclude Include="src\driver\PujjoAnalog.h" />
+    <ClInclude Include="src\driver\peripheral\PujjoPeripheralInterface.h" />
     <ClInclude Include="src\driver\HdaVerb.h" />
     <ClInclude Include="src\driver\HdaBusInterface.h" />
     <ClInclude Include="src\driver\SdwController.h" />
@@ -138,6 +140,7 @@
     <ClCompile Include="src\driver\WaveRt.c" />
     <ClCompile Include="src\driver\Nhlt.c" />
     <ClCompile Include="src\driver\PujjoAudioBus.c" />
+    <ClCompile Include="src\driver\PujjoAnalog.c" />
     <ClCompile Include="src\driver\HdaVerb.c" />
     <ClCompile Include="src\driver\HdaBusInterface.c" />
     <ClCompile Include="src\driver\SdwController.c" />

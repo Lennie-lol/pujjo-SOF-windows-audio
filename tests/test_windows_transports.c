@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+#define PJ5682S_ENABLE_CONTROL
 #include "wdk_host_mock.h"
+#include "../src/driver/experimental/PujjoRt5682sCodec.c"
+#include "../src/driver/experimental/PujjoHeadsetClock.c"
+#include "../src/driver/peripheral/PujjoRt5682sControl.c"
 #include "../src/driver/peripheral/PujjoRt5682sSpbWindows.c"
 #include "../src/driver/peripheral/PujjoRt1019pGpioWindows.c"
 #ifdef PJ_HOST_THREADS
@@ -64,20 +68,63 @@ int main(void) {
  before=sends;assert(bus.write_then_read(bus.context,tx,2,rx,2)==-1);assert(sends==before);
  Pj5682sSpbClose(&spb); /* idempotent, persistent lock for reprepare */
  assert(Pj5682sSpbOpen(&owner,1,0,&spb)==0 && !spb.Powered);Pj5682sSpbClose(&spb);
+ /* Runtime transport uses exact-length SPB reads and writes. The
+  * diagnostic callbacks exercised above remain identity-only. */
+ const pj5682s_control_profile codec_profile={1,1,1,1,24576000,3072000,48000,32,0,PJ5682S_ROUTE_DAC};
+ pj5682s_analog_program codec_program={1,{{0x0063,0xa000,0xa000,15,20}}};
+ emulate_codec=1;
+ codec_registers[0xff]=PJ5682S_EXPECTED_DEVICE_ID;
+ assert(Pj5682sSpbOpen(&owner,1,0,&spb)==0 && Pj5682sSpbSetPower(&spb,TRUE)==0);
+ codec_program.steps[0].mask=1;
+ before=sends;
+ assert(Pj5682sSpbStartControl(&spb,&codec_profile,&codec_program)==STATUS_ACCESS_DENIED);
+ assert(sends==before);
+ codec_program.steps[0].mask=0xa000;
+ assert(Pj5682sSpbStartControl(&spb,&codec_profile,&codec_program)==0);
+ assert(codec_registers[0x63]==0xa000 && delays==1);
+ pj5682s_jack jack=PJ5682S_JACK_ABSENT;
+ assert(Pj5682sSpbGetJack(&spb,Pj5682sJackPresence,&jack)==0 && jack==PJ5682S_JACK_PRESENT_UNCLASSIFIED);
+ codec_registers[0xf0]=0x10;
+ assert(Pj5682sSpbGetJack(&spb,Pj5682sJackPresence,&jack)==0 && jack==PJ5682S_JACK_ABSENT);
+ assert(Pj5682sSpbSetPower(&spb,FALSE)==0);
+ assert(codec_registers[0x63]==0 && codec_registers[0x61]==0 && delays==2);
+ assert(Pj5682sSpbGetJack(&spb,Pj5682sJackPresence,&jack)==STATUS_DEVICE_NOT_READY);
+ assert(Pj5682sSpbSetPower(&spb,TRUE)==0);
+ spb_written_count=3;
+ assert(Pj5682sSpbStartControl(&spb,&codec_profile,&codec_program)==STATUS_IO_DEVICE_ERROR);
+ assert(spb.Control.faulted);
+ spb_written_count=4;
+ assert(Pj5682sSpbClose(&spb)==0 && !live_targets);
+ emulate_codec=0;
+ delays=0;
  assert(Pj1019GpioInitialize(&owner,&gpio)==0);
  assert(Pj1019GpioOpen(&owner,2,0,Pj1019SdbUnverified,&gpio)==STATUS_INVALID_PARAMETER);
  assert(Pj1019GpioOpen(&owner,2,0,Pj1019SdbActiveLow,&gpio)==0);
- before=sends;assert(Pj1019GpioWrite(&gpio,TRUE)==STATUS_INVALID_DEVICE_STATE);assert(sends==before);
- assert(Pj1019GpioSetPower(&gpio,TRUE)==0);assert(Pj1019GpioWrite(&gpio,FALSE)==0 && last_gpio_value==1);
- assert(Pj1019GpioWrite(&gpio,TRUE)==0 && last_gpio_value==0);
- fail_send=1;assert(Pj1019GpioWrite(&gpio,TRUE)==-12);fail_send=0;
- assert(Pj1019GpioSetPower(&gpio,FALSE)==0);assert(Pj1019GpioWrite(&gpio,TRUE)==STATUS_INVALID_DEVICE_STATE);
- Pj1019GpioClose(&gpio);
+ const PJ1019_RUNTIME_PROFILE approved={TRUE,TRUE,TRUE,300};
+ PJ1019_RUNTIME_PROFILE denied=approved;
+ denied.GainLimitApplied=FALSE;
+ before=sends;
+ assert(Pj1019GpioStartMuted(&gpio,&approved)==STATUS_INVALID_DEVICE_STATE && sends==before);
+ assert(Pj1019GpioSetPower(&gpio,TRUE)==0 && last_gpio_value==1 && gpio.ShutdownConfirmed);
+ before=sends;
+ assert(Pj1019GpioStartMuted(&gpio,&denied)==STATUS_ACCESS_DENIED && sends==before);
+ assert(Pj1019GpioStartMuted(&gpio,&approved)==0 && last_gpio_value==0 && delays==1);
+ assert(Pj1019GpioShutdown(&gpio)==0 && last_gpio_value==1 && gpio.ShutdownConfirmed);
+ assert(Pj1019GpioStartMuted(&gpio,&approved)==0 && delays==1);
+ fail_send=1;assert(Pj1019GpioSetPower(&gpio,FALSE)==-12);fail_send=0;
+ assert(!gpio.Powered && !gpio.ShutdownConfirmed && gpio.Faulted);
+ assert(Pj1019GpioClose(&gpio)==STATUS_IO_DEVICE_ERROR);
  assert(Pj1019GpioOpen(&owner,2,0,Pj1019SdbActiveHigh,&gpio)==0);
+ assert(Pj1019GpioSetPower(&gpio,TRUE)==0 && last_gpio_value==0 && !gpio.Faulted);
+ fail_delay=1;
+ assert(Pj1019GpioStartMuted(&gpio,&approved)==-13 && last_gpio_value==0 && gpio.Faulted);
+ assert(Pj1019GpioStartMuted(&gpio,&approved)==STATUS_INVALID_DEVICE_STATE);
+ fail_delay=0;
+ assert(Pj1019GpioSetPower(&gpio,FALSE)==0);
  assert(Pj1019GpioSetPower(&gpio,TRUE)==0);
- assert(Pj1019GpioWrite(&gpio,FALSE)==0 && last_gpio_value==0);
- assert(Pj1019GpioWrite(&gpio,TRUE)==0 && last_gpio_value==1);
- Pj1019GpioClose(&gpio);Pj1019GpioClose(&gpio);assert(!live_targets);
+ assert(Pj1019GpioStartMuted(&gpio,&approved)==0 && last_gpio_value==1);
+ assert(Pj1019GpioClose(&gpio)==0 && last_gpio_value==0);
+ assert(Pj1019GpioClose(&gpio)==0 && !live_targets);
  destroy_lock(spb.Lock);destroy_lock(gpio.Lock);
  puts("PASS: full Windows transport sources with host WDF doubles, lifecycle/failures and close serialization");
  return 0;

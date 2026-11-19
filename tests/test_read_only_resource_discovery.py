@@ -36,7 +36,10 @@ assert "Pj1019" not in prepare
 print("PASS: peripheral diagnostics report translated resources without default activation")
 
 transport=(Path(__file__).resolve().parents[1]/"src/driver/peripheral/PujjoRt5682sSpbWindows.c").read_text()
-assert "WdfIoTargetSendWriteSynchronously" not in transport
+control = transport.split("/* Private transport for typed operations.", 1)[1]
+assert "WdfIoTargetSendWriteSynchronously" in control
+assert "WdfIoTargetSendWriteSynchronously" not in transport.split("/* Private transport for typed operations.", 1)[0]
+assert "#ifdef PJ5682S_ENABLE_CONTROL\n/* Private transport" in transport
 assert "bus->write_only=NULL;" in transport
 read=transport.split("static int Pj5682sSpbRead(",1)[1].split("\n}",1)[0]
 for register in ("PJ5682S_DEVICE_ID_REGISTER","PJ5682S_VENDOR_ID_REGISTER","PJ5682S_VERSION_REGISTER"):

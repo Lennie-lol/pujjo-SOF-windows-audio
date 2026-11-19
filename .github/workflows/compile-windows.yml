@@ -100,22 +100,30 @@ jobs:
         run: |
           msbuild sof_windows_driver.sln /m /t:Rebuild /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:normal /bl:build-logs/msbuild.binlog /fl '/flp:LogFile=build-logs/msbuild.log;Verbosity=normal'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Compile guarded source to isolated objects
+      - name: Build guarded drivers in isolated directories
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           foreach ($case in @(
-            @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_ENABLE_EXPERIMENTAL_AUDIO' },
-            @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_READONLY_PROBE' }
+            @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_ENABLE_EXPERIMENTAL_AUDIO /DPUJJO_ENABLE_EXPERIMENTAL_ANALOG' },
+            @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_READONLY_PROBE'; Name='codec-identity' },
+            @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_CONTROL'; Name='codec-runtime' },
+            @{ Project='pujjo_rt1019_probe'; Defines='/DPJ1019_ENABLE_CONTROL'; Name='amp-runtime' }
           )) {
             $env:CL = $case.Defines
-            $objects = Join-Path $env:RUNNER_TEMP ("compile-only-" + $case.Project)
-            msbuild "$($case.Project).vcxproj" /t:ClCompile /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 "/p:IntDir=$objects/" /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:minimal
+            $variant = if ($case.Name) { $case.Name } else { $case.Project }
+            $isolated = Join-Path $env:RUNNER_TEMP ("guarded-" + $variant)
+            $intermediate = if ($case.Project -eq 'sof_dsp') {
+              "/p:SolutionDir=$isolated/"
+            } else {
+              "/p:IntDir=$isolated/obj/"
+            }
+            msbuild "$($case.Project).vcxproj" /t:Rebuild /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 $intermediate "/p:OutDir=$isolated/bin/" /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:minimal /fl "/flp:LogFile=build-logs/guarded-$variant.log;Verbosity=normal"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $expected = if ($case.Project -eq 'sof_dsp') { 'Loader.obj' } else { 'PujjoPeripheralKmdf.obj' }
-            if (!(Get-ChildItem $objects -Filter $expected -Recurse)) { throw "Missing compile-only object $expected" }
+            if (!(Test-Path "$isolated/bin/$($case.Project).sys")) { throw "Missing guarded driver $variant" }
+            $objects = Join-Path $isolated 'obj'
             if ($case.Project -eq 'sof_dsp') {
-              foreach ($object in @('PujjoAudioBus.obj', 'WaveRt.obj')) {
+              foreach ($object in @('PujjoAudioBus.obj', 'WaveRt.obj', 'PujjoAnalog.obj')) {
                 if (!(Get-ChildItem $objects -Filter $object -Recurse)) { throw "Missing guarded object $object" }
               }
             }
@@ -134,12 +142,43 @@ jobs:
             }
           }
           'NOT INSTALLABLE - NOT HARDWARE VERIFIED. Unsigned compile-only development products.' | Set-Content "$output/NOT-INSTALLABLE.txt"
+      - name: Validate PortCls endpoint INF without staging it
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $kitRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
+          $tool = @(
+            (Join-Path $kitRoot 'Tools\10.0.26100.0\x64\InfVerif.exe')
+            (Join-Path $kitRoot 'bin\10.0.26100.0\x64\InfVerif.exe')
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (!$tool) { throw 'Missing InfVerif from WDK 10.0.26100.0' }
+          $scratch = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/portcls-inf"
+          $inf = Join-Path $scratch.FullName 'pujjo_audio.inf'
+          Copy-Item src/driver/pujjo_audio.inx $inf
+          Copy-Item bin/x64/Release/pujjo_audio.sys $scratch.FullName
+          & $tool /w /v $inf
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify read-only diagnostic INFs and generate unsigned catalogs
         if: matrix.configuration == 'Release'
         shell: pwsh
         run: |
           $revision = (git rev-parse HEAD).Trim()
           ./scripts/Stage-PujjoDiagnosticPackage.ps1 -BinaryDirectory bin/x64/Release -OutputDirectory "$env:RUNNER_TEMP/pujjo-diagnostics" -SourceRevision $revision
+      - name: Verify separate codec identity diagnostic
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $revision = (git rev-parse HEAD).Trim()
+          ./scripts/Stage-PujjoDiagnosticPackage.ps1 -BinaryDirectory "$env:RUNNER_TEMP/guarded-codec-identity/bin" -OutputDirectory "$env:RUNNER_TEMP/pujjo-codec-identity" -SourceRevision $revision -CodecIdentity
+      - name: Upload unsigned codec identity submission input
+        if: success() && matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pujjo-codec-identity-UNSIGNED-SUBMISSION
+          path: ${{ runner.temp }}/pujjo-codec-identity/
+          if-no-files-found: error
       - name: Upload unsigned diagnostic submission input
         if: success() && matrix.configuration == 'Release'
         uses: actions/upload-artifact@v4

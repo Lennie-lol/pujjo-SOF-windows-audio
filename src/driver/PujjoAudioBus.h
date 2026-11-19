@@ -5,16 +5,27 @@
 #include <guiddef.h>
 
 #define PUJJO_AUDIO_CHILD_ID L"PUJJO\\AudioDmic"
-#define PUJJO_AUDIO_INTERFACE_VERSION 1
+#define PUJJO_AUDIO_INTERFACE_VERSION 3
+#if defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG) && !defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO)
+#error The analog path requires the experimental audio guard
+#endif
 
 DEFINE_GUID(GUID_PUJJO_AUDIO_BUS, 0xd18a381b, 0xaa4b, 0x4565,
             0x99, 0x89, 0x85, 0x9a, 0xdf, 0x80, 0x01, 0xd3);
+
+typedef enum {
+    PujjoAudioDmic = 0,
+    PujjoAudioHeadphone,
+    PujjoAudioHeadsetMic,
+    PujjoAudioSpeaker
+} PUJJO_AUDIO_ROLE;
 
 typedef struct _PUJJO_AUDIO_FORMAT {
     ULONG Rate;
     USHORT Channels;
     USHORT ContainerBits;
     USHORT ValidBits;
+    PUJJO_AUDIO_ROLE Role;
 } PUJJO_AUDIO_FORMAT;
 
 typedef struct _PUJJO_AUDIO_BUFFER {
@@ -35,6 +46,7 @@ typedef struct _PUJJO_AUDIO_BUS {
     NTSTATUS (*SetState)(PVOID Context, PVOID Stream, ULONG State);
     NTSTATUS (*Position)(PVOID Context, PVOID Stream, PULONG Position);
     NTSTATUS (*Notification)(PVOID Stream, PKEVENT Event, BOOLEAN Add);
+    NTSTATUS (*JackPresent)(PVOID Context, PBOOLEAN Present);
 } PUJJO_AUDIO_BUS;
 
 #ifdef __cplusplus
