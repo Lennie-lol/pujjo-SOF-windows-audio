@@ -107,5 +107,27 @@ int main(void)
     chip.fail_following_writes = 0;
     assert(pj5682s_control_stop(&control,&bus) == PJ5682S_OK && !control.count);
     assert(pj5682s_control_start(&control,&bus,&profile) == PJ5682S_INCORRECT_STATE);
+
+    /* A failed write may have reached the codec. A retry must never
+     * restore an intermediate value after the older value was restored. */
+    memset(&control,0,sizeof(control));
+    memset(&chip,0,sizeof(chip));
+    chip.regs[0xff] = PJ5682S_EXPECTED_DEVICE_ID;
+    chip.regs[0x19] = 0xa511;
+    assert(pj5682s_control_start(&control,&bus,&profile) == PJ5682S_OK);
+    pj5682s_analog_program overlap = {2,{
+        {0x19,0x00ff,0x0022,0,0},
+        {0x19,0x00ff,0x0033,0,0}
+    }};
+    assert(pj5682s_control_analog(&control,&bus,&overlap,codec_delay) == PJ5682S_OK);
+    assert(chip.regs[0x19] == 0xa533);
+    unsigned journal_count = control.count;
+    chip.fail_first_write = chip.writes + 1;
+    assert(pj5682s_control_stop(&control,&bus) == PJ5682S_BUS_ERROR);
+    assert(!control.active && control.faulted && control.count == journal_count);
+    assert(chip.regs[0x19] == 0xa522);
+    chip.fail_first_write = 0;
+    assert(pj5682s_control_stop(&control,&bus) == PJ5682S_OK);
+    assert(chip.regs[0x19] == 0xa511 && !control.count && control.faulted);
     return 0;
 }

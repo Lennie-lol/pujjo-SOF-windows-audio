@@ -10,6 +10,11 @@ int main(void){
     assert(p.pll_needed==1);
     assert(pj_headset_clock_plan(48000,2,24,24,PJ_CLK_BCLK,2304000,&p)==PJ_CLK_OK);
     assert(p.bclk_hz==2304000);
+    assert(pj_headset_clock_plan(48000,2,24,25,PJ_CLK_BCLK,2400000,&p)==PJ_CLK_OK);
+    assert(p.bclk_hz==2400000 && p.slot_bits==25 && p.pll_needed);
+    assert(pj_headset_clock_plan(48000,2,24,25,PJ_CLK_BCLK,2304000,&p)==PJ_CLK_BAD_FORMAT);
+    assert(pj_headset_clock_plan(48000,2,24,25,PJ_CLK_MCLK,19200000,&p)==PJ_CLK_OK);
+    assert(p.bclk_hz==2400000 && p.requested_sysclk_hz==24576000 && p.pll_needed);
     assert(pj_headset_clock_plan(48000,2,24,32,PJ_CLK_MCLK,24576000,&p)==PJ_CLK_OK);
     assert(p.pll_needed==0);
     assert(pj_headset_clock_plan(48000,2,24,32,PJ_CLK_BCLK,2304000,&p)==PJ_CLK_BAD_FORMAT);
@@ -35,6 +40,8 @@ int main(void){
     assert(pj_rt5682s_plan_pll2(24000000,22579200,&plan)==PJ_CLK_BAD_FORMAT && !plan.count);
     assert(pj_rt5682s_plan_pll2(24000000,24576000,NULL)==PJ_CLK_BAD_FORMAT);
     pj_rt5682s_i2s_plan i2s;
+    /* Do not invent a register encoding for 25 physical clocks. */
+    assert(pj_rt5682s_plan_i2s_receiver(25,2400000,48000,0,&i2s)==PJ_CLK_BAD_FORMAT && !i2s.count);
     assert(pj_rt5682s_plan_i2s_receiver(32, 0, 48000, 0,&i2s)==PJ_CLK_NEED_MEASUREMENT);
     assert(i2s.count==0);
     assert(pj_rt5682s_plan_i2s_receiver(32, 2304000, 48000, 0,&i2s)==PJ_CLK_BAD_FORMAT);

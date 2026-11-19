@@ -70,7 +70,6 @@ static pj5682s_status apply(pj5682s_control *state, const pj5682s_bus *bus,
 pj5682s_status pj5682s_control_stop(pj5682s_control *state, const pj5682s_bus *bus)
 {
     pj5682s_status first;
-    unsigned remaining = 0;
 
     if (!state || !bus || !bus->write_then_read || !bus->write_only)
         return PJ5682S_BAD_ARGUMENT;
@@ -86,27 +85,27 @@ pj5682s_status pj5682s_control_stop(pj5682s_control *state, const pj5682s_bus *b
         return first;
     }
 
-    /* Retry only the fields that could not be restored. Preserve their order
-     * so a retry still unwinds the original writes in reverse. */
-    for (unsigned i = state->count; i > 0; --i) {
-        pj5682s_saved_register saved = state->saved[i - 1u];
+    /* Strict LIFO rollback: an earlier write can overlap a later field.
+     * Restoring it while the later entry is pending would replay an
+     * intermediate value on retry. Keep the complete older prefix until
+     * the failed entry is restored, and never discard a failed write. */
+    while (state->count) {
+        const pj5682s_saved_register *saved = &state->saved[state->count - 1u];
         PJ_WORD current;
-        pj5682s_status status = read_register(bus, saved.reg, &current);
+        pj5682s_status status = read_register(bus, saved->reg, &current);
         if (status == PJ5682S_OK)
-            status = update_register(bus, saved.reg, saved.mask, saved.original, current);
-        if (status == PJ5682S_OK && saved.restore_ms &&
-            state->wait(bus->context, saved.restore_ms)) status = PJ5682S_BUS_ERROR;
+            status = update_register(bus, saved->reg, saved->mask, saved->original, current);
+        if (status == PJ5682S_OK && saved->restore_ms &&
+            (!state->wait || state->wait(bus->context, saved->restore_ms)))
+            status = PJ5682S_BUS_ERROR;
         if (status != PJ5682S_OK) {
-            if (first == PJ5682S_OK) first = status;
-            state->saved[state->count - ++remaining] = saved;
+            state->faulted = 1;
+            return status;
         }
+        --state->count;
     }
-    for (unsigned i = 0; i < remaining; ++i)
-        state->saved[i] = state->saved[state->count - remaining + i];
-    state->count = remaining;
-    if (remaining) state->faulted = 1;
-    else state->wait = 0;
-    return first;
+    state->wait = 0;
+    return PJ5682S_OK;
 }
 
 pj5682s_status pj5682s_control_start(pj5682s_control *state, const pj5682s_bus *bus,

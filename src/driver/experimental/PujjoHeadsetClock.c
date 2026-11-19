@@ -13,9 +13,10 @@ pj_clk_status pj_headset_clock_plan(unsigned sample_rate_hz, unsigned channels,
 #else
     memset(out, 0, sizeof(*out));
 #endif
-    /* Constrained prototype: expand only after platform clock evidence. */
+    /* Geometry only: recovery SSP0 uses a 25-clock slot carrying 24 bits.
+     * This does not imply that the codec can be programmed for that slot. */
     if (sample_rate_hz!=48000 || channels!=2 || valid_bits!=24 ||
-        (slot_bits!=24 && slot_bits!=32) || slot_bits<valid_bits ||
+        (slot_bits!=24 && slot_bits!=25 && slot_bits!=32) || slot_bits<valid_bits ||
         (input_kind!=PJ_CLK_BCLK && input_kind!=PJ_CLK_MCLK && input_kind!=PJ_CLK_UNKNOWN))
         return PJ_CLK_BAD_FORMAT;
     out->sample_rate_hz=sample_rate_hz;
