@@ -675,6 +675,22 @@ NTSTATUS SofWaveRtDetachStream(PSOF_WAVERT_STREAM Stream)
  * @param[in] NewState Target KSSTATE.
  * @return STATUS_SUCCESS on success, or an NTSTATUS error code.
  */
+#ifdef _KERNEL_MODE
+/* A latched DMA error requires stream recreation, even after PAUSE/STOP.
+ * Reject detached leases before touching a converter, IPC or MMIO. */
+static NTSTATUS SofWaveRtCheckTransition(PSOF_WAVERT_STREAM Stream, KSSTATE NewState)
+{
+    if (Stream->Detached) return STATUS_DEVICE_NOT_READY;
+    if (NewState == KSSTATE_RUN) {
+        if (InterlockedCompareExchange(&Stream->DmaFaulted, 0, 0))
+            return STATUS_IO_DEVICE_ERROR;
+        if (!Stream->DeviceContext || Stream->DeviceContext->AudioDmaFaulted)
+            return STATUS_DEVICE_NOT_READY;
+    }
+    return STATUS_SUCCESS;
+}
+#endif
+
 NTSTATUS SofWaveRtSetState(
     _In_ PSOF_WAVERT_STREAM Stream,
     _In_ KSSTATE NewState
@@ -689,6 +705,10 @@ NTSTATUS SofWaveRtSetState(
 #ifdef _KERNEL_MODE
     if (KeGetCurrentIrql() != PASSIVE_LEVEL)
         return STATUS_INVALID_DEVICE_STATE;
+#endif
+#ifdef _KERNEL_MODE
+    status = SofWaveRtCheckTransition(Stream, NewState);
+    if (!NT_SUCCESS(status)) return status;
 #endif
     if (NewState == KSSTATE_RUN && (!Stream->IsActive ||
         Stream->HostCopierInstance == 0xFFFFFFFF || !Stream->DeviceContext))
@@ -824,7 +844,14 @@ NTSTATUS SofWaveRtSetState(
 run_failed:
     /* Do not arm notifications or report RUN after a failed converter/IPC
      * command. Halt any DMA started in this attempt and require recreation. */
-    SofWaveRtStopHdaStream(Stream);
+    {
+        NTSTATUS stopStatus = SofWaveRtStopHdaStream(Stream);
+#ifdef _KERNEL_MODE
+        if (!NT_SUCCESS(stopStatus)) Stream->DeviceContext->AudioDmaFaulted = TRUE;
+#else
+        UNREFERENCED_PARAMETER(stopStatus);
+#endif
+    }
     SofWaveRtStopLinkStream(Stream);
     if (Stream->DeviceContext->HdaCodecPresent && Stream->EndpointType == SOF_ENDPOINT_HDA_ANALOG)
         (void)SofHdaStopConverter(Stream->DeviceContext, 0, Stream->IsCapture);
@@ -1104,7 +1131,8 @@ NTSTATUS SofWaveRtConfigureHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
 NTSTATUS SofWaveRtStartHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
 {
 #ifdef _KERNEL_MODE
-    NTSTATUS status;
+    NTSTATUS status = SofWaveRtCheckTransition(Stream, KSSTATE_RUN);
+    if (!NT_SUCCESS(status)) return status;
     if (!Stream->DescriptorPublished) {
         status = SofWaveRtConfigureHdaStream(Stream);
         if (!NT_SUCCESS(status)) return status;

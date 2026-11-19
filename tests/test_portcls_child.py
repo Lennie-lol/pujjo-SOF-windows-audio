@@ -58,6 +58,45 @@ assert "if (!NT_SUCCESS(status)) return status;" in port.split("static NTSTATUS 
 remove = peripheral.split("static NTSTATUS RuntimeDisconnect", 1)[1]
 assert remove.index("InterlockedExchangePointer(&ctx->ActiveOwner, NULL)") < remove.index("Pj5682sSpbSetPower")
 
+# Faulted streams must not re-enter RUN or reprogram a DMA descriptor.
+transition = wave[wave.index("static NTSTATUS SofWaveRtCheckTransition("):
+                  wave.index("\n#endif", wave.index("static NTSTATUS SofWaveRtCheckTransition("))]
+state = wave.split("NTSTATUS SofWaveRtSetState(", 1)[1]
+assert state.index("SofWaveRtCheckTransition(Stream, NewState)") < state.index("switch (NewState)")
+start = wave.split("NTSTATUS SofWaveRtStartHdaStream(", 1)[1]
+assert start.index("SofWaveRtCheckTransition(Stream, KSSTATE_RUN)") < start.index("SofWaveRtConfigureHdaStream(Stream)")
+assert "if (!NT_SUCCESS(stopStatus)) Stream->DeviceContext->AudioDmaFaulted = TRUE;" in state
+transition_preamble = r'''
+#include <cassert>
+using NTSTATUS = int;
+enum KSSTATE { KSSTATE_STOP, KSSTATE_ACQUIRE, KSSTATE_PAUSE, KSSTATE_RUN };
+constexpr int STATUS_SUCCESS=0, STATUS_DEVICE_NOT_READY=-1, STATUS_IO_DEVICE_ERROR=-2;
+struct Device { bool AudioDmaFaulted; };
+struct Stream { bool Detached; long DmaFaulted; Device *DeviceContext; };
+using PSOF_WAVERT_STREAM = Stream *;
+static long InterlockedCompareExchange(long *p, long, long) { return *p; }
+'''
+transition_tests = r'''
+int main() {
+    Device d{false};
+    Stream s{false,0,&d};
+    assert(SofWaveRtCheckTransition(&s,KSSTATE_RUN)==0);
+    s.DmaFaulted=1;
+    assert(SofWaveRtCheckTransition(&s,KSSTATE_RUN)==STATUS_IO_DEVICE_ERROR);
+    assert(SofWaveRtCheckTransition(&s,KSSTATE_PAUSE)==0);
+    assert(SofWaveRtCheckTransition(&s,KSSTATE_STOP)==0);
+    s.DmaFaulted=0; d.AudioDmaFaulted=true;
+    assert(SofWaveRtCheckTransition(&s,KSSTATE_RUN)==STATUS_DEVICE_NOT_READY);
+    assert(SofWaveRtCheckTransition(&s,KSSTATE_STOP)==0);
+    d.AudioDmaFaulted=false; s.Detached=true;
+    for(auto state : {KSSTATE_STOP,KSSTATE_ACQUIRE,KSSTATE_PAUSE,KSSTATE_RUN})
+        assert(SofWaveRtCheckTransition(&s,state)==STATUS_DEVICE_NOT_READY);
+    s.Detached=false; s.DeviceContext=nullptr;
+    assert(SofWaveRtCheckTransition(&s,KSSTATE_RUN)==STATUS_DEVICE_NOT_READY);
+}
+'''
+transition_preamble += "#include <initializer_list>\n"
+
 # Execute the exact leaf used by NewStream and SetFormat. The declarations
 # below are host fixture types, not WDK ABI checks.
 validate = port[port.index("static BOOLEAN IsPcm"):port.index("class DmicStream")]
@@ -190,7 +229,8 @@ int main()
 '''
 with tempfile.TemporaryDirectory() as temp:
     for name, body in (("pcm", preamble + validate + tests),
-                        ("jack", jack_preamble + jack_property + jack_tests)):
+                        ("jack", jack_preamble + jack_property + jack_tests),
+                        ("transition", transition_preamble + transition + transition_tests)):
         source = Path(temp) / (name + ".cpp")
         output = Path(temp) / name
         source.write_text(body)
