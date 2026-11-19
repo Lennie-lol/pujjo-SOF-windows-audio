@@ -1152,7 +1152,7 @@ NTSTATUS SofIpcGetBootFirmwareVersion(
     }
     if (NT_SUCCESS(status) &&
         pj_ipc4_fw_version(reply.Payload, reply.PayloadSize, Version) != PJ_IPC4_VALID)
-        status = STATUS_INVALID_DEVICE_RESPONSE;
+        status = STATUS_DEVICE_PROTOCOL_ERROR;
     ExFreePoolWithTag(reply.Payload, SOF_DEVICE_TAG);
     return status;
 }
