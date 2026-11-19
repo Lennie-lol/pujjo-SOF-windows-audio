@@ -13,6 +13,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "pujjo_rt5682_probe", "pujjo
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "pujjo_rt1019_probe", "pujjo_rt1019_probe.vcxproj", "{975DA0DA-85F0-416B-BA0B-5A5E59C9E21A}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "pujjo_audio", "pujjo_audio.vcxproj", "{4C5AF98C-D79D-4DD2-BA13-7CA9D4F05E4A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -35,6 +37,10 @@ Global
 		{975DA0DA-85F0-416B-BA0B-5A5E59C9E21A}.Debug|x64.Build.0 = Debug|x64
 		{975DA0DA-85F0-416B-BA0B-5A5E59C9E21A}.Release|x64.ActiveCfg = Release|x64
 		{975DA0DA-85F0-416B-BA0B-5A5E59C9E21A}.Release|x64.Build.0 = Release|x64
+		{4C5AF98C-D79D-4DD2-BA13-7CA9D4F05E4A}.Debug|x64.ActiveCfg = Debug|x64
+		{4C5AF98C-D79D-4DD2-BA13-7CA9D4F05E4A}.Debug|x64.Build.0 = Debug|x64
+		{4C5AF98C-D79D-4DD2-BA13-7CA9D4F05E4A}.Release|x64.ActiveCfg = Release|x64
+		{4C5AF98C-D79D-4DD2-BA13-7CA9D4F05E4A}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

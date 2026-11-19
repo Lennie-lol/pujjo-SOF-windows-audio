@@ -142,6 +142,8 @@ typedef struct _SOF_WAVERT_STREAM {
 #ifdef _KERNEL_MODE
     /** @brief Memory Descriptor List (MDL) for user-mode mapping into audiosrv. */
     PMDL                Mdl;
+    BOOLEAN             BuffersLeased;
+    BOOLEAN             Detached;
     SOF_DMA_BUFFER      RingAllocation;
     SOF_DMA_BUFFER      BdlAllocation;
     BOOLEAN             DescriptorPublished;
@@ -235,6 +237,10 @@ NTSTATUS SofWaveRtCreateStream(
 NTSTATUS SofWaveRtFreeStream(
     _In_ PSOF_WAVERT_STREAM Stream
 );
+#ifdef _KERNEL_MODE
+NTSTATUS SofWaveRtDetachStream(_In_ PSOF_WAVERT_STREAM Stream);
+#endif
+
 
 /* State Control */
 

@@ -19,6 +19,7 @@
 #include <ntstrsafe.h>
 #include <hdaudio.h>
 #include "UsbOffload.h"
+#include "PujjoAudioBus.h"
 #else
 #include <windows.h>
 typedef UCHAR KIRQL;
@@ -321,18 +322,16 @@ typedef struct _SOF_DEVICE_CONTEXT {
     /** @brief Cached mute flags per endpoint. */
     BOOLEAN             DefaultMute[SOF_ENDPOINT_COUNT];
 
-    /* PortCls WaveRT Subdevice State */
-    /** @brief IPortWaveRT COM interface pointer. */
-    PVOID               WavePort;
-    /** @brief PortCls audio functional device object pointer. */
-    PDEVICE_OBJECT      AudioPortClsDevice;
-    /** @brief TRUE if PortCls subdevices have been successfully registered. */
-    BOOLEAN             PortClsRegistered;
-    /** @brief IPortEvents COM interface pointer for jack notification events. */
-    PVOID               PortEvents;
-    /** @brief Periodic passive WDF timer for jack and display presence polling. */
-    WDFTIMER            JackPollTimer;
-    volatile LONG       JackPolling;
+#ifdef _KERNEL_MODE
+    /* The child owns its PortCls FDO. The parent owns access to hardware. */
+    KMUTEX              AudioMutex;
+    KSPIN_LOCK          AudioPositionLock;
+    WDFDEVICE           AudioChild;
+    PUJJO_AUDIO_FORMAT  AudioFormat;
+    BOOLEAN             AudioOnline;
+    BOOLEAN             AudioPositionEnabled;
+    BOOLEAN             AudioDmaFaulted;
+#endif
 #ifdef _KERNEL_MODE
     EX_RUNDOWN_REF      IpcRundown;
 #endif
@@ -402,8 +401,6 @@ typedef struct _SOF_DEVICE_CONTEXT {
 #ifdef _KERNEL_MODE
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(SOF_DEVICE_CONTEXT, GetDeviceContext)
 
-/** @brief Periodic timer callback polling display pin sense and notifying audio clients. */
-EVT_WDF_TIMER SofEvtJackPollTimer;
 
 /** @brief One-shot timer callback verifying 10s of stable D0 operation. */
 EVT_WDF_TIMER SofEvtWatchdogHealthTimer;

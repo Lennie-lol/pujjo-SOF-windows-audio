@@ -34,6 +34,18 @@ int main(void){
     assert(pj_rt5682s_plan_pll2(3072000,24576000,&plan)==PJ_CLK_BAD_FORMAT && !plan.count);
     assert(pj_rt5682s_plan_pll2(24000000,22579200,&plan)==PJ_CLK_BAD_FORMAT && !plan.count);
     assert(pj_rt5682s_plan_pll2(24000000,24576000,NULL)==PJ_CLK_BAD_FORMAT);
+    pj_rt5682s_i2s_plan i2s;
+    assert(pj_rt5682s_plan_i2s_receiver(32, 0, 48000, 0,&i2s)==PJ_CLK_NEED_MEASUREMENT);
+    assert(i2s.count==0);
+    assert(pj_rt5682s_plan_i2s_receiver(32, 2304000, 48000, 0,&i2s)==PJ_CLK_BAD_FORMAT);
+    assert(pj_rt5682s_plan_i2s_receiver(32, 3072000, 48000, 2,&i2s)==PJ_CLK_BAD_FORMAT);
+    assert(pj_rt5682s_plan_i2s_receiver(32, 3072000, 48000, 1,&i2s)==PJ_CLK_OK);
+    assert(i2s.count==3 && i2s.writes[0].value==0);
+    assert(i2s.writes[1].value==0x3320 && i2s.writes[2].value==0x8030);
+    assert(pj_rt5682s_plan_i2s_receiver(24, 2304000, 48000, 0,&i2s)==PJ_CLK_OK);
+    assert(i2s.writes[1].value==0x2220 && i2s.writes[2].value==0x0020);
+    for (unsigned i=0; i<i2s.count; ++i)
+        assert((i2s.writes[i].value & (uint16_t)~i2s.writes[i].mask)==0);
     puts("PASS: RT5682S headset-only clock plan; no inferred input clock or register writes");
     return 0;
 }

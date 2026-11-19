@@ -1,0 +1,9 @@
+# Pujjo internal microphone integration
+
+The PCI function remains a KMDF resource and DMA owner. The guarded DMIC path publishes a static child PDO after firmware boot, an exact ACPI NHLT format match, and module resource validation. A separate WDM driver binds to the child ID and uses the documented PortCls adapter and subdevice APIs. The microphone topology and WaveRT capture filters connect on the PortCls FDO. [Microsoft SysVAD adapter](https://github.com/microsoft/Windows-driver-samples/blob/main/audio/sysvad/adapter.cpp) · [SysVAD subdevice registration](https://github.com/microsoft/Windows-driver-samples/blob/main/audio/sysvad/common.cpp)
+
+The versioned query interface holds a parent reference for every WaveRT miniport and stream that uses it. The parent serializes allocation, transitions, disconnect, and release. The stream withdraws its buffer from position and notification callbacks before releasing the MDL and DMA references. Parent D0 exit revokes hardware access and drains notifications before releasing MMIO. A descriptor with an unconfirmed stop remains quarantined with its buffers until device removal. Device restart with retained streams and automatic DSP resume remain closed.
+
+The default build gates audio and DSP activation. The guarded microphone path requires the reviewed firmware build, audio build flag, existing canary and explicit settings. It supports an exact stereo 48 kHz NHLT format. RT5682S framing and RT1019P logical GPIO polarity can be checked offline. Headset and speaker routing still require board-specific endpoint evidence. [RT5682S register and clock fields](https://github.com/torvalds/linux/blob/v6.13/sound/soc/codecs/rt5682s.h) · [RTL1019 amplifier reference](https://github.com/torvalds/linux/blob/v6.13/sound/soc/codecs/rt1015p.c)
+
+The [resource diagnostic package](PUJJO_DIAGNOSTIC_PACKAGE.md) is staged independently of the PortCls child and DSP packages.

@@ -65,11 +65,18 @@ int main(void) {
  Pj5682sSpbClose(&spb); /* idempotent, persistent lock for reprepare */
  assert(Pj5682sSpbOpen(&owner,1,0,&spb)==0 && !spb.Powered);Pj5682sSpbClose(&spb);
  assert(Pj1019GpioInitialize(&owner,&gpio)==0);
- assert(Pj1019GpioOpen(&owner,2,0,&gpio)==0);
+ assert(Pj1019GpioOpen(&owner,2,0,Pj1019SdbUnverified,&gpio)==STATUS_INVALID_PARAMETER);
+ assert(Pj1019GpioOpen(&owner,2,0,Pj1019SdbActiveLow,&gpio)==0);
  before=sends;assert(Pj1019GpioWrite(&gpio,TRUE)==STATUS_INVALID_DEVICE_STATE);assert(sends==before);
- assert(Pj1019GpioSetPower(&gpio,TRUE)==0);assert(Pj1019GpioWrite(&gpio,FALSE)==0);
+ assert(Pj1019GpioSetPower(&gpio,TRUE)==0);assert(Pj1019GpioWrite(&gpio,FALSE)==0 && last_gpio_value==1);
+ assert(Pj1019GpioWrite(&gpio,TRUE)==0 && last_gpio_value==0);
  fail_send=1;assert(Pj1019GpioWrite(&gpio,TRUE)==-12);fail_send=0;
  assert(Pj1019GpioSetPower(&gpio,FALSE)==0);assert(Pj1019GpioWrite(&gpio,TRUE)==STATUS_INVALID_DEVICE_STATE);
+ Pj1019GpioClose(&gpio);
+ assert(Pj1019GpioOpen(&owner,2,0,Pj1019SdbActiveHigh,&gpio)==0);
+ assert(Pj1019GpioSetPower(&gpio,TRUE)==0);
+ assert(Pj1019GpioWrite(&gpio,FALSE)==0 && last_gpio_value==0);
+ assert(Pj1019GpioWrite(&gpio,TRUE)==0 && last_gpio_value==1);
  Pj1019GpioClose(&gpio);Pj1019GpioClose(&gpio);assert(!live_targets);
  destroy_lock(spb.Lock);destroy_lock(gpio.Lock);
  puts("PASS: full Windows transport sources with host WDF doubles, lifecycle/failures and close serialization");

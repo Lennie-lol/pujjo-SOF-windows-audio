@@ -41,19 +41,6 @@ CopyFiles = Drivers_Dir
 [Drivers_Dir]
 sof_dsp.sys
 
-[Sof_Device.NT.Interfaces]
-AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Wave%,Sof_Wave_Interface
-AddInterface=%KSCATEGORY_RENDER%,%KSNAME_Wave%,Sof_Wave_Interface
-AddInterface=%KSCATEGORY_CAPTURE%,%KSNAME_Wave%,Sof_Wave_Interface
-AddInterface=%KSCATEGORY_REALTIME%,%KSNAME_Wave%,Sof_Wave_Interface
-
-[Sof_Wave_Interface]
-AddReg=Sof_Wave_Interface.AddReg
-
-[Sof_Wave_Interface.AddReg]
-HKR,,FriendlyName,,%Sof_Wave_Name%
-HKR,,CLSID,,%Proxy.CLSID%
-
 [Sof_Device.NT.Services]
 AddService = sof_dsp,%SPSVCINST_ASSOCSERVICE%,Sof_Service_Inst
 
@@ -93,10 +80,3 @@ Sof.SVCDESC = "Sound Open Firmware DSP Service"
 Intel.DeviceDesc = "Intel Sound Open Firmware Audio DSP"
 Pujjo.DeviceDesc = "Pujjo/Pujjo1e SOF Audio DSP (EXPERIMENTAL)"
 Amd.DeviceDesc = "AMD Sound Open Firmware Audio DSP"
-Sof_Wave_Name = "Sound Open Firmware Wave Audio"
-KSNAME_Wave = "Wave"
-Proxy.CLSID = "{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
-KSCATEGORY_AUDIO = "{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
-KSCATEGORY_RENDER = "{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
-KSCATEGORY_CAPTURE = "{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
-KSCATEGORY_REALTIME = "{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
