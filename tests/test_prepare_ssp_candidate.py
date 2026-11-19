@@ -37,6 +37,20 @@ def table(port, data, dirs=None):
 
 
 class Prepare(unittest.TestCase):
+    def test_fixed_candidate_geometry(self):
+        from generate_pujjo_ssp_candidate import candidate
+        a, b = candidate(0), candidate(1)
+        self.assertEqual(len(a), 96)
+        self.assertEqual(len(b), 96)
+        for port, data, expected_source, expected_padding in ((0, a, 0, 1), (1, b, 1, 8)):
+            d = decode(data, port)
+            self.assertEqual(d["mdivctlr"], 1 | (expected_source << 20))
+            self.assertEqual(d["mdivr"], 0)
+            padding = ((d["sspsp"] >> 23) & 3) | (((d["sspsp"] >> 26) & 7) << 2)
+            self.assertEqual(padding, expected_padding)
+        with self.assertRaises(ValueError):
+            candidate(2)
+
     def test_windows_metadata_and_payload(self):
         a, b = blob(0), blob(1)
         result, report = build(table(0, a), table(1, blob(1, 0x10000, 0xfff)), a, b)

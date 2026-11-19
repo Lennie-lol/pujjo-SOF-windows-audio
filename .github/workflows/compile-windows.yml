@@ -16,6 +16,18 @@ jobs:
         run: python3 tests/run_offline_suite.py --logs build-logs/offline
       - name: Compiler, sanitizer and static analyzer matrix
         run: python3 tests/run_compiler_matrix.py
+      - name: Install ALSA encoder build dependency
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y libasound2-dev
+      - name: Cross-check SSP candidates against pinned upstream ALSA
+        run: |
+          upstream="$RUNNER_TEMP/alsa-utils-ssp"
+          git init "$upstream"
+          git -C "$upstream" remote add origin https://github.com/alsa-project/alsa-utils.git
+          git -C "$upstream" fetch --depth=1 origin f04b9e0f1285fe25d4146906c5a8511741b8abad
+          git -C "$upstream" checkout --detach FETCH_HEAD
+          bash scripts/run_alsa_ssp_reference.sh "$upstream" build-logs/ssp-reference
       - name: Preserve portable results
         if: always()
         uses: actions/upload-artifact@v4
