@@ -86,14 +86,16 @@ pj_clk_status pj_rt5682s_plan_i2s_receiver(unsigned slot_bits, unsigned measured
     out->count = 0;
     if (!measured_bclk_hz || !measured_lrclk_hz) return PJ_CLK_NEED_MEASUREMENT;
     if (measured_lrclk_hz != 48000u || inverted_bclk > 1u ||
-        (slot_bits != 24u && slot_bits != 32u) ||
+        (slot_bits != 24u && slot_bits != 25u && slot_bits != 32u) ||
         measured_bclk_hz != measured_lrclk_hz * 2u * slot_bits)
         return PJ_CLK_BAD_FORMAT;
 
-    /* AIF1 field encodings from Linux v6.13 rt5682s.h. Set TDM disable,
-     * stereo 24-bit data and actual slot width, then select clock receiver
-     * with measured BCLK polarity and standard I2S frame polarity. */
-    slot = (PJ_WORD)(slot_bits == 24u ? 2u : 3u);
+    /* AIF1 receiver in non-TDM I2S uses codec word length, not the
+     * externally supplied frame-clock count. The Linux v6.13 SOF board
+     * hw_params sets two codec slots with params_width, not SSP padding.
+     * The 25-clock wire slot has a 24-bit word and an external pad clock.
+     * The caller must separately qualify that padded physical framing. */
+    slot = (PJ_WORD)(slot_bits == 32u ? 3u : 2u);
     out->writes[0].reg = 0x007bu;
     out->writes[0].mask = 0x0080u;
     out->writes[0].value = 0u;

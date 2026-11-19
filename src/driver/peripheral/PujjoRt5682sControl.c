@@ -11,6 +11,10 @@ enum {
     RT5682S_DAC1_MIX = 0x0029,
     RT5682S_DAC1_SOURCE = 0x002b,
     RT5682S_AIF1_POWER = 0x0061,
+    RT5682S_PLL_POWER = 0x0065,
+    RT5682S_PLLB_SUPPLIES = 0x5020,
+    RT5682S_PLLB_RESET = 0x0080,
+    RT5682S_I2S2_CLOCK = 0x00a0,
     RT5682S_ADDA_CLK = 0x0073,
     RT5682S_SYSCLK = 0x0080,
     RT5682S_AJD1 = 0x00f0,
@@ -108,12 +112,14 @@ pj5682s_status pj5682s_control_stop(pj5682s_control *state, const pj5682s_bus *b
     return PJ5682S_OK;
 }
 
-pj5682s_status pj5682s_control_start(pj5682s_control *state, const pj5682s_bus *bus,
-                                    const pj5682s_control_profile *profile)
+pj5682s_status pj5682s_control_start_clocked(pj5682s_control *state, const pj5682s_bus *bus,
+    const pj5682s_control_profile *profile, pj5682s_wait clock_wait)
 {
     pj_rt5682s_i2s_plan framing;
-    pj_clock_register_update updates[10];
-    unsigned count = 0;
+    pj_rt5682s_pll2_plan pll;
+    pj_clock_register_update updates[PJ5682S_MAX_START_WRITES];
+    unsigned count = 0, settle_after = 0;
+    unsigned use_pll;
     pj5682s_status status;
 
     if (!state || !bus || !bus->write_then_read || !bus->write_only || !profile)
@@ -121,11 +127,21 @@ pj5682s_status pj5682s_control_start(pj5682s_control *state, const pj5682s_bus *
     if (state->active || state->count || state->faulted) return PJ5682S_INCORRECT_STATE;
     if (profile->board_qualified != 1u || profile->analog_path_prepared_muted != 1u ||
         profile->dsp_muted != 1u || profile->jd1_qualified > 1u ||
-        profile->mclk_hz != 24576000u || !profile->routes ||
+        !profile->routes ||
         (profile->routes & ~(PJ5682S_ROUTE_DAC | PJ5682S_ROUTE_ADC)) ||
         pj_rt5682s_plan_i2s_receiver(profile->slot_bits, profile->bclk_hz,
             profile->lrclk_hz, profile->inverted_bclk, &framing) != PJ_CLK_OK)
         return PJ5682S_WRITE_LOCKED;
+
+    use_pll = profile->mclk_hz != 24576000u;
+    if (use_pll) {
+        if (profile->mclk_hz != 19200000u || profile->pll2_qualified != 1u ||
+            !profile->pll2_settle_ms || profile->pll2_settle_ms > 500u || !clock_wait ||
+            pj_rt5682s_plan_pll2(profile->mclk_hz, 24576000u, &pll) != PJ_CLK_OK)
+            return PJ5682S_WRITE_LOCKED;
+    } else if (profile->pll2_qualified || profile->pll2_settle_ms) {
+        return PJ5682S_WRITE_LOCKED;
+    }
 
     status = verify_device(bus);
     if (status != PJ5682S_OK) return status;
@@ -136,9 +152,38 @@ pj5682s_status pj5682s_control_start(pj5682s_control *state, const pj5682s_bus *
     if (status != PJ5682S_OK) return status;
     if (power & 0x8000u) return PJ5682S_INCORRECT_STATE;
 
+    if (use_pll) {
+        /* Refuse to reconfigure PLLB if another part of the codec owns it.
+         * Power, source and reset fields follow Linux v6.13 rt5682s. */
+        PJ_WORD source;
+        status = read_register(bus, RT5682S_PLL_POWER, &power);
+        if (status != PJ5682S_OK) return status;
+        if (power & (RT5682S_PLLB_SUPPLIES | RT5682S_PLLB_RESET))
+            return PJ5682S_INCORRECT_STATE;
+        status = read_register(bus, RT5682S_SYSCLK, &source);
+        if (status != PJ5682S_OK) return status;
+        if ((source & 0xe000u) == 0x4000u) return PJ5682S_INCORRECT_STATE;
+        status = read_register(bus, RT5682S_ADDA_CLK, &source);
+        if (status != PJ5682S_OK) return status;
+        if ((source & 0x0070u) == 0x0020u) return PJ5682S_INCORRECT_STATE;
+        status = read_register(bus, RT5682S_I2S2_CLOCK, &source);
+        if (status != PJ5682S_OK) return status;
+        if ((source & 0x0070u) == 0x0020u) return PJ5682S_INCORRECT_STATE;
+    }
+
     for (unsigned i = 0; i < framing.count; ++i) updates[count++] = framing.writes[i];
-    updates[count++] = (pj_clock_register_update){RT5682S_SYSCLK, 0xe000, 0};
-    updates[count++] = (pj_clock_register_update){RT5682S_ADDA_CLK, 0xf07f, 0x1001};
+    if (use_pll) {
+        for (unsigned i = 0; i < pll.count; ++i) updates[count++] = pll.writes[i];
+        updates[count++] = (pj_clock_register_update){RT5682S_PLL_POWER,
+            RT5682S_PLLB_SUPPLIES, RT5682S_PLLB_SUPPLIES};
+        updates[count++] = (pj_clock_register_update){RT5682S_PLL_POWER,
+            RT5682S_PLLB_RESET, RT5682S_PLLB_RESET};
+        settle_after = count;
+    }
+    updates[count++] = (pj_clock_register_update){RT5682S_SYSCLK, 0xe000,
+        (PJ_WORD)(use_pll ? 0x4000u : 0u)};
+    updates[count++] = (pj_clock_register_update){RT5682S_ADDA_CLK, 0xf07f,
+        (PJ_WORD)(use_pll ? 0x1021u : 0x1001u)};
     if (profile->routes & PJ5682S_ROUTE_DAC) {
         /* Stereo DAC1 directly from the I2S mixer. Disable ADC loopback. */
         updates[count++] = (pj_clock_register_update){RT5682S_DAC1_MIX, 0xc0c0, 0x8080};
@@ -151,6 +196,9 @@ pj5682s_status pj5682s_control_start(pj5682s_control *state, const pj5682s_bus *
     updates[count++] = (pj_clock_register_update){RT5682S_AIF1_POWER, 0x8000, 0x8000};
     for (unsigned i = 0; i < count; ++i) {
         status = apply(state, bus, updates[i], 0);
+        if (status == PJ5682S_OK && i + 1u == settle_after &&
+            clock_wait(bus->context, profile->pll2_settle_ms))
+            status = PJ5682S_BUS_ERROR;
         if (status != PJ5682S_OK) {
             state->faulted = 1;
             (void)pj5682s_control_stop(state, bus);
@@ -160,6 +208,12 @@ pj5682s_status pj5682s_control_start(pj5682s_control *state, const pj5682s_bus *
     state->active = 1;
     state->jd1_qualified = profile->jd1_qualified;
     return PJ5682S_OK;
+}
+
+pj5682s_status pj5682s_control_start(pj5682s_control *state, const pj5682s_bus *bus,
+                                    const pj5682s_control_profile *profile)
+{
+    return pj5682s_control_start_clocked(state, bus, profile, 0);
 }
 
 /* Register and mask pairs follow the v6.13 RT5682S DAPM power,

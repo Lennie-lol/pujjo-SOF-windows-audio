@@ -36,7 +36,8 @@ pj_clk_status pj_rt5682s_plan_pll2(unsigned measured_mclk_hz,
     unsigned output_hz, pj_rt5682s_pll2_plan *out);
 /* RT5682S AIF1 stereo I2S with the codec receiving both clocks. The caller
  * supplies measured frame geometry and must independently establish that
- * the link uses I2S. Updates configure framing only and never touch power. */
+ * the link uses I2S, including 25-clock/24-data padded framing when used.
+ * Updates configure framing only and never touch power. */
 typedef struct pj_rt5682s_i2s_plan {
     unsigned count;
     pj_clock_register_update writes[3];

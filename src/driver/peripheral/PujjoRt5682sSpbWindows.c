@@ -181,6 +181,7 @@ static int ControlRegister(PJ_WORD reg)
     switch (reg) {
     case 0x0010: case 0x0026: case 0x0029: case 0x002b: case 0x0061: case 0x0070:
     case 0x0073: case 0x007b: case 0x007e: case 0x0080:
+    case 0x009a: case 0x009b: case 0x009d: case 0x009e:
         return 1;
     default:
         return pj5682s_analog_mask(reg) != 0;
@@ -204,7 +205,7 @@ static int ControlRead(void *context, const PJ_BYTE *address, PJ_SIZE addressByt
         return -1;
     reg = pj5682s_decode_value(address);
     if (!ControlRegister(reg) && reg != PJ5682S_DEVICE_ID_REGISTER &&
-        reg != 0x00f0u && reg != 0x0011u)
+        reg != 0x00f0u && reg != 0x0011u && reg != 0x00a0u)
         return -1;
 
     SPB_TRANSFER_LIST_INIT(&sequence.List, 2);
@@ -273,7 +274,7 @@ NTSTATUS Pj5682sSpbStartControl(PJ5682S_SPB_WINDOWS *state,
     if (valid != PJ5682S_OK) return ControlStatus(valid);
     WdfWaitLockAcquire(state->Lock, NULL);
     if (state->Opened && state->Powered) {
-        status = ControlStatus(pj5682s_control_start(&state->Control, &bus, profile));
+        status = ControlStatus(pj5682s_control_start_clocked(&state->Control, &bus, profile, ControlDelay));
         if (NT_SUCCESS(status))
             status = ControlStatus(pj5682s_control_analog(&state->Control, &bus, program, ControlDelay));
     }

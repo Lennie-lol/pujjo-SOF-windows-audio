@@ -40,8 +40,10 @@ int main(void){
     assert(pj_rt5682s_plan_pll2(24000000,22579200,&plan)==PJ_CLK_BAD_FORMAT && !plan.count);
     assert(pj_rt5682s_plan_pll2(24000000,24576000,NULL)==PJ_CLK_BAD_FORMAT);
     pj_rt5682s_i2s_plan i2s;
-    /* Do not invent a register encoding for 25 physical clocks. */
-    assert(pj_rt5682s_plan_i2s_receiver(25,2400000,48000,0,&i2s)==PJ_CLK_BAD_FORMAT && !i2s.count);
+    /* External padding must not become a fictitious 25-bit word code. */
+    assert(pj_rt5682s_plan_i2s_receiver(25,2400000,48000,0,&i2s)==PJ_CLK_OK && i2s.count==3);
+    assert(i2s.writes[1].value==0x2220 && i2s.writes[2].value==0x0020);
+    assert(pj_rt5682s_plan_i2s_receiver(25,2304000,48000,0,&i2s)==PJ_CLK_BAD_FORMAT && !i2s.count);
     assert(pj_rt5682s_plan_i2s_receiver(32, 0, 48000, 0,&i2s)==PJ_CLK_NEED_MEASUREMENT);
     assert(i2s.count==0);
     assert(pj_rt5682s_plan_i2s_receiver(32, 2304000, 48000, 0,&i2s)==PJ_CLK_BAD_FORMAT);

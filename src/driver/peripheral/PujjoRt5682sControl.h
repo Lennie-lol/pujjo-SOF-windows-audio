@@ -11,7 +11,8 @@ extern "C" {
 #define PJ5682S_ROUTE_DAC 1u
 #define PJ5682S_ROUTE_ADC 2u
 #define PJ5682S_MAX_ANALOG_STEPS 24u
-#define PJ5682S_MAX_SAVED_REGISTERS (10u + PJ5682S_MAX_ANALOG_STEPS)
+#define PJ5682S_MAX_START_WRITES 16u
+#define PJ5682S_MAX_SAVED_REGISTERS (PJ5682S_MAX_START_WRITES + PJ5682S_MAX_ANALOG_STEPS + 1u)
 
 typedef struct {
     PJ_WORD reg, mask, value;
@@ -34,6 +35,9 @@ typedef struct {
     unsigned jd1_qualified;
     unsigned mclk_hz, bclk_hz, lrclk_hz, slot_bits, inverted_bclk;
     unsigned routes;
+    /* Separately reviewed PLLB startup delay; 0 for direct MCLK. */
+    unsigned pll2_settle_ms;
+    unsigned pll2_qualified;
 } pj5682s_control_profile;
 
 typedef struct {
@@ -74,6 +78,10 @@ typedef enum {
  * applies while the DSP gain is muted. Stop restores the changed fields. A failed rollback can be retried after re-identification. */
 pj5682s_status pj5682s_control_start(pj5682s_control *state, const pj5682s_bus *bus,
                                     const pj5682s_control_profile *profile);
+/* The clocked variant supports a separately qualified 19.2 MHz PLLB route.
+ * The delay is not a PLL lock measurement. The caller keeps the DSP muted. */
+pj5682s_status pj5682s_control_start_clocked(pj5682s_control *state, const pj5682s_bus *bus,
+    const pj5682s_control_profile *profile, pj5682s_wait clock_wait);
 pj5682s_status pj5682s_control_stop(pj5682s_control *state, const pj5682s_bus *bus);
 pj5682s_status pj5682s_control_jack(const pj5682s_control *state, const pj5682s_bus *bus,
                                     unsigned detection_completed, pj5682s_jack *jack);

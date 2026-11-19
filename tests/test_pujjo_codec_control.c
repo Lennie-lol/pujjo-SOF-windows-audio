@@ -8,7 +8,7 @@ typedef struct {
     unsigned reads, writes;
     unsigned fail_first_write, fail_following_writes;
     unsigned unplug_on_second_sample;
-    unsigned delay_count, keep_stale_type;
+    unsigned delay_count, keep_stale_type, fail_clock_wait;
 } fake_codec;
 
 static int read_bus(void *user, const PJ_BYTE *tx, PJ_SIZE len, PJ_BYTE *rx, PJ_SIZE size)
@@ -48,11 +48,22 @@ static int codec_delay(void *user, unsigned ms)
     return 0;
 }
 
+static int pll_wait(void *user, unsigned ms)
+{
+    fake_codec *chip = user;
+    assert(ms == 25u);
+    assert((chip->regs[0x65] & 0x50a0u) == 0x50a0u);
+    assert((chip->regs[0x80] & 0xe000u) != 0x4000u);
+    assert(!(chip->regs[0x61] & 0x8000u));
+    ++chip->delay_count;
+    return chip->fail_clock_wait ? -1 : 0;
+}
+
 int main(void)
 {
     pj5682s_control control = {0};
     pj5682s_control_profile profile = {
-        1,1,1,1,24576000,3072000,48000,32,0,PJ5682S_ROUTE_DAC | PJ5682S_ROUTE_ADC
+        1,1,1,1,24576000,3072000,48000,32,0,PJ5682S_ROUTE_DAC | PJ5682S_ROUTE_ADC,0,0
     };
     fake_codec chip = {0};
     pj5682s_bus bus = {&chip,read_bus,write_bus};
@@ -129,5 +140,33 @@ int main(void)
     chip.fail_first_write = 0;
     assert(pj5682s_control_stop(&control,&bus) == PJ5682S_OK);
     assert(chip.regs[0x19] == 0xa511 && !control.count && control.faulted);
+
+    memset(&control,0,sizeof(control));
+    memset(&chip,0,sizeof(chip));
+    chip.regs[0xff] = PJ5682S_EXPECTED_DEVICE_ID;
+    chip.regs[0x65] = 0x2000; /* preserve unrelated supply */
+    profile.mclk_hz = 19200000;
+    profile.bclk_hz = 2400000;
+    profile.slot_bits = 25;
+    assert(pj5682s_control_start_clocked(&control,&bus,&profile,pll_wait) == PJ5682S_WRITE_LOCKED);
+    assert(!chip.reads && !chip.writes);
+    profile.pll2_qualified = 1;
+    profile.pll2_settle_ms = 25;
+    assert(pj5682s_control_start(&control,&bus,&profile) == PJ5682S_WRITE_LOCKED);
+    chip.regs[0x65] |= 0x20;
+    assert(pj5682s_control_start_clocked(&control,&bus,&profile,pll_wait) == PJ5682S_INCORRECT_STATE);
+    assert(!chip.writes);
+    chip.regs[0x65] &= (PJ_WORD)~0x20u;
+    assert(pj5682s_control_start_clocked(&control,&bus,&profile,pll_wait) == PJ5682S_OK);
+    assert(chip.delay_count == 1 && chip.regs[0x65] == 0x70a0);
+    assert(chip.regs[0x9a] == 6 && chip.regs[0x9b] == 0x0203);
+    assert(chip.regs[0x80] == 0x4000 && chip.regs[0x73] == 0x1021);
+    assert(chip.regs[0x70] == 0x2220 && chip.regs[0x61] & 0x8000u);
+    assert(pj5682s_control_stop(&control,&bus) == PJ5682S_OK);
+    assert(chip.regs[0x65] == 0x2000 && !chip.regs[0x80] && !chip.regs[0x9b] && !control.count);
+    chip.fail_clock_wait = 1;
+    assert(pj5682s_control_start_clocked(&control,&bus,&profile,pll_wait) == PJ5682S_BUS_ERROR);
+    assert(control.faulted && !control.active && !control.count);
+    assert(chip.regs[0x65] == 0x2000 && !chip.regs[0x80] && !chip.regs[0x61]);
     return 0;
 }
