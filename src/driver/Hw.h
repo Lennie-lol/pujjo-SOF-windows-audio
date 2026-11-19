@@ -386,6 +386,9 @@ typedef struct _SOF_DSP_HW_DESC {
 
 /** @brief Stream Control interrupt mask (IOCE + FEIE + DEIE). */
 #define SOF_HDA_CL_DMA_SD_INT_MASK          0x1C
+#define SOF_HDA_DPIB_BASE                   0x1084u
+#define SOF_HDA_DPIB_STRIDE                 0x20u
+#define SOF_HDA_SD_STS_DMA_ERRORS           0x18u /* FIFO and descriptor errors */
 
 /** @brief Lower Link Capabilities Header offset (BAR0: 0x14). */
 #define SOF_HDA_LLCH                        0x14

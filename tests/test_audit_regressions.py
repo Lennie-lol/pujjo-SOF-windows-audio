@@ -8,13 +8,21 @@ loader=(root/'src/driver/Loader.c').read_text()
 assert 'ioStatus.Information != fileSize' in loader
 # Failure is now latched under the IPC lock before examining bootState.
 end=loader[loader.index('status = KeWaitForSingleObject(&Ctx->FwReadyEvent'):]
-assert 'Ctx->FwState = SOF_FW_BOOT_COMPLETE' not in end
+assert end.count('Ctx->FwState = SOF_FW_BOOT_COMPLETE') == 1
+assert end.index('status = SofQueryBootedFirmwareVersion') < end.index(
+    'if (!Ctx->IpcFaulted && Ctx->FwState == SOF_FW_BOOT_READY_RECEIVED)') < end.index(
+    'Ctx->FwState = SOF_FW_BOOT_COMPLETE')
+ipc=(root/'src/driver/Ipc.c').read_text()
+send = ipc.split('NTSTATUS\nSofIpcSendMessage(', 1)[1].split('\n}', 1)[0]
+assert 'SofIpcSendWhilePowered(Ctx, Msg, Reply, TimeoutMs, SOF_FW_BOOT_COMPLETE)' in send
+query = ipc.split('NTSTATUS SofIpcGetBootFirmwareVersion(', 1)[1].split('\n}', 1)[0]
+assert 'SOF_FW_BOOT_READY_RECEIVED' in query and 'SOF_IPC4_FW_PARAM_FW_CONFIG' in query
 failure=end.split('if (status != STATUS_SUCCESS || Ctx->IpcFaulted',1)[1].split('KeReleaseSpinLock',1)[0]
-assert 'bootState != SOF_FW_BOOT_COMPLETE' in failure
+assert 'bootState != SOF_FW_BOOT_READY_RECEIVED' in failure
 assert 'Ctx->FwState = SOF_FW_BOOT_FAILED;' in failure
 assert 'Ctx->IpcFaulted = TRUE;' in failure
 assert 'bootState = SOF_FW_BOOT_FAILED;' in failure
-assert end.index('bootState = SOF_FW_BOOT_FAILED;') < end.index('if (bootState == SOF_FW_BOOT_COMPLETE)')
+assert end.index('bootState = SOF_FW_BOOT_FAILED;') < end.index('if (bootState == SOF_FW_BOOT_READY_RECEIVED)')
 assert 'status = status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_DEVICE_NOT_READY;' in end
 assert end.index('status = status == STATUS_TIMEOUT ?') < end.index('goto boot_failed;', end.index('status = status == STATUS_TIMEOUT ?'))
 ns={'m':'http://schemas.microsoft.com/developer/msbuild/2003'}

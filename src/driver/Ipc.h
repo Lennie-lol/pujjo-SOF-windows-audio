@@ -173,6 +173,12 @@ NTSTATUS SofIpcSendMessage(
     _Inout_opt_ PSOF_IPC_MESSAGE Reply,
     _In_ ULONG TimeoutMs
 );
+/* Loader-only BaseFW configuration query after FW_READY. */
+NTSTATUS SofIpcGetBootFirmwareVersion(
+    _In_ PSOF_DEVICE_CONTEXT Ctx,
+    _Out_writes_(4) USHORT Version[4]
+);
+
 
 /* Status Reading */
 

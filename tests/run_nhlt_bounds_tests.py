@@ -69,6 +69,8 @@ static ULONG make_ep(UCHAR *p,UCHAR link,UCHAR count) {
     p[sizeof(ep)+4u]=count;
     fmt.Format.nSamplesPerSec=48000u;fmt.Format.nChannels=2u;
     fmt.Format.wBitsPerSample=24u;
+    fmt.Format.nBlockAlign=6u;
+    fmt.Format.nAvgBytesPerSec=288000u;
     fmt.Format.wFormatTag=0xfffeu;
     fmt.Format.cbSize=22u;
     fmt.Samples.wValidBitsPerSample=20u;
@@ -117,6 +119,16 @@ static void test_lookup(void) {
     assert(copied[1]==0);
     assert(SofNhltCopyConfiguration(bytes,sizeof(bytes),&key,copied,4,&bytes_needed)==STATUS_SUCCESS);
     assert(memcmp(copied,payload,sizeof(payload))==0);
+
+    {
+        const ULONG avg_offset = first + sizeof(NHLT_ENDPOINT_DESCRIPTOR) + 5u + 8u;
+        bytes[avg_offset] ^= 1u;
+        fix_checksum(bytes,first+ep_bytes);
+        assert(SofNhltCopyConfiguration(bytes,sizeof(bytes),&key,copied,4,&bytes_needed)==STATUS_NOT_FOUND);
+        assert(bytes_needed==0u && memcmp(copied,payload,sizeof(payload))==0);
+        bytes[avg_offset] ^= 1u;
+        fix_checksum(bytes,first+ep_bytes);
+    }
 
     key.ValidBits=24u;
     assert(SofNhltCopyConfiguration(bytes,sizeof(bytes),&key,copied,4,&bytes_needed)==STATUS_NOT_FOUND);

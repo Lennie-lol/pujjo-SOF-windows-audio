@@ -190,8 +190,12 @@ assert "spibRelative > Ctx->Bar0Length - capOffset" in configure
 assert "gctl == 0xFFFFFFFFu || !(gctl & SOF_HDA_GCTL_RESET)" in configure
 assert configure.count("for (timeout = 0; timeout < 500u; ++timeout)")==2
 assert configure.index("if (timeout == 500u) return STATUS_IO_TIMEOUT;") < configure.index("/* Only decouple")
-assert configure.index("if (timeout == 500u || (ctl & SOF_HDA_SD_CTL_DMA_START))") < configure.index("SOF_HDA_ADSP_REG_SD_BDLPL")
-print("PASS: code loader BAR preflight and required reset acknowledgment")
+assert configure.index("if (timeout == 500u || (ctl & SOF_HDA_SD_CTL_DMA_START))") < configure.index("WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_BDLPL)")
+assert "ctl = StreamTag << 20;" in configure
+assert "bdl[1].Ioc = 0;" in configure
+assert "intctl & ~(1u << streamIndex)" in configure
+assert "SOF_HDA_DPIB_BASE + Stream->StreamIndex * SOF_HDA_DPIB_STRIDE" in wave
+print("PASS: code loader BAR preflight, required reset acknowledgment and polled stream IRQ ownership")
 
 # Exercise the production control helpers against an HDA DWORD whose upper
 # byte implements write-one-to-clear status.
@@ -238,8 +242,8 @@ with tempfile.TemporaryDirectory(prefix="pj_loader_control_") as tmp:
     subprocess.run([str(exe)],check=True,timeout=10)
 assert loader_source.count("WRITE_REGISTER_ULONG((PULONG)(StreamRegs + SOF_HDA_ADSP_REG_SD_CTL)") == 1
 assert "streamRegs + SOF_HDA_ADSP_REG_SD_CTL" not in loader_source
-assert configure.index("if (intctl == 0xFFFFFFFFu || ppctl == 0xFFFFFFFFu || spbfcctl == 0xFFFFFFFFu)") < configure.index("SOF_HDA_ADSP_REG_SD_BDLPL")
-assert configure.index("SOF_HDA_ADSP_REG_SD_BDLPL") < configure.index("*OutStreamIndex = streamIndex;")
+assert configure.index("if (intctl == 0xFFFFFFFFu || ppctl == 0xFFFFFFFFu || spbfcctl == 0xFFFFFFFFu)") < configure.index("WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_BDLPL)")
+assert configure.index("WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_BDLPL)") < configure.index("*OutStreamIndex = streamIndex;")
 print("PASS: code loader control preserves W1C status and rejects missing MMIO before BDL publication")
 
 # A failed gain request must not publish a successful control or stream.
@@ -268,7 +272,7 @@ assert "MmGetPhysicalAddress(" not in wave and "MmAllocateContiguousMemory(" not
 assert "stream->Bdl[i].AddrHigh = segment.high" in wave
 assert "writew((USHORT)(Stream->BdlPeriodCount - 1u)" in wave
 timer = wave.split("static VOID SofWaveRtTimerDpc(",1)[1].split("\n}",1)[0]
-assert timer.index("flags & SOF_HDA_DMA_ERROR_FLAGS") < timer.index("flags & SOF_HDA_PERIOD_COMPLETE")
+assert timer.index("flags & SOF_HDA_SD_STS_DMA_ERRORS") < timer.index("flags & SOF_HDA_PERIOD_COMPLETE")
 assert timer.index("flags & SOF_HDA_PERIOD_COMPLETE") < timer.index("SofWaveRtSignalNotification(stream)")
 stop = wave.split("NTSTATUS SofWaveRtStopHdaStream(",1)[1].split("\n}",1)[0]
 assert "SOF_HDA_SD_CTL_DMA_START, 0" in stop

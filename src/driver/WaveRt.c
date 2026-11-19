@@ -38,7 +38,6 @@ static BOOLEAN SofWaveRtHardwareBackendVerified(VOID)
     return FALSE;
 }
 #define SOF_HDA_PERIOD_COMPLETE 0x04u
-#define SOF_HDA_DMA_ERROR_FLAGS 0x18u
 
 static PUCHAR SofWaveRtHdaDescriptor(PSOF_WAVERT_STREAM Stream)
 {
@@ -92,8 +91,7 @@ static KDEFERRED_ROUTINE SofWaveRtTimerDpc;
 /**
  * @brief Periodic timer DPC callback routine.
  *
- * Invoked on high-resolution timer expiration. Advances the linear position byte counter
- * and signals all registered WaveRT client notification events.
+ * Polls the HDA stream status and signals events on a hardware completion.
  *
  * @param[in]     Dpc             Pointer to DPC object.
  * @param[in,opt] DeferredContext Context pointer (SOF_WAVERT_STREAM).
@@ -112,10 +110,11 @@ static VOID SofWaveRtTimerDpc(
     UNREFERENCED_PARAMETER(SystemArgument1);
     UNREFERENCED_PARAMETER(SystemArgument2);
 
-    if (stream != NULL && stream->State == KSSTATE_RUN) {
+    if (stream != NULL && stream->State == KSSTATE_RUN &&
+        !InterlockedCompareExchange(&stream->DmaFaulted, 0, 0)) {
         PUCHAR regs = SofWaveRtHdaDescriptor(stream);
         UCHAR flags = regs ? READ_REGISTER_UCHAR(regs + SOF_HDA_ADSP_REG_SD_STS) : 0xffu;
-        if (flags == 0xffu || (flags & SOF_HDA_DMA_ERROR_FLAGS)) {
+        if (flags == 0xffu || (flags & SOF_HDA_SD_STS_DMA_ERRORS)) {
             InterlockedExchange(&stream->DmaFaulted, TRUE);
             return;
         }
@@ -471,7 +470,7 @@ NTSTATUS SofWaveRtCreateStream(
  * @brief Teardown and deallocation of a WaveRT stream instance.
  *
  * Transitions stream to KSSTATE_STOP, caches active volume/mute state in device context,
- * unbinds and deletes all DSP modules and pipeline objects, cancels timers, and frees memory.
+ * deletes the DSP pipeline and its internal routes, cancels timers, and frees memory.
  *
  * @param[in] Stream Pointer to stream instance to free.
  * @return STATUS_SUCCESS.
@@ -507,38 +506,26 @@ NTSTATUS SofWaveRtFreeStream(
         Stream->DeviceContext->DefaultMute[Stream->EndpointType] = Stream->MasterMute;
     }
 
-    /* Failure of either unbind must reach the caller. Continue deletion
-     * so firmware can still release resources after a rejected unbind. */
-    if (Stream->DeviceContext != NULL) {
-        if (Stream->GainInstance != 0xFFFFFFFFu &&
-            Stream->HostCopierInstance != 0xFFFFFFFFu && Stream->DaiCopierInstance != 0xFFFFFFFFu) {
-            ULONG source = Stream->IsCapture ? Stream->DaiCopierInstance : Stream->HostCopierInstance;
-            ULONG sink = Stream->IsCapture ? Stream->HostCopierInstance : Stream->DaiCopierInstance;
-            NTSTATUS unbindStatus = SofIpc4UnbindModules(Stream->DeviceContext,
-                SOF_IPC4_MOD_ID_GAIN, Stream->GainInstance, 0, SOF_IPC4_MOD_ID_COPIER, sink, 0);
-            if (NT_SUCCESS(status)) status = unbindStatus;
-            unbindStatus = SofIpc4UnbindModules(Stream->DeviceContext,
-                SOF_IPC4_MOD_ID_COPIER, source, 0, SOF_IPC4_MOD_ID_GAIN, Stream->GainInstance, 0);
-            if (NT_SUCCESS(status)) status = unbindStatus;
-        }
-
-        if (Stream->HostCopierInstance != 0xFFFFFFFF)
-            deleteStatus = SofIpc4DeletePipeline(Stream->DeviceContext, Stream->PipelineId);
-        /* Keep DSP IDs reserved if deletion failed; uncertain ownership must
-         * never be recycled to another pipeline. */
+    /* IPC4 deletes all internal routes with the pipeline. Send explicit
+     * unbind only for links across pipelines, which this graph has none of. */
+    if (Stream->DeviceContext != NULL &&
+        Stream->HostCopierInstance != 0xFFFFFFFFu) {
+        deleteStatus = SofIpc4DeletePipeline(Stream->DeviceContext, Stream->PipelineId);
+        /* Keep DSP IDs reserved if deletion failed; firmware may still own them. */
         if (NT_SUCCESS(deleteStatus)) {
-        if (Stream->HostCopierInstance != 0xFFFFFFFF) {
-            SofIpc4FreeInstanceId(Stream->DeviceContext, SOF_IPC4_MOD_ID_COPIER, Stream->HostCopierInstance);
-            Stream->HostCopierInstance = 0xFFFFFFFF;
-        }
-        if (Stream->GainInstance != 0xFFFFFFFF) {
-            SofIpc4FreeInstanceId(Stream->DeviceContext, SOF_IPC4_MOD_ID_GAIN, Stream->GainInstance);
-            Stream->GainInstance = 0xFFFFFFFF;
-        }
-        if (Stream->DaiCopierInstance != 0xFFFFFFFF) {
-            SofIpc4FreeInstanceId(Stream->DeviceContext, SOF_IPC4_MOD_ID_COPIER, Stream->DaiCopierInstance);
-            Stream->DaiCopierInstance = 0xFFFFFFFF;
-        }
+            SofIpc4FreeInstanceId(Stream->DeviceContext, SOF_IPC4_MOD_ID_COPIER,
+                                  Stream->HostCopierInstance);
+            Stream->HostCopierInstance = 0xFFFFFFFFu;
+            if (Stream->GainInstance != 0xFFFFFFFFu) {
+                SofIpc4FreeInstanceId(Stream->DeviceContext, SOF_IPC4_MOD_ID_GAIN,
+                                      Stream->GainInstance);
+                Stream->GainInstance = 0xFFFFFFFFu;
+            }
+            if (Stream->DaiCopierInstance != 0xFFFFFFFFu) {
+                SofIpc4FreeInstanceId(Stream->DeviceContext, SOF_IPC4_MOD_ID_COPIER,
+                                      Stream->DaiCopierInstance);
+                Stream->DaiCopierInstance = 0xFFFFFFFFu;
+            }
         }
 
 #ifdef _KERNEL_MODE
@@ -618,6 +605,11 @@ NTSTATUS SofWaveRtSetState(
         return STATUS_DEVICE_NOT_READY;
 
     if (Stream->State == NewState) {
+#ifdef _KERNEL_MODE
+        if (NewState == KSSTATE_RUN &&
+            InterlockedCompareExchange(&Stream->DmaFaulted, 0, 0))
+            return STATUS_IO_DEVICE_ERROR;
+#endif
         return STATUS_SUCCESS;
     }
 
@@ -702,12 +694,16 @@ NTSTATUS SofWaveRtSetState(
 #endif
         Stream->LinearPositionBytes = 0;
         if (Stream->HostCopierInstance != 0xFFFFFFFF) {
-            /* Reset DSP Pipeline */
-            status = SofIpc4SetPipelineState(Stream->DeviceContext, Stream->PipelineId, SOF_IPC4_PIPE_RESET);
+            if (Stream->State == KSSTATE_RUN)
+                status = SofIpc4SetPipelineState(Stream->DeviceContext,
+                    Stream->PipelineId, SOF_IPC4_PIPE_PAUSED);
 
-            /* Reset HDA Stream Engine */
+            /* Stop DMA even when the firmware rejects the state change. */
             NTSTATUS dmaStatus = SofWaveRtResetHdaStream(Stream);
             if (NT_SUCCESS(status)) status = dmaStatus;
+            if (NT_SUCCESS(status))
+                status = SofIpc4SetPipelineState(Stream->DeviceContext,
+                    Stream->PipelineId, SOF_IPC4_PIPE_RESET);
 
             /* Reset Link Stream DMA (PPLC) */
             SofWaveRtResetLinkStream(Stream);
@@ -767,10 +763,13 @@ NTSTATUS SofWaveRtGetPosition(
 #ifdef _KERNEL_MODE
     PSOF_DEVICE_CONTEXT ctx = Stream->DeviceContext;
     ULONG offset, position;
+    if (InterlockedCompareExchange(&Stream->DmaFaulted, 0, 0))
+        return STATUS_IO_DEVICE_ERROR;
     if (!ctx || !ctx->Bar0VirtualAddress || Stream->StreamIndex >= 30u ||
-        !Stream->DescriptorPublished || InterlockedCompareExchange(&Stream->DmaFaulted, 0, 0))
+        !Stream->DescriptorPublished)
         return STATUS_DEVICE_NOT_READY;
-    offset = SOF_HDA_STREAM_REG_OFFSET(Stream->StreamIndex) + SOF_HDA_ADSP_REG_SD_LPIB;
+    /* ADL-N decoupled host DMA position follows the Intel DPIB register. */
+    offset = SOF_HDA_DPIB_BASE + Stream->StreamIndex * SOF_HDA_DPIB_STRIDE;
     if (offset > ctx->Bar0Length || sizeof(ULONG) > ctx->Bar0Length - offset)
         return STATUS_INVALID_BUFFER_SIZE;
     position = readl((PUCHAR)ctx->Bar0VirtualAddress + offset);
@@ -803,15 +802,18 @@ NTSTATUS SofWaveRtGetClockTime(
     }
 
 #ifdef _KERNEL_MODE
-    if (Stream->DeviceContext != NULL && Stream->DeviceContext->Bar0VirtualAddress != NULL) {
-        ULONG ticks = readl((PUCHAR)Stream->DeviceContext->Bar0VirtualAddress + SOF_HDA_REG_WALCLK);
-        /* Intel HDA Wall Clock runs at 24.0 MHz */
-        *ClockNanoseconds = ((ULONGLONG)ticks * 1000000000ULL) / 24000000ULL;
-        return STATUS_SUCCESS;
-    }
-#endif
-
+    PSOF_DEVICE_CONTEXT ctx = Stream->DeviceContext;
+    if (!ctx || !ctx->Bar0VirtualAddress || !Stream->DescriptorPublished)
+        return STATUS_DEVICE_NOT_READY;
+    if (ctx->Bar0Length < SOF_HDA_REG_WALCLK + sizeof(ULONG))
+        return STATUS_INVALID_BUFFER_SIZE;
+    ULONG ticks = readl((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_REG_WALCLK);
+    /* All ones is indistinguishable from an inaccessible PCI register. */
+    if (ticks == MAXULONG) return STATUS_DEVICE_NOT_READY;
+    *ClockNanoseconds = ((ULONGLONG)ticks * 1000000000ULL) / 24000000ULL;
+#else
     *ClockNanoseconds = 0;
+#endif
     return STATUS_SUCCESS;
 }
 
@@ -982,7 +984,7 @@ NTSTATUS SofWaveRtConfigureHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     ctl = readl(ppctl);
     if (ctl == MAXULONG || !(ctl & streamBit)) return STATUS_DEVICE_NOT_READY;
     WRITE_REGISTER_UCHAR(regs + SOF_HDA_ADSP_REG_SD_STS,
-        SOF_HDA_PERIOD_COMPLETE | SOF_HDA_DMA_ERROR_FLAGS);
+        SOF_HDA_PERIOD_COMPLETE | SOF_HDA_SD_STS_DMA_ERRORS);
     writel(Stream->BufferSizeBytes, regs + SOF_HDA_ADSP_REG_SD_CBL);
     writew((USHORT)(Stream->BdlPeriodCount - 1u), regs + SOF_HDA_ADSP_REG_SD_LVI);
     writew(format, regs + SOF_HDA_ADSP_REG_SD_FORMAT);
