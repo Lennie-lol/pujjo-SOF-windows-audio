@@ -1143,6 +1143,7 @@ static NTSTATUS SofIpc4CreateNhltPipeline(
 {
     if (OutHostInst) *OutHostInst = 0xFFFFFFFFu;
     if (OutGainInst) *OutGainInst = 0xFFFFFFFFu;
+    if (OutDaiInst) *OutDaiInst = 0xFFFFFFFFu;
     if (!Ctx || !Fmt || StreamTag < 1u || StreamTag > 15u || Bus > 15u)
         return STATUS_INVALID_PARAMETER;
 
@@ -1158,7 +1159,7 @@ static NTSTATUS SofIpc4CreateNhltPipeline(
     PJ_DWORD copierPages, gainPages;
     pj_firmware_config config;
 
-    if (!Ctx->NhltTable || Ctx->FwState != SOF_FW_BOOT_COMPLETE)
+    if (!Ctx->NhltTable || Ctx->AudioDmaFaulted || Ctx->FwState != SOF_FW_BOOT_COMPLETE)
         return STATUS_DEVICE_NOT_READY;
     status = SofIpc4ComputeChunkBytes(Fmt, &chunkBytes);
     if (!NT_SUCCESS(status)) return status;
@@ -1175,7 +1176,7 @@ static NTSTATUS SofIpc4CreateNhltPipeline(
     status = SofNhltCopyConfiguration(Ctx->NhltTable, Ctx->NhltTableSize,
         &key, NULL, 0, &configBytes);
     if (status != STATUS_BUFFER_TOO_SMALL) return status;
-    if (configBytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD -
+    if (!configBytes || (configBytes & 3u) || configBytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD -
         (sizeof(struct sof_ipc4_copier_data) - sizeof(uint32_t)))
         return STATUS_INVALID_BUFFER_SIZE;
     if (pj_firmware_plan_ll(&Ctx->CopierProfile, chunkBytes, chunkBytes,
@@ -1247,6 +1248,10 @@ cleanup:
         SofIpc4FreeInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, hostInst);
         SofIpc4FreeInstanceId(Ctx, SOF_IPC4_MOD_ID_GAIN, gainInst);
         SofIpc4FreeInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, daiInst);
+    } else {
+        /* The DSP may still own this pipeline ID and allocated instances.
+         * Block new audio streams until the device lifecycle resets them. */
+        Ctx->AudioDmaFaulted = TRUE;
     }
 done:
     ExFreePoolWithTag(scratch, SOF_DEVICE_TAG);
