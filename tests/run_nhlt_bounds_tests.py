@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Host execution of the actual NHLT parser with packed ABI-shaped test types."""
 from pathlib import Path
+import argparse
 import os
 import subprocess
 import shlex
 import tempfile
 from test_prepare_ssp_candidate import blob, table, build
+from generate_pujjo_ssp_candidate import candidate
 
 root = Path(__file__).resolve().parents[1]
 header = (root / "src/driver/Nhlt.h").read_text()
@@ -58,8 +60,25 @@ typedef struct {
 } WAVEFORMATEXTENSIBLE;
 '''
 const_names = ("ssp_table", "ssp0_expected", "ssp1_expected")
-ssp0, ssp1 = blob(0), blob(1)
-ssp_table, _ = build(table(0, ssp0), table(1, ssp1), ssp0, ssp1)
+args_parser = argparse.ArgumentParser(description=__doc__)
+args_parser.add_argument("--candidate-dir", type=Path,
+                         help="Test the actual review-only ALSA comparison artifacts")
+args = args_parser.parse_args()
+if args.candidate_dir is None:
+    ssp0, ssp1 = blob(0), blob(1)
+    ssp_table, _ = build(table(0, ssp0), table(1, ssp1), ssp0, ssp1)
+else:
+    folder = args.candidate_dir
+    ssp0 = (folder / "ssp0-candidate.bin").read_bytes()
+    ssp1 = (folder / "ssp1-candidate.bin").read_bytes()
+    ssp_table = (folder / "candidate-only.nhlt").read_bytes()
+    if (ssp0, ssp1) != (candidate(0), candidate(1)):
+        raise ValueError("candidate artifacts differ from fixed generator")
+    expected_table, _ = build(
+        (folder / "ssp0-reference.nhlt").read_bytes(),
+        (folder / "ssp1-reference.nhlt").read_bytes(), ssp0, ssp1)
+    if ssp_table != expected_table:
+        raise ValueError("candidate NHLT differs from verified encoder comparison")
 fixture = "\n".join("static const UCHAR %s[] = {%s};" % (name, ",".join(map(str, data)))
                     for name, data in zip(const_names, (ssp_table, ssp0, ssp1))) + "\n"
 main = r'''
@@ -245,6 +264,8 @@ with tempfile.TemporaryDirectory(prefix="pj_nhlt_") as temp:
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
                     *shlex.split(os.environ.get("CFLAGS", "")), str(src), "-o", str(exe)], check=True, timeout=40)
     subprocess.run([str(exe)], check=True, timeout=15)
+if args.candidate_dir is not None:
+    print("PASS: actual upstream-cross-checked SSP candidate artifacts through production NHLT parser")
 
 sdw = (root / "src/driver/SdwController.c").read_text().split("SofSdwEnumerateChildren(", 1)[1]
 sdw = sdw.split("SofIsSdcaFunctionDevice(", 1)[0]

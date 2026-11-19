@@ -32,6 +32,12 @@ allowed source selectors and MCLK divider. Artifacts under
 `build-logs/ssp-reference` are review-only; they include both upstream
 reference tables, both proposed blobs and the comparison report. This is
 not a comparison against the original IPC3 bytes, which have another ABI.
+The same CI step now feeds the generated candidate table and both payloads
+into the host-compiled production NHLT parser. It verifies exact lookup for
+SSP0 render/capture and SSP1 render, rejects unsupported formats/routes,
+and cross-checks the files against the independent generator and original
+encoder outputs. This is a software integration test only, not authorization
+to include the candidate in the driver or activate analog hardware.
 
 Zephyr v4.2.0 cAVS clock definitions corroborate the 38.4 MHz XTAL
 (selector 0) and 24.576 MHz cardinal source (selector 1). The proposal

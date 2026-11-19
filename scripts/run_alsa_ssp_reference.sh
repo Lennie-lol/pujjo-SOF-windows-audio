@@ -27,4 +27,5 @@ cc -std=gnu11 -O2 -ffunction-sections -fdata-sections \
 "$tmp/encoder" "$out/ssp0-reference.nhlt" "$out/ssp1-reference.nhlt"
 python3 "$root/scripts/generate_pujjo_ssp_candidate.py" \
     "$out/ssp0-reference.nhlt" "$out/ssp1-reference.nhlt" "$out"
+python3 "$root/tests/run_nhlt_bounds_tests.py" --candidate-dir "$out"
 printf '%s\n' "$rev" > "$out/alsa-revision.txt"
