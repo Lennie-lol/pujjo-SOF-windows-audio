@@ -2,7 +2,7 @@
 #pragma once
 
 #include <ntddk.h>
-#include <ks.h>
+#include <guiddef.h>
 
 #define PUJJO_AUDIO_CHILD_ID L"PUJJO\\AudioDmic"
 #define PUJJO_AUDIO_INTERFACE_VERSION 1
@@ -32,7 +32,7 @@ typedef struct _PUJJO_AUDIO_BUS {
     NTSTATUS (*GetFormat)(PVOID Context, PUJJO_AUDIO_FORMAT *Format);
     NTSTATUS (*Allocate)(PVOID Context, ULONG RequestedBytes, PUJJO_AUDIO_BUFFER *Buffer);
     VOID (*Free)(PVOID Context, PVOID Stream);
-    NTSTATUS (*SetState)(PVOID Context, PVOID Stream, KSSTATE State);
+    NTSTATUS (*SetState)(PVOID Context, PVOID Stream, ULONG State);
     NTSTATUS (*Position)(PVOID Context, PVOID Stream, PULONG Position);
     NTSTATUS (*Notification)(PVOID Stream, PKEVENT Event, BOOLEAN Add);
 } PUJJO_AUDIO_BUS;

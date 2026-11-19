@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /* Copyright 2026 The SOF Authors */
-#include <ntddk.h>
+#include <ntifs.h>
 #include <initguid.h>
 #include <portcls.h>
 #include <ksmedia.h>

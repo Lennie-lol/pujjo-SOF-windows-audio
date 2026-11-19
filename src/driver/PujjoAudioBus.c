@@ -131,7 +131,7 @@ static VOID AudioFree(PVOID Context, PVOID Stream)
     AudioUnlock(ctx);
 }
 
-static NTSTATUS AudioSetState(PVOID Context, PVOID Stream, KSSTATE State)
+static NTSTATUS AudioSetState(PVOID Context, PVOID Stream, ULONG State)
 {
     PSOF_DEVICE_CONTEXT ctx = Context;
     PSOF_WAVERT_STREAM stream = Stream;
@@ -145,7 +145,7 @@ static NTSTATUS AudioSetState(PVOID Context, PVOID Stream, KSSTATE State)
         else
             status = STATUS_SUCCESS;
 
-        NTSTATUS transition = SofWaveRtSetState(stream, State);
+        NTSTATUS transition = SofWaveRtSetState(stream, (KSSTATE)State);
         if (NT_SUCCESS(status)) status = transition;
         if (NT_SUCCESS(status) && State == KSSTATE_RUN) {
             status = SofWaveRtSetMute(stream, FALSE);

@@ -7,12 +7,14 @@ param(
     [string]$KitVersion = '10.0.26100.0'
 )
 $ErrorActionPreference = 'Stop'
-$kitBin = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\$KitVersion"
-$infVerif = Join-Path $kitBin 'x64\InfVerif.exe'
-$inf2Cat = Join-Path $kitBin 'x86\Inf2Cat.exe'
-foreach ($tool in @($infVerif, $inf2Cat)) {
-    if (!(Test-Path -LiteralPath $tool -PathType Leaf)) { throw "Missing WDK tool $tool" }
-}
+$kitRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
+$infVerif = @(
+    (Join-Path $kitRoot "Tools\$KitVersion\x64\InfVerif.exe")
+    (Join-Path $kitRoot "bin\$KitVersion\x64\InfVerif.exe")
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+$inf2Cat = Join-Path $kitRoot "bin\$KitVersion\x86\Inf2Cat.exe"
+if (!$infVerif) { throw "InfVerif is missing from WDK $KitVersion" }
+if (!(Test-Path -LiteralPath $inf2Cat -PathType Leaf)) { throw "Missing WDK tool $inf2Cat" }
 
 $names = @('pujjo_rt5682_probe', 'pujjo_rt1019_probe')
 $templates = Join-Path $PSScriptRoot '..\packaging\diagnostics'
@@ -31,7 +33,7 @@ foreach ($name in $names) {
     $sys = Join-Path $stage.FullName "$name.sys"
     Copy-Item -LiteralPath (Join-Path $templates "$name.inx") -Destination $inf
     Copy-Item -LiteralPath (Join-Path $BinaryDirectory "$name.sys") -Destination $sys
-    & $infVerif /v $inf
+    & $infVerif /w /v $inf
     if ($LASTEXITCODE -ne 0) { throw "InfVerif failed for $name" }
     & $inf2Cat "/driver:$($stage.FullName)" '/os:10_GE_X64'
     if ($LASTEXITCODE -ne 0) { throw "Inf2Cat failed for $name" }
