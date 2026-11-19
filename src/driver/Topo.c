@@ -1148,6 +1148,15 @@ static NTSTATUS SofIpc4CreateNhltPipeline(
         return STATUS_INVALID_PARAMETER;
 
 #ifdef _KERNEL_MODE
+    /* Pujjo routing is not generic SSP enumeration. Reject an unsupported
+     * direction/format before allocating a pipeline or touching firmware. */
+    if (!Dmic && (Bus > 1u || (Bus == 1u && IsCapture) ||
+        Fmt->SamplingFrequency != 48000u || Fmt->ChannelsCount != 2u ||
+        Fmt->BitDepth != 32u || Fmt->ValidBitDepth != 24u))
+        return STATUS_NOT_SUPPORTED;
+    if (Dmic && (Bus != 0u || !IsCapture))
+        return STATUS_NOT_SUPPORTED;
+
     NTSTATUS status;
     SOF_NHLT_CONFIG_KEY key = {0};
     SOF_COPIER_PARAMS host = {0}, dai = {0};
@@ -1212,7 +1221,12 @@ static NTSTATUS SofIpc4CreateNhltPipeline(
     if (!NT_SUCCESS(status)) goto done;
 
     status = SofIpc4CreatePipeline(Ctx, PipelineId, 0, 2u * copierPages + gainPages, 0, 0);
-    if (!NT_SUCCESS(status)) goto done;
+    if (!NT_SUCCESS(status)) {
+        /* A transport failure need not mean the DSP rejected CREATE.
+         * Do not reuse this graph identity in an uncertain session. */
+        Ctx->AudioDmaFaulted = TRUE;
+        goto done;
+    }
 
     status = SofIpc4AllocInstanceId(Ctx, SOF_IPC4_MOD_ID_COPIER, &hostInst);
     if (!NT_SUCCESS(status)) goto cleanup;
