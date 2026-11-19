@@ -339,14 +339,19 @@ SofEvtDevicePrepareHardware(
         PVOID nhltBuffer = NULL;
         ULONG nhltSize = 0;
         NTSTATUS nhltStatus = SofNhltQueryAcpiTable(&nhltBuffer, &nhltSize);
+        BOOLEAN topologySource = FALSE;
+        if (nhltStatus == STATUS_NOT_FOUND || nhltStatus == STATUS_OBJECT_NAME_NOT_FOUND) {
+            nhltStatus = SofNhltQueryPujjoFallback(nhltStatus, &nhltBuffer, &nhltSize);
+            topologySource = NT_SUCCESS(nhltStatus);
+        }
         if (NT_SUCCESS(nhltStatus) && nhltBuffer != NULL) {
             nhltStatus = SofNhltParse(nhltBuffer, nhltSize, &ctx->NhltInfo);
             if (NT_SUCCESS(nhltStatus)) {
                 ctx->NhltTable = nhltBuffer;
                 ctx->NhltTableSize = nhltSize;
                 RtlStringCbPrintfA(msg, sizeof(msg),
-                    "[NHLT] Valid ACPI table: %u endpoints (DMIC=%u, SSP=%u, SDW=%u)\n",
-                    ctx->NhltInfo.TotalEndpoints, ctx->NhltInfo.DmicEndpointsCount,
+                    "[NHLT] Valid %s table: %u endpoints (DMIC=%u, SSP=%u, SDW=%u)\n",
+                    topologySource ? "Pujjo topology" : "ACPI", ctx->NhltInfo.TotalEndpoints, ctx->NhltInfo.DmicEndpointsCount,
                     ctx->NhltInfo.SspEndpointsCount, ctx->NhltInfo.SdwEndpointsCount);
             } else {
                 SofNhltFreeAcpiTable(nhltBuffer);

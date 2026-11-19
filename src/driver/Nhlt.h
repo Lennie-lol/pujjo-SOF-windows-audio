@@ -247,6 +247,10 @@ NTSTATUS SofNhltCopyConfiguration(
     _Out_ PULONG ConfigBytes
 );
 
+#ifdef _KERNEL_MODE
+NTSTATUS SofNhltQueryPujjoFallback(NTSTATUS AcpiStatus, PVOID *Buffer, PULONG Bytes);
+#endif
+
 /* Kernel ACPI Firmware Query */
 
 /**

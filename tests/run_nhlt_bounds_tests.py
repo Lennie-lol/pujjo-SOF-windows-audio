@@ -17,6 +17,12 @@ body = source[source.index("#define SOF_NHLT_MAX_TABLE_BYTES"):source.index("\nN
 shim = r'''
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
+#define _KERNEL_MODE
+typedef void *PVOID;
+#define STATUS_OBJECT_NAME_NOT_FOUND -5
+#define STATUS_INSUFFICIENT_RESOURCES -6
+#define ExAllocatePool2(flags,size,tag) malloc(size)
 #include <assert.h>
 #include <stdio.h>
 typedef uint32_t ULONG;
@@ -111,6 +117,17 @@ static void test_lookup(void) {
     ep_bytes+=blob_bytes;
     memcpy(bytes+first,&ep_bytes,4);
     fix_checksum(bytes,first+ep_bytes);
+    void *owned = NULL;
+    ULONG owned_bytes = 0;
+    assert(SofNhltQueryPujjoFallback(STATUS_NOT_FOUND,&owned,&owned_bytes)==STATUS_NOT_FOUND);
+    assert(!owned && !owned_bytes);
+    assert(SofNhltCopyFallback(STATUS_INVALID_PARAMETER,bytes,sizeof(bytes),&owned,&owned_bytes)==STATUS_INVALID_PARAMETER);
+    assert(SofNhltCopyFallback(STATUS_NOT_FOUND,bytes,sizeof(bytes),&owned,&owned_bytes)==STATUS_SUCCESS);
+    assert(owned != bytes && owned_bytes == sizeof(bytes));
+    UCHAR from_fallback[4];
+    assert(SofNhltCopyConfiguration(owned,owned_bytes,&key,from_fallback,4,&bytes_needed)==STATUS_SUCCESS);
+    assert(!memcmp(payload,from_fallback,4));
+    free(owned);
     assert(SofNhltEnumerate(bytes,sizeof(bytes),visit,counts)==STATUS_SUCCESS);
     assert(counts[0]==1u && counts[1]==1u);
     assert(SofNhltCopyConfiguration(bytes,sizeof(bytes),&key,NULL,0,&bytes_needed)==STATUS_BUFFER_TOO_SMALL);
