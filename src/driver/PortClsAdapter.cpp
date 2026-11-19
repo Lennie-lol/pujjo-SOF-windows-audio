@@ -129,7 +129,7 @@ public:
     {
         if (!Position) return STATUS_INVALID_PARAMETER;
         KIRQL irql;
-        ULONG bytes;
+        ULONG bytes = 0;
         KeAcquireSpinLock(&m_bufferLock, &irql);
         NTSTATUS status = m_buffer.Stream ? m_bus.Position(m_bus.Header.Context,
                           m_buffer.Stream, &bytes) : STATUS_DEVICE_NOT_READY;

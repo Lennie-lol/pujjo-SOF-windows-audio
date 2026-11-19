@@ -18,6 +18,8 @@ assert "PcInitializeAdapterDriver(Driver, RegistryPath, AddDevice)" in port
 assert "PcAddAdapterDevice(Driver, Pdo, StartDevice, 2, 0)" in port
 assert "IoCreateDriver" not in port and "DeviceExtension" not in port
 assert "PcDispatchIrp" not in parent and "IOCTL_KS_" not in parent
+assert "SofPortClsNotifyUsbOffload" not in (driver / "UsbOffload.c").read_text()
+assert "State != KSSTATE_RUN || !ctx->AudioDmaFaulted" in bus
 assert "IRP_MN_QUERY_INTERFACE" in port and "WdfDeviceAddQueryInterface(child" in bus
 assert bus.index("WdfDeviceAddQueryInterface(child") < bus.index("WdfFdoAddStaticChild(")
 assert port.index("RegisterPort(Device, Irp, Resources, CLSID_PortTopology") < port.index(

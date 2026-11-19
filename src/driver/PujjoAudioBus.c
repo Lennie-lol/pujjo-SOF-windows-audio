@@ -137,8 +137,10 @@ static NTSTATUS AudioSetState(PVOID Context, PVOID Stream, ULONG State)
     PSOF_WAVERT_STREAM stream = Stream;
     NTSTATUS status = STATUS_DEVICE_NOT_READY;
 
+    if (State > KSSTATE_RUN) return STATUS_INVALID_PARAMETER;
     AudioLock(ctx);
-    if (ctx->AudioOnline && ctx->DmicStream == stream && stream) {
+    if (ctx->AudioOnline && ctx->DmicStream == stream && stream &&
+        (State != KSSTATE_RUN || !ctx->AudioDmaFaulted)) {
         AudioSetPositionEnabled(ctx, FALSE);
         if (State != KSSTATE_RUN && stream->State == KSSTATE_RUN)
             status = SofWaveRtSetMute(stream, TRUE);
