@@ -154,7 +154,7 @@ static NTSTATUS RuntimePrepare(PVOID context, const PUJJO_PERIPHERAL_PROFILE *pr
     }
     status = Pj5682sSpbSetPower(&ctx->RuntimeSpb, TRUE);
     if (NT_SUCCESS(status))
-        status = Pj5682sSpbStartControl(&ctx->RuntimeSpb, &profile->Codec);
+        status = Pj5682sSpbStartControl(&ctx->RuntimeSpb, &profile->Codec, &profile->CodecAnalog);
 #else
     if (profile->GainLimitApplied != 1u || (profile->SdbPolarity != Pj1019SdbActiveLow &&
         profile->SdbPolarity != Pj1019SdbActiveHigh) || profile->CalibrationMs < 300u ||

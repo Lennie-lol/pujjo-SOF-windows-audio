@@ -10,7 +10,20 @@ extern "C" {
 
 #define PJ5682S_ROUTE_DAC 1u
 #define PJ5682S_ROUTE_ADC 2u
-#define PJ5682S_MAX_SAVED_REGISTERS 10u
+#define PJ5682S_MAX_ANALOG_STEPS 24u
+#define PJ5682S_MAX_SAVED_REGISTERS (10u + PJ5682S_MAX_ANALOG_STEPS)
+
+typedef struct {
+    PJ_WORD reg, mask, value;
+    PJ_WORD settle_ms, restore_ms;
+} pj5682s_analog_step;
+
+typedef struct {
+    unsigned count;
+    pj5682s_analog_step steps[PJ5682S_MAX_ANALOG_STEPS];
+} pj5682s_analog_program;
+
+typedef int (*pj5682s_wait)(void *context, unsigned ms);
 
 /* Supplied by the kernel board owner. No Pujjo production profile is
  * implied by a successful SMBIOS, codec ID or NHLT match. */
@@ -24,7 +37,7 @@ typedef struct {
 } pj5682s_control_profile;
 
 typedef struct {
-    PJ_WORD reg, mask, original;
+    PJ_WORD reg, mask, original, restore_ms;
 } pj5682s_saved_register;
 
 typedef struct {
@@ -33,6 +46,7 @@ typedef struct {
     unsigned active;
     unsigned faulted;
     unsigned jd1_qualified;
+    pj5682s_wait wait;
 } pj5682s_control;
 
 typedef enum {
@@ -42,10 +56,16 @@ typedef enum {
     PJ5682S_JACK_HEADSET
 } pj5682s_jack;
 
+/* Board-approved analog power/routing operations are limited to stable,
+ * recognized fields. This program never accepts reset, clock, IRQ or OTP writes. */
+PJ_WORD pj5682s_analog_mask(PJ_WORD reg);
+pj5682s_status pj5682s_validate_analog(const pj5682s_analog_program *program);
+pj5682s_status pj5682s_control_analog(pj5682s_control *state, const pj5682s_bus *bus,
+    const pj5682s_analog_program *program, pj5682s_wait wait);
+
 /* Calls are serialized with bus power and removal by the Windows owner.
- * Start configures AIF1 and its digital routes, leaving analog mute and
- * rail/calibration ownership with the board backend. Stop restores only
- * fields changed by Start. A failed rollback can be retried after re-identification. */
+ * Start configures AIF1 and its digital routes. The approved analog program
+ * applies while the DSP gain is muted. Stop restores the changed fields. A failed rollback can be retried after re-identification. */
 pj5682s_status pj5682s_control_start(pj5682s_control *state, const pj5682s_bus *bus,
                                     const pj5682s_control_profile *profile);
 pj5682s_status pj5682s_control_stop(pj5682s_control *state, const pj5682s_bus *bus);

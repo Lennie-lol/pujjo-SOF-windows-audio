@@ -370,7 +370,9 @@ static NTSTATUS PublishAnalogChildLocked(PSOF_DEVICE_CONTEXT parent,
         profile->MaximumPlaybackGain < SOF_VOLUME_MIN_DB_UNITS ||
         profile->MaximumPlaybackGain > SOF_VOLUME_MAX_DB_UNITS)
         return STATUS_NOT_SUPPORTED;
-    if (!RouteOnline(parent) || !parent->NhltTable ||
+    if (!RouteOnline(parent) || !parent->NhltTable || !parent->DmaEnabler ||
+        (role == PujjoAudioHeadsetMic ? parent->NumCaptureStreams < 2u :
+         parent->NumPlaybackStreams <= (role == PujjoAudioSpeaker ? 1u : 0u)) ||
         (parent->AnalogPublished & (1u << role)))
         return STATUS_DEVICE_NOT_READY;
 
@@ -384,6 +386,8 @@ static NTSTATUS PublishAnalogChildLocked(PSOF_DEVICE_CONTEXT parent,
         (profile->Peripheral.Codec.board_qualified != 1u ||
          profile->Peripheral.Codec.analog_path_prepared_muted != 1u ||
          profile->Peripheral.Codec.jd1_qualified != 1u ||
+         !profile->Peripheral.CodecAnalog.count ||
+         profile->Peripheral.CodecAnalog.count > PJ5682S_MAX_ANALOG_STEPS ||
          profile->Peripheral.Codec.lrclk_hz != profile->Format.Rate ||
          profile->Peripheral.Codec.routes !=
             (role == PujjoAudioHeadsetMic ? PJ5682S_ROUTE_ADC : PJ5682S_ROUTE_DAC)))
@@ -436,14 +440,21 @@ static NTSTATUS PublishAnalogChildLocked(PSOF_DEVICE_CONTEXT parent,
     else parent->AnalogPublished |= 1u << role;
     return status;
 }
-NTSTATUS SofPublishAnalogChild(PSOF_DEVICE_CONTEXT parent, const PUJJO_ANALOG_PROFILE *profile)
+VOID SofPublishApprovedAnalogChildren(PSOF_DEVICE_CONTEXT parent)
 {
-    NTSTATUS status;
+    /* This table is populated only with independently reviewed Pujjo
+     * evidence. No reviewed analog profile is present in this revision. */
+    static const PUJJO_ANALOG_PROFILE *const approved[] = {NULL};
 
-    if (!parent) return STATUS_INVALID_PARAMETER;
     LockAudio(parent);
-    status = PublishAnalogChildLocked(parent, profile);
+    for (ULONG i = 0; i < RTL_NUMBER_OF(approved); ++i) {
+        if (approved[i]) {
+            NTSTATUS status = PublishAnalogChildLocked(parent, approved[i]);
+            if (!NT_SUCCESS(status))
+                DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+                    "[PujjoAnalog] Role %lu unavailable: %08lx\n", (ULONG)approved[i]->Role, status);
+        }
+    }
     UnlockAudio(parent);
-    return status;
 }
 #endif

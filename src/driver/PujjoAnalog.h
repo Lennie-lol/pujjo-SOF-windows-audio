@@ -13,9 +13,8 @@ typedef struct {
 } PUJJO_ANALOG_PROFILE;
 
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_ANALOG
-/* Only an independently reviewed board profile may publish an analog PDO.
- * This entry point is called at PASSIVE_LEVEL after DSP boot. */
-NTSTATUS SofPublishAnalogChild(PSOF_DEVICE_CONTEXT Ctx, const PUJJO_ANALOG_PROFILE *Profile);
+/* Called at PASSIVE_LEVEL after DSP boot and the audio canary gate. */
+VOID SofPublishApprovedAnalogChildren(PSOF_DEVICE_CONTEXT Ctx);
 /* Caller holds the audio mutex. */
 NTSTATUS SofDisconnectAnalogLocked(PSOF_DEVICE_CONTEXT Ctx);
 #endif

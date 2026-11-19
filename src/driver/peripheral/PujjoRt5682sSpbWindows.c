@@ -14,6 +14,7 @@
 
 #ifdef PJ5682S_ENABLE_CONTROL
 static NTSTATUS StopControlLocked(PJ5682S_SPB_WINDOWS *state);
+static int ControlDelay(void *context, unsigned milliseconds);
 #endif
 
 NTSTATUS Pj5682sSpbInitialize(WDFDEVICE device, PJ5682S_SPB_WINDOWS *state)
@@ -182,7 +183,7 @@ static int ControlRegister(PJ_WORD reg)
     case 0x0073: case 0x007b: case 0x007e: case 0x0080:
         return 1;
     default:
-        return 0;
+        return pj5682s_analog_mask(reg) != 0;
     }
 }
 
@@ -233,7 +234,7 @@ static int ControlWrite(void *context, const PJ_BYTE *data, PJ_SIZE bytes)
     if (!state->Opened || !state->Powered || !state->Target ||
         !data || bytes != 4 || !ControlRegister(pj5682s_decode_value(data)))
         return -1;
-    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&descriptor, (PVOID)data, bytes);
+    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&descriptor, (PVOID)data, 4u);
     WDF_REQUEST_SEND_OPTIONS_INIT(&options, WDF_REQUEST_SEND_OPTION_TIMEOUT);
     options.Timeout = WDF_REL_TIMEOUT_IN_MS(PJ5682S_SPB_TIMEOUT_MS);
     status = WdfIoTargetSendWriteSynchronously(state->Target, WDF_NO_HANDLE,
@@ -261,15 +262,21 @@ static NTSTATUS StopControlLocked(PJ5682S_SPB_WINDOWS *state)
 }
 
 NTSTATUS Pj5682sSpbStartControl(PJ5682S_SPB_WINDOWS *state,
-                                const pj5682s_control_profile *profile)
+                                const pj5682s_control_profile *profile,
+                                const pj5682s_analog_program *program)
 {
     const pj5682s_bus bus = {state, ControlRead, ControlWrite};
     NTSTATUS status = STATUS_DEVICE_NOT_READY;
     PAGED_CODE();
     if (!state || !state->Lock || !profile) return STATUS_INVALID_PARAMETER;
+    pj5682s_status valid = pj5682s_validate_analog(program);
+    if (valid != PJ5682S_OK) return ControlStatus(valid);
     WdfWaitLockAcquire(state->Lock, NULL);
-    if (state->Opened && state->Powered)
+    if (state->Opened && state->Powered) {
         status = ControlStatus(pj5682s_control_start(&state->Control, &bus, profile));
+        if (NT_SUCCESS(status))
+            status = ControlStatus(pj5682s_control_analog(&state->Control, &bus, program, ControlDelay));
+    }
     WdfWaitLockRelease(state->Lock);
     return status;
 }

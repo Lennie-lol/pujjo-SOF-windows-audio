@@ -100,7 +100,7 @@ jobs:
         run: |
           msbuild sof_windows_driver.sln /m /t:Rebuild /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:normal /bl:build-logs/msbuild.binlog /fl '/flp:LogFile=build-logs/msbuild.log;Verbosity=normal'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Compile guarded source to isolated objects
+      - name: Build guarded drivers in isolated directories
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -112,11 +112,16 @@ jobs:
           )) {
             $env:CL = $case.Defines
             $variant = if ($case.Name) { $case.Name } else { $case.Project }
-            $objects = Join-Path $env:RUNNER_TEMP ("compile-only-" + $variant)
-            msbuild "$($case.Project).vcxproj" /t:ClCompile /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 "/p:IntDir=$objects/" /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:minimal
+            $isolated = Join-Path $env:RUNNER_TEMP ("guarded-" + $variant)
+            $intermediates = if ($case.Project -eq 'sof_dsp') {
+              @("/p:SolutionDir=$isolated/")
+            } else {
+              @("/p:IntDir=$isolated/obj/")
+            }
+            msbuild "$($case.Project).vcxproj" /t:Rebuild /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 @intermediates "/p:OutDir=$isolated/bin/" /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:minimal
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $expected = if ($case.Project -eq 'sof_dsp') { 'Loader.obj' } else { 'PujjoPeripheralKmdf.obj' }
-            if (!(Get-ChildItem $objects -Filter $expected -Recurse)) { throw "Missing compile-only object $expected" }
+            if (!(Test-Path "$isolated/bin/$($case.Project).sys")) { throw "Missing guarded driver $variant" }
+            $objects = Join-Path $isolated 'obj'
             if ($case.Project -eq 'sof_dsp') {
               foreach ($object in @('PujjoAudioBus.obj', 'WaveRt.obj', 'PujjoAnalog.obj')) {
                 if (!(Get-ChildItem $objects -Filter $object -Recurse)) { throw "Missing guarded object $object" }
@@ -143,17 +148,13 @@ jobs:
         run: |
           $revision = (git rev-parse HEAD).Trim()
           ./scripts/Stage-PujjoDiagnosticPackage.ps1 -BinaryDirectory bin/x64/Release -OutputDirectory "$env:RUNNER_TEMP/pujjo-diagnostics" -SourceRevision $revision
-      - name: Build and verify separate codec identity diagnostic
+      - name: Verify separate codec identity diagnostic
         if: matrix.configuration == 'Release'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $revision = (git rev-parse HEAD).Trim()
-          $build = "$env:RUNNER_TEMP/pujjo-identity-build"
-          $env:CL = '/DPJ5682S_ENABLE_READONLY_PROBE'
-          msbuild pujjo_rt5682_probe.vcxproj /t:Rebuild /p:Configuration=Release /p:Platform=x64 "/p:OutDir=$build/bin/" "/p:IntDir=$build/obj/" /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:minimal
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./scripts/Stage-PujjoDiagnosticPackage.ps1 -BinaryDirectory "$build/bin" -OutputDirectory "$env:RUNNER_TEMP/pujjo-codec-identity" -SourceRevision $revision -CodecIdentity
+          ./scripts/Stage-PujjoDiagnosticPackage.ps1 -BinaryDirectory "$env:RUNNER_TEMP/guarded-codec-identity/bin" -OutputDirectory "$env:RUNNER_TEMP/pujjo-codec-identity" -SourceRevision $revision -CodecIdentity
       - name: Upload unsigned codec identity submission input
         if: success() && matrix.configuration == 'Release'
         uses: actions/upload-artifact@v4

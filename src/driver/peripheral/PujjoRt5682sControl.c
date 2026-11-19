@@ -50,7 +50,7 @@ static pj5682s_status update_register(const pj5682s_bus *bus, PJ_WORD reg,
 }
 
 static pj5682s_status apply(pj5682s_control *state, const pj5682s_bus *bus,
-                           pj_clock_register_update update)
+                           pj_clock_register_update update, PJ_WORD restore_ms)
 {
     PJ_WORD old;
     pj5682s_status status = read_register(bus, update.reg, &old);
@@ -63,6 +63,7 @@ static pj5682s_status apply(pj5682s_control *state, const pj5682s_bus *bus,
     entry->reg = update.reg;
     entry->mask = update.mask;
     entry->original = (PJ_WORD)(old & update.mask);
+    entry->restore_ms = restore_ms;
     return update_register(bus, update.reg, update.mask, update.value, old);
 }
 
@@ -75,7 +76,10 @@ pj5682s_status pj5682s_control_stop(pj5682s_control *state, const pj5682s_bus *b
         return PJ5682S_BAD_ARGUMENT;
     state->active = 0;
     state->jd1_qualified = 0;
-    if (!state->count) return PJ5682S_OK;
+    if (!state->count) {
+        state->wait = 0;
+        return PJ5682S_OK;
+    }
     first = verify_device(bus);
     if (first != PJ5682S_OK) {
         state->faulted = 1;
@@ -90,6 +94,8 @@ pj5682s_status pj5682s_control_stop(pj5682s_control *state, const pj5682s_bus *b
         pj5682s_status status = read_register(bus, saved.reg, &current);
         if (status == PJ5682S_OK)
             status = update_register(bus, saved.reg, saved.mask, saved.original, current);
+        if (status == PJ5682S_OK && saved.restore_ms &&
+            state->wait(bus->context, saved.restore_ms)) status = PJ5682S_BUS_ERROR;
         if (status != PJ5682S_OK) {
             if (first == PJ5682S_OK) first = status;
             state->saved[state->count - ++remaining] = saved;
@@ -99,6 +105,7 @@ pj5682s_status pj5682s_control_stop(pj5682s_control *state, const pj5682s_bus *b
         state->saved[i] = state->saved[state->count - remaining + i];
     state->count = remaining;
     if (remaining) state->faulted = 1;
+    else state->wait = 0;
     return first;
 }
 
@@ -106,7 +113,7 @@ pj5682s_status pj5682s_control_start(pj5682s_control *state, const pj5682s_bus *
                                     const pj5682s_control_profile *profile)
 {
     pj_rt5682s_i2s_plan framing;
-    pj_clock_register_update updates[PJ5682S_MAX_SAVED_REGISTERS];
+    pj_clock_register_update updates[10];
     unsigned count = 0;
     pj5682s_status status;
 
@@ -144,7 +151,7 @@ pj5682s_status pj5682s_control_start(pj5682s_control *state, const pj5682s_bus *
     }
     updates[count++] = (pj_clock_register_update){RT5682S_AIF1_POWER, 0x8000, 0x8000};
     for (unsigned i = 0; i < count; ++i) {
-        status = apply(state, bus, updates[i]);
+        status = apply(state, bus, updates[i], 0);
         if (status != PJ5682S_OK) {
             state->faulted = 1;
             (void)pj5682s_control_stop(state, bus);
@@ -153,6 +160,81 @@ pj5682s_status pj5682s_control_start(pj5682s_control *state, const pj5682s_bus *
     }
     state->active = 1;
     state->jd1_qualified = profile->jd1_qualified;
+    return PJ5682S_OK;
+}
+
+/* Register and mask pairs follow the v6.13 RT5682S DAPM power,
+ * depop, mixer and combo-jack fields. Values and ordering belong to
+ * the measured Pujjo board profile. */
+PJ_WORD pj5682s_analog_mask(PJ_WORD reg)
+{
+    switch (reg) {
+    case 0x0003: return 0x6001; /* HPO path and input gating */
+    case 0x0005:
+    case 0x0006: return 0x0f00; /* HPO gain */
+    case 0x0010: return 0x0030; /* MB1/MB2 control, no trigger */
+    case 0x0012: return 0x0080; /* Combo-jack input buffer */
+    case 0x0019: return 0xffff; /* Digital DAC gain */
+    case 0x001c: return 0xffff; /* Digital ADC gain and mute */
+    case 0x002a: return 0xf0f0; /* Stereo DAC mixer */
+    case 0x003c: return 0x3fc0; /* REC mixer and CBJ boost */
+    case 0x0044: return 0x0101; /* REC mixer power */
+    case 0x0061: return 0x0c18; /* DAC1/ADC1 power, no AIF writes */
+    case 0x0062: return 0x8400; /* Stereo DAC/ADC filter power */
+    case 0x0063: return 0xf280; /* VREF, fast VREF, MB and BG */
+    case 0x0064: return 0x0c01; /* Mic bias and JD power */
+    case 0x0065: return 0x0207; /* CBJ and bias LDOs */
+    case 0x0066: return 0x0030; /* Stereo DAC power */
+    case 0x008e: return 0x007b; /* Depop, HP pumps and outputs */
+    case 0x0091: return 0x0f00; /* HPO switches and charge-pump mode */
+    case 0x0093: return 0xc300; /* MB voltage fields */
+    case 0x0210: return 0xc320; /* SAR mode and bias selection */
+    case 0x0212: return 0xffff; /* SAR detection operating setting */
+    case 0x021c: return 0x003f; /* SAR source */
+    case 0x0610:
+    case 0x0611: return 0xffff; /* HP bias from qualified depop plan */
+    case 0x3b00: return 0x0070; /* Charge-pump switch size */
+    default: return 0;
+    }
+}
+
+pj5682s_status pj5682s_validate_analog(const pj5682s_analog_program *program)
+{
+    unsigned total = 0;
+    if (!program || !program->count || program->count > PJ5682S_MAX_ANALOG_STEPS)
+        return PJ5682S_BAD_ARGUMENT;
+    for (unsigned i = 0; i < program->count; ++i) {
+        const pj5682s_analog_step *step = &program->steps[i];
+        if (!step->mask || (step->mask & ~pj5682s_analog_mask(step->reg)) ||
+            (step->value & ~step->mask) || step->settle_ms > 100u || step->restore_ms > 100u)
+            return PJ5682S_WRITE_LOCKED;
+        total += step->settle_ms + step->restore_ms;
+    }
+    return total <= 500u ? PJ5682S_OK : PJ5682S_WRITE_LOCKED;
+}
+
+pj5682s_status pj5682s_control_analog(pj5682s_control *state, const pj5682s_bus *bus,
+    const pj5682s_analog_program *program, pj5682s_wait wait)
+{
+    pj5682s_status status;
+    if (!state || !bus || !bus->write_then_read || !bus->write_only || !wait)
+        return PJ5682S_BAD_ARGUMENT;
+    if (!state->active || state->faulted || state->wait) return PJ5682S_INCORRECT_STATE;
+    status = pj5682s_validate_analog(program);
+    if (status != PJ5682S_OK) return status;
+    state->wait = wait;
+    for (unsigned i = 0; i < program->count; ++i) {
+        const pj5682s_analog_step *step = &program->steps[i];
+        pj_clock_register_update update = {step->reg, step->mask, step->value};
+        status = apply(state, bus, update, step->restore_ms);
+        if (status == PJ5682S_OK && step->settle_ms && wait(bus->context, step->settle_ms))
+            status = PJ5682S_BUS_ERROR;
+        if (status != PJ5682S_OK) {
+            state->faulted = 1;
+            (void)pj5682s_control_stop(state, bus);
+            return status;
+        }
+    }
     return PJ5682S_OK;
 }
 
@@ -203,11 +285,12 @@ pj5682s_status pj5682s_control_classify(pj5682s_control *state, const pj5682s_bu
     if (status != PJ5682S_OK) return status;
     unsigned i;
     for (i = 0; i < state->count; ++i)
-        if (state->saved[i].reg == RT5682S_CBJ_TRIGGER) break;
+        if (state->saved[i].reg == RT5682S_CBJ_TRIGGER &&
+            state->saved[i].mask == RT5682S_TRIGGER_HIGH) break;
     if (i == state->count) {
         if (i == PJ5682S_MAX_SAVED_REGISTERS) return PJ5682S_FAULT;
         state->saved[i] = (pj5682s_saved_register){
-            RT5682S_CBJ_TRIGGER, RT5682S_TRIGGER_HIGH, (PJ_WORD)(trigger & RT5682S_TRIGGER_HIGH)
+            RT5682S_CBJ_TRIGGER, RT5682S_TRIGGER_HIGH, (PJ_WORD)(trigger & RT5682S_TRIGGER_HIGH), 0
         };
         ++state->count;
     }
