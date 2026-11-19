@@ -296,13 +296,23 @@ static const PCPIN_DESCRIPTOR SpeakerTopologyPins[] = {
     {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
         KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_NONE, &KSCATEGORY_AUDIO, nullptr, 0}}
 };
+static NTSTATUS PropertyJack(PPCPROPERTY_REQUEST Request);
+
+static PCPROPERTY_ITEM JackProperties[] = {
+    {&KSPROPSETID_Jack, KSPROPERTY_JACK_DESCRIPTION,
+     KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_BASICSUPPORT, PropertyJack},
+    {&KSPROPSETID_Jack, KSPROPERTY_JACK_DESCRIPTION2,
+     KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_BASICSUPPORT, PropertyJack}
+};
+DEFINE_PCAUTOMATION_TABLE_PROP(JackAutomation, JackProperties);
+
 static const PCFILTER_DESCRIPTOR HeadsetTopologyFilter = {
-    0, nullptr, sizeof(PCPIN_DESCRIPTOR), RTL_NUMBER_OF(HeadsetTopologyPins), HeadsetTopologyPins,
+    0, &JackAutomation, sizeof(PCPIN_DESCRIPTOR), RTL_NUMBER_OF(HeadsetTopologyPins), HeadsetTopologyPins,
     0, 0, nullptr, RTL_NUMBER_OF(PinConnections), PinConnections,
     RTL_NUMBER_OF(TopologyCategories), TopologyCategories
 };
 static const PCFILTER_DESCRIPTOR HeadphoneTopologyFilter = {
-    0, nullptr, sizeof(PCPIN_DESCRIPTOR), RTL_NUMBER_OF(HeadphoneTopologyPins), HeadphoneTopologyPins,
+    0, &JackAutomation, sizeof(PCPIN_DESCRIPTOR), RTL_NUMBER_OF(HeadphoneTopologyPins), HeadphoneTopologyPins,
     0, 0, nullptr, RTL_NUMBER_OF(RenderConnections), RenderConnections,
     RTL_NUMBER_OF(TopologyCategories), TopologyCategories
 };
@@ -422,12 +432,78 @@ public:
     }
 };
 
+static NTSTATUS HandleJackProperty(PUJJO_AUDIO_ROLE Role, const PUJJO_AUDIO_BUS &Bus,
+                                   PPCPROPERTY_REQUEST Request)
+{
+    PAGED_CODE();
+    if (!Bus.JackPresent || !Request->Instance ||
+        Request->InstanceSize < sizeof(ULONG))
+        return STATUS_INVALID_DEVICE_REQUEST;
+    ULONG pin;
+    RtlCopyMemory(&pin, Request->Instance, sizeof(pin));
+    if (pin != 0u) return STATUS_INVALID_DEVICE_REQUEST; // Physical pin on both topologies.
+
+    if (Request->Verb & KSPROPERTY_TYPE_BASICSUPPORT) {
+        if (Request->ValueSize < sizeof(ULONG) || !Request->Value) {
+            Request->ValueSize = sizeof(ULONG);
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+        *static_cast<PULONG>(Request->Value) = KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_BASICSUPPORT;
+        Request->ValueSize = sizeof(ULONG);
+        return STATUS_SUCCESS;
+    }
+
+    if (!(Request->Verb & KSPROPERTY_TYPE_GET)) return STATUS_INVALID_DEVICE_REQUEST;
+    const BOOLEAN description2 = Request->PropertyItem->Id == KSPROPERTY_JACK_DESCRIPTION2;
+    const ULONG bytes = sizeof(KSMULTIPLE_ITEM) +
+        (description2 ? sizeof(KSJACK_DESCRIPTION2) : sizeof(KSJACK_DESCRIPTION));
+    if (!Request->ValueSize) {
+        Request->ValueSize = bytes;
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    if (Request->ValueSize < bytes || !Request->Value) return STATUS_BUFFER_TOO_SMALL;
+
+    BOOLEAN present = FALSE;
+    NTSTATUS status = Bus.JackPresent(Bus.Header.Context, &present);
+    if (!NT_SUCCESS(status)) return status;
+    auto multiple = static_cast<PKSMULTIPLE_ITEM>(Request->Value);
+    multiple->Size = bytes;
+    multiple->Count = 1;
+    if (description2) {
+        auto desc = reinterpret_cast<PKSJACK_DESCRIPTION2>(multiple + 1);
+        desc->DeviceStateInfo = 0;
+        desc->JackCapabilities = JACKDESC2_PRESENCE_DETECT_CAPABILITY;
+    } else {
+        auto desc = reinterpret_cast<PKSJACK_DESCRIPTION>(multiple + 1);
+        desc->ChannelMapping = Role == PujjoAudioHeadsetMic ?
+                                KSAUDIO_SPEAKER_MONO : KSAUDIO_SPEAKER_STEREO;
+        desc->Color = 0;
+        desc->ConnectionType = eConnTypeCombination;
+        desc->GeoLocation = eGeoLocNotApplicable;
+        desc->GenLocation = eGenLocPrimaryBox;
+        desc->PortConnection = ePortConnJack;
+        desc->IsConnected = present;
+    }
+    Request->ValueSize = bytes;
+    return STATUS_SUCCESS;
+}
+
 class DmicTopology final : public IMiniportTopology {
     LONG m_references = 1;
     PUJJO_AUDIO_ROLE m_role;
+    PUJJO_AUDIO_BUS m_bus;
 
 public:
-    explicit DmicTopology(PUJJO_AUDIO_ROLE Role) : m_role(Role) {}
+    DmicTopology(PUJJO_AUDIO_ROLE Role, const PUJJO_AUDIO_BUS &Bus) : m_role(Role), m_bus(Bus)
+    {
+        ReferenceBus(m_bus);
+    }
+    ~DmicTopology() { ReleaseBus(m_bus); }
+
+    NTSTATUS GetJack(PPCPROPERTY_REQUEST Request)
+    {
+        return HandleJackProperty(m_role, m_bus, Request);
+    }
 
     STDMETHODIMP QueryInterface(REFIID Id, PVOID *Out) override
     {
@@ -468,6 +544,13 @@ public:
         return STATUS_NOT_IMPLEMENTED;
     }
 };
+
+static NTSTATUS PropertyJack(PPCPROPERTY_REQUEST Request)
+{
+    if (!Request || !Request->MajorTarget || !Request->PropertyItem)
+        return STATUS_INVALID_PARAMETER;
+    return static_cast<DmicTopology *>(Request->MajorTarget)->GetJack(Request);
+}
 
 static NTSTATUS CompleteQuery(PDEVICE_OBJECT, PIRP, PVOID Context)
 {
@@ -559,7 +642,7 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT Device, PIRP Irp, PRESOURCELIST Resou
     if (NT_SUCCESS(status) && (unsigned)format.Role >= RTL_NUMBER_OF(waveNames))
         status = STATUS_NOT_SUPPORTED;
     if (NT_SUCCESS(status)) {
-        topology = new (POOL_FLAG_NON_PAGED, AUDIO_POOL_TAG) DmicTopology(format.Role);
+        topology = new (POOL_FLAG_NON_PAGED, AUDIO_POOL_TAG) DmicTopology(format.Role, bus);
         wave = new (POOL_FLAG_NON_PAGED, AUDIO_POOL_TAG) DmicWave(bus, format);
         if (!topology || !wave) status = STATUS_INSUFFICIENT_RESOURCES;
     }

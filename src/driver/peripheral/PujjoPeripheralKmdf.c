@@ -219,13 +219,13 @@ static BOOLEAN RuntimeIsActive(PVOID context, PVOID owner)
 }
 
 #ifdef PJ_TARGET_CODEC
-static NTSTATUS RuntimeReadJack(PVOID context, PVOID owner, BOOLEAN ready, pj5682s_jack *jack)
+static NTSTATUS RuntimeReadJack(PVOID context, PVOID owner, pj5682s_jack_query query, pj5682s_jack *jack)
 {
     PJ_DEV_CONTEXT *ctx = context;
     NTSTATUS status = STATUS_DEVICE_NOT_READY;
     RuntimeLock(ctx);
     if (ctx->Online && ctx->ResourceEvidenceValid && RuntimeIsActive(ctx, owner))
-        status = Pj5682sSpbGetJack(&ctx->RuntimeSpb, ready, jack);
+        status = Pj5682sSpbGetJack(&ctx->RuntimeSpb, query, jack);
     RuntimeUnlock(ctx);
     return status;
 }

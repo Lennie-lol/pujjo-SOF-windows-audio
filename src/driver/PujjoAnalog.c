@@ -18,6 +18,7 @@ typedef struct _PUJJO_ANALOG_LEASE {
     PUJJO_PERIPHERAL_INTERFACE Peripheral;
     PFILE_OBJECT PeripheralFile;
     BOOLEAN PeripheralNeedsShutdown;
+    BOOLEAN JackClassified;
     BOOLEAN PositionAllowed;
     BOOLEAN Faulted;
     BOOLEAN Detached;
@@ -122,6 +123,7 @@ static NTSTATUS StopRoute(PSOF_DEVICE_CONTEXT parent, PUJJO_ANALOG_LEASE *lease,
 {
     NTSTATUS status, part;
     SetPositionAllowed(parent, lease, FALSE);
+    lease->JackClassified = FALSE;
     status = SofWaveRtSetMute(lease->Stream, TRUE);
     /* Turn off the amp or restore codec registers before removing SSP clocks. */
     if (lease->PeripheralNeedsShutdown) {
@@ -272,10 +274,12 @@ static NTSTATUS AnalogSetState(PVOID context, PVOID handle, ULONG state)
     if (NT_SUCCESS(status) && profile->Role != PujjoAudioSpeaker) {
         pj5682s_jack jack = PJ5682S_JACK_ABSENT;
         status = lease->Peripheral.ReadJack(lease->Peripheral.Header.Context, lease,
-            profile->Role == PujjoAudioHeadsetMic, &jack);
+            profile->Role == PujjoAudioHeadsetMic ? Pj5682sJackClassify : Pj5682sJackPresence,
+            &jack);
         if (NT_SUCCESS(status) && (jack == PJ5682S_JACK_ABSENT ||
             (profile->Role == PujjoAudioHeadsetMic && jack != PJ5682S_JACK_HEADSET)))
             status = STATUS_DEVICE_NOT_CONNECTED;
+        if (NT_SUCCESS(status) && jack == PJ5682S_JACK_HEADSET) lease->JackClassified = TRUE;
     }
     if (NT_SUCCESS(status) && !lease->Peripheral.IsActive(lease->Peripheral.Header.Context, lease))
         status = STATUS_DEVICE_NOT_READY;
@@ -287,6 +291,36 @@ static NTSTATUS AnalogSetState(PVOID context, PVOID handle, ULONG state)
             parent->AudioDmaFaulted = TRUE;
     }
 Done:
+    UnlockAudio(parent);
+    return status;
+}
+
+/* The idle analog blocks are unqualified. Return only a physical result
+ * from the live codec and let PortCls report an unavailable query otherwise. */
+static NTSTATUS AnalogJackPresent(PVOID context, PBOOLEAN present)
+{
+    const PUJJO_ANALOG_CHILD *child = context;
+    PSOF_DEVICE_CONTEXT parent = child->Parent;
+    NTSTATUS status = STATUS_DEVICE_NOT_READY;
+    BOOLEAN microphone = child->Profile.Role == PujjoAudioHeadsetMic;
+
+    if (!present) return STATUS_INVALID_PARAMETER;
+    LockAudio(parent);
+    PUJJO_ANALOG_LEASE *lease = parent->AnalogLease;
+    if (RouteOnline(parent) && lease && !lease->Detached && lease->PositionAllowed &&
+        lease->Peripheral.Kind == PUJJO_CONTROL_CODEC) {
+        pj5682s_jack jack;
+        status = lease->Peripheral.ReadJack(lease->Peripheral.Header.Context, lease,
+            microphone && lease->JackClassified ? Pj5682sJackReadClassified : Pj5682sJackPresence,
+            &jack);
+        if (NT_SUCCESS(status)) {
+            if (jack == PJ5682S_JACK_ABSENT) lease->JackClassified = FALSE;
+            if (microphone && jack == PJ5682S_JACK_PRESENT_UNCLASSIFIED)
+                status = STATUS_DEVICE_NOT_READY;
+            else
+                *present = microphone ? jack == PJ5682S_JACK_HEADSET : jack != PJ5682S_JACK_ABSENT;
+        }
+    }
     UnlockAudio(parent);
     return status;
 }
@@ -439,6 +473,7 @@ static NTSTATUS PublishAnalogChildLocked(PSOF_DEVICE_CONTEXT parent,
     bus.SetState = AnalogSetState;
     bus.Position = AnalogPosition;
     bus.Notification = AnalogNotification;
+    if (role != PujjoAudioSpeaker) bus.JackPresent = AnalogJackPresent;
     WDF_QUERY_INTERFACE_CONFIG_INIT(&query, &bus.Header, &GUID_PUJJO_AUDIO_BUS, NULL);
     status = WdfDeviceAddQueryInterface(child, &query);
     if (NT_SUCCESS(status)) status = WdfFdoAddStaticChild(parent->WdfDevice, child);

@@ -63,6 +63,12 @@ pj5682s_status pj5682s_validate_analog(const pj5682s_analog_program *program);
 pj5682s_status pj5682s_control_analog(pj5682s_control *state, const pj5682s_bus *bus,
     const pj5682s_analog_program *program, pj5682s_wait wait);
 
+typedef enum {
+    Pj5682sJackPresence,
+    Pj5682sJackClassify,
+    Pj5682sJackReadClassified
+} pj5682s_jack_query;
+
 /* Calls are serialized with bus power and removal by the Windows owner.
  * Start configures AIF1 and its digital routes. The approved analog program
  * applies while the DSP gain is muted. Stop restores the changed fields. A failed rollback can be retried after re-identification. */

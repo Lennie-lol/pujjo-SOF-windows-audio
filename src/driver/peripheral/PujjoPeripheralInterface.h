@@ -12,7 +12,7 @@ DEFINE_GUID(GUID_DEVINTERFACE_PUJJO_CODEC_CONTROL, 0x4fda23ae, 0xac3a, 0x4ea6,
 DEFINE_GUID(GUID_DEVINTERFACE_PUJJO_AMP_CONTROL, 0x9fcf5a91, 0x9041, 0x49a6,
             0xb3, 0xe7, 0x70, 0x0d, 0x39, 0x6a, 0x77, 0xd4);
 
-#define PUJJO_PERIPHERAL_CONTROL_VERSION 3
+#define PUJJO_PERIPHERAL_CONTROL_VERSION 4
 #define PUJJO_CONTROL_CODEC 1u
 #define PUJJO_CONTROL_AMP 2u
 #define PujjoAnalogSdbActiveLow 1u
@@ -40,6 +40,6 @@ typedef struct {
     NTSTATUS (*Prepare)(PVOID Context, PVOID Owner, const PUJJO_PERIPHERAL_PROFILE *Profile);
     NTSTATUS (*Shutdown)(PVOID Context, PVOID Owner);
     BOOLEAN (*IsActive)(PVOID Context, PVOID Owner);
-    NTSTATUS (*ReadJack)(PVOID Context, PVOID Owner, BOOLEAN ClassificationReady, pj5682s_jack *Jack);
+    NTSTATUS (*ReadJack)(PVOID Context, PVOID Owner, pj5682s_jack_query Query, pj5682s_jack *Jack);
 } PUJJO_PERIPHERAL_INTERFACE;
 #endif

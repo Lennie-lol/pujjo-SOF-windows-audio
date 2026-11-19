@@ -82,8 +82,13 @@ int main(void) {
  codec_program.steps[0].mask=0xa000;
  assert(Pj5682sSpbStartControl(&spb,&codec_profile,&codec_program)==0);
  assert(codec_registers[0x63]==0xa000 && delays==1);
+ pj5682s_jack jack=PJ5682S_JACK_ABSENT;
+ assert(Pj5682sSpbGetJack(&spb,Pj5682sJackPresence,&jack)==0 && jack==PJ5682S_JACK_PRESENT_UNCLASSIFIED);
+ codec_registers[0xf0]=0x10;
+ assert(Pj5682sSpbGetJack(&spb,Pj5682sJackPresence,&jack)==0 && jack==PJ5682S_JACK_ABSENT);
  assert(Pj5682sSpbSetPower(&spb,FALSE)==0);
  assert(codec_registers[0x63]==0 && codec_registers[0x61]==0 && delays==2);
+ assert(Pj5682sSpbGetJack(&spb,Pj5682sJackPresence,&jack)==STATUS_DEVICE_NOT_READY);
  assert(Pj5682sSpbSetPower(&spb,TRUE)==0);
  spb_written_count=3;
  assert(Pj5682sSpbStartControl(&spb,&codec_profile,&codec_program)==STATUS_IO_DEVICE_ERROR);

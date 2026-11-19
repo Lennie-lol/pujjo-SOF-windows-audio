@@ -52,6 +52,9 @@ assert route.index("SofWaveRtSetMute(lease->Stream, TRUE)") < route.index(
 stop = analog.split("static NTSTATUS StopRoute", 1)[1].split("static NTSTATUS AnalogGetFormat", 1)[0]
 assert stop.index("SofWaveRtSetMute") < stop.index("lease->Peripheral.Shutdown") < stop.index("SofWaveRtSetState")
 assert "lease->PositionAllowed && lease->Peripheral.IsActive" in analog
+assert "bus.JackPresent = AnalogJackPresent" in analog
+assert "KSPROPERTY_JACK_DESCRIPTION2" in port
+assert "if (!NT_SUCCESS(status)) return status;" in port.split("static NTSTATUS HandleJackProperty", 1)[1]
 remove = peripheral.split("static NTSTATUS RuntimeDisconnect", 1)[1]
 assert remove.index("InterlockedExchangePointer(&ctx->ActiveOwner, NULL)") < remove.index("Pj5682sSpbSetPower")
 
@@ -109,15 +112,92 @@ int main() {
     assert(ValidateFormat(nullptr,expected)==-1);
 }
 '''
+jack_property = port[port.index("static NTSTATUS HandleJackProperty"):port.index("class DmicTopology")]
+jack_preamble = r'''
+#include <cassert>
+#include <cstring>
+using ULONG = unsigned;
+using NTSTATUS = int;
+using BOOLEAN = bool;
+using PULONG = ULONG *;
+constexpr ULONG KSPROPERTY_TYPE_GET = 1, KSPROPERTY_TYPE_BASICSUPPORT = 2;
+constexpr ULONG KSPROPERTY_JACK_DESCRIPTION2 = 3, JACKDESC2_PRESENCE_DETECT_CAPABILITY = 1;
+constexpr ULONG KSAUDIO_SPEAKER_MONO = 4, KSAUDIO_SPEAKER_STEREO = 3;
+constexpr ULONG eConnTypeCombination = 1, eGeoLocNotApplicable = 2, eGenLocPrimaryBox = 3, ePortConnJack = 4;
+constexpr int STATUS_INVALID_DEVICE_REQUEST = -1, STATUS_BUFFER_TOO_SMALL = -2;
+constexpr int STATUS_BUFFER_OVERFLOW = -3, STATUS_SUCCESS = 0;
+#define PAGED_CODE() ((void)0)
+#define RtlCopyMemory std::memcpy
+#define NT_SUCCESS(status) ((status) >= 0)
+enum PUJJO_AUDIO_ROLE { PujjoAudioHeadphone, PujjoAudioHeadsetMic };
+struct Item { ULONG Id; };
+struct Request {
+    void *Instance; ULONG InstanceSize; ULONG Verb; void *Value; ULONG ValueSize;
+    Item *PropertyItem;
+};
+using PPCPROPERTY_REQUEST = Request *;
+struct KSMULTIPLE_ITEM { ULONG Size, Count; };
+using PKSMULTIPLE_ITEM = KSMULTIPLE_ITEM *;
+struct KSJACK_DESCRIPTION {
+    ULONG ChannelMapping, Color, ConnectionType, GeoLocation, GenLocation, PortConnection;
+    BOOLEAN IsConnected;
+};
+using PKSJACK_DESCRIPTION = KSJACK_DESCRIPTION *;
+struct KSJACK_DESCRIPTION2 { ULONG DeviceStateInfo, JackCapabilities; };
+using PKSJACK_DESCRIPTION2 = KSJACK_DESCRIPTION2 *;
+struct PUJJO_AUDIO_BUS {
+    struct { void *Context; } Header;
+    NTSTATUS (*JackPresent)(void *, BOOLEAN *);
+};
+'''
+jack_tests = r'''
+struct Sample { NTSTATUS Status; BOOLEAN Present; unsigned Reads; };
+int ReadJack(void *context, BOOLEAN *present)
+{
+    auto sample = static_cast<Sample *>(context);
+    ++sample->Reads;
+    *present = sample->Present;
+    return sample->Status;
+}
+int main()
+{
+    Sample sample{-4, true, 0};
+    PUJJO_AUDIO_BUS bus{{&sample}, ReadJack};
+    ULONG pin = 1;
+    Item item{1};
+    struct { KSMULTIPLE_ITEM Many; KSJACK_DESCRIPTION Jack; } reply{};
+    Request request{&pin, sizeof(pin), KSPROPERTY_TYPE_GET, &reply, sizeof(reply), &item};
+    assert(HandleJackProperty(PujjoAudioHeadphone, bus, &request) == STATUS_INVALID_DEVICE_REQUEST);
+    assert(!sample.Reads);
+    pin = 0;
+    request.ValueSize = 0;
+    assert(HandleJackProperty(PujjoAudioHeadphone, bus, &request) == STATUS_BUFFER_OVERFLOW);
+    assert(request.ValueSize == sizeof(reply) && !sample.Reads);
+    assert(HandleJackProperty(PujjoAudioHeadphone, bus, &request) == -4);
+    assert(!reply.Many.Count && !reply.Jack.IsConnected);
+    sample.Status = 0;
+    assert(HandleJackProperty(PujjoAudioHeadphone, bus, &request) == 0 && reply.Jack.IsConnected);
+    sample.Present = false;
+    assert(HandleJackProperty(PujjoAudioHeadphone, bus, &request) == 0 && !reply.Jack.IsConnected);
+    struct { KSMULTIPLE_ITEM Many; KSJACK_DESCRIPTION2 Jack; } reply2{};
+    item.Id = KSPROPERTY_JACK_DESCRIPTION2;
+    request.Value = &reply2;
+    request.ValueSize = sizeof(reply2);
+    assert(HandleJackProperty(PujjoAudioHeadsetMic, bus, &request) == 0);
+    assert(reply2.Many.Count == 1 && reply2.Jack.JackCapabilities == JACKDESC2_PRESENCE_DETECT_CAPABILITY);
+}
+'''
 with tempfile.TemporaryDirectory() as temp:
-    source = Path(temp) / "portcls_pcm.cpp"
-    output = Path(temp) / "portcls_pcm"
-    source.write_text(preamble + validate + tests)
-    subprocess.run(
-        [os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
-         str(source), "-o", str(output)], check=True, timeout=40
-    )
-    subprocess.run([str(output)], check=True, timeout=20)
+    for name, body in (("pcm", preamble + validate + tests),
+                        ("jack", jack_preamble + jack_property + jack_tests)):
+        source = Path(temp) / (name + ".cpp")
+        output = Path(temp) / name
+        source.write_text(body)
+        subprocess.run(
+            [os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
+             str(source), "-o", str(output)], check=True, timeout=40
+        )
+        subprocess.run([str(output)], check=True, timeout=20)
 
 package = (root / "scripts/Stage-PujjoDiagnosticPackage.ps1").read_text()
 for probe in ("pujjo_rt5682_probe", "pujjo_rt1019_probe"):

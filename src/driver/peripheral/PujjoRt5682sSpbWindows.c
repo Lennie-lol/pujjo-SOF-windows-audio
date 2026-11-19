@@ -300,18 +300,19 @@ static int ControlDelay(void *context, unsigned milliseconds)
     return NT_SUCCESS(KeDelayExecutionThread(KernelMode, FALSE, &delay)) ? 0 : -1;
 }
 
-NTSTATUS Pj5682sSpbGetJack(PJ5682S_SPB_WINDOWS *state, BOOLEAN detectionCompleted,
+NTSTATUS Pj5682sSpbGetJack(PJ5682S_SPB_WINDOWS *state, pj5682s_jack_query query,
                            pj5682s_jack *jack)
 {
     const pj5682s_bus bus = {state, ControlRead, ControlWrite};
     NTSTATUS status = STATUS_DEVICE_NOT_READY;
     PAGED_CODE();
-    if (!state || !state->Lock || !jack) return STATUS_INVALID_PARAMETER;
+    if (!state || !state->Lock || !jack ||
+        (unsigned)query > Pj5682sJackReadClassified) return STATUS_INVALID_PARAMETER;
     WdfWaitLockAcquire(state->Lock, NULL);
     if (state->Opened && state->Powered) {
-        pj5682s_status result = detectionCompleted ?
+        pj5682s_status result = query == Pj5682sJackClassify ?
             pj5682s_control_classify(&state->Control, &bus, ControlDelay, jack) :
-            pj5682s_control_jack(&state->Control, &bus, 0, jack);
+            pj5682s_control_jack(&state->Control, &bus, query == Pj5682sJackReadClassified, jack);
         status = ControlStatus(result);
     }
     WdfWaitLockRelease(state->Lock);

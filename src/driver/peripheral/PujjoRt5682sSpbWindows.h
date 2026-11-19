@@ -37,7 +37,7 @@ NTSTATUS Pj5682sSpbStartControl(PJ5682S_SPB_WINDOWS *state,
                                 const pj5682s_control_profile *profile,
                                 const pj5682s_analog_program *program);
 NTSTATUS Pj5682sSpbStopControl(PJ5682S_SPB_WINDOWS *state);
-NTSTATUS Pj5682sSpbGetJack(PJ5682S_SPB_WINDOWS *state, BOOLEAN detectionCompleted,
+NTSTATUS Pj5682sSpbGetJack(PJ5682S_SPB_WINDOWS *state, pj5682s_jack_query query,
                            pj5682s_jack *jack);
 #endif
 #endif
