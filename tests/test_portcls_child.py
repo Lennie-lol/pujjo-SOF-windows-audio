@@ -38,6 +38,23 @@ assert bus.index("WdfObjectReference(stream->RingAllocation.CommonBuffer)") < bu
 assert wave.index("IoFreeMdl(Stream->Mdl)") < wave.index("WdfObjectDereference(ring)")
 assert "if (!stopped && !Stream->Detached)" in wave
 
+analog = (driver / "PujjoAnalog.c").read_text()
+peripheral = (driver / "peripheral/PujjoPeripheralKmdf.c").read_text()
+inf = (driver / "pujjo_audio.inx").read_text()
+for role in ("Headphone", "HeadsetMic", "Speaker"):
+    assert "PUJJO\\Audio" + role in inf
+    assert 'L"' + role + 'Topology"' in port
+    assert 'L"' + role + 'Wave"' in port
+assert "static const PUJJO_ANALOG_PROFILE *const approved[] = {NULL};" in analog
+route = analog.split("static NTSTATUS AnalogSetState", 1)[1]
+assert route.index("SofWaveRtSetMute(lease->Stream, TRUE)") < route.index(
+    "lease->Peripheral.Prepare(") < route.index("SofWaveRtSetMute(lease->Stream, FALSE)")
+stop = analog.split("static NTSTATUS StopRoute", 1)[1].split("static NTSTATUS AnalogGetFormat", 1)[0]
+assert stop.index("SofWaveRtSetMute") < stop.index("lease->Peripheral.Shutdown") < stop.index("SofWaveRtSetState")
+assert "lease->PositionAllowed && lease->Peripheral.IsActive" in analog
+remove = peripheral.split("static NTSTATUS RuntimeDisconnect", 1)[1]
+assert remove.index("InterlockedExchangePointer(&ctx->ActiveOwner, NULL)") < remove.index("Pj5682sSpbSetPower")
+
 # Execute the exact leaf used by NewStream and SetFormat. The declarations
 # below are host fixture types, not WDK ABI checks.
 validate = port[port.index("static BOOLEAN IsPcm"):port.index("class DmicStream")]

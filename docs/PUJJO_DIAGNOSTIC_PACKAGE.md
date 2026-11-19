@@ -36,7 +36,7 @@ If normal startup fails, use Windows Recovery Environment and identify the offli
 
 ## Read-only evidence collection
 
-Before binding a signed diagnostic, export the Windows firmware NHLT from an elevated PowerShell session. Preserve the file and reported SHA-256 alongside the build revision, board revision, and exact instance IDs. The export returns an explicit unavailable result if Windows does not expose the table.
+Before binding a signed diagnostic, export the Windows firmware NHLT from PowerShell. Preserve the file and reported SHA-256 alongside the build revision, board revision, and exact instance IDs. The export returns an explicit unavailable result if Windows does not expose the table.
 
 ```powershell
 .\scripts\Export-PujjoNhlt.ps1 -Path .\pujjo-windows-nhlt.bin

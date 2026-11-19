@@ -52,6 +52,8 @@ NTSTATUS Pj1019GpioSetPower(PJ1019_GPIO_WINDOWS *gpio, BOOLEAN powered)
         if (!gpio->ShutdownConfirmed) status = WriteLocked(gpio, FALSE);
         gpio->Powered = FALSE;
         gpio->Calibrated = FALSE;
+    } else if (!powered && gpio->Faulted && !gpio->ShutdownConfirmed) {
+        status = STATUS_IO_DEVICE_ERROR;
     }
     WdfWaitLockRelease(gpio->Lock);
     return status;

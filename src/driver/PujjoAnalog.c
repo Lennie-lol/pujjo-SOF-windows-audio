@@ -105,7 +105,7 @@ static NTSTATUS OpenPeripheral(BOOLEAN speaker, PUJJO_ANALOG_LEASE *lease)
     if (bus->Header.Version != PUJJO_PERIPHERAL_CONTROL_VERSION ||
         bus->Header.Size != sizeof(*bus) || !bus->Header.Context ||
         !bus->Header.InterfaceReference || !bus->Header.InterfaceDereference ||
-        !bus->Prepare || !bus->Shutdown || (!speaker && !bus->ReadJack) ||
+        !bus->Prepare || !bus->Shutdown || !bus->IsActive || (!speaker && !bus->ReadJack) ||
         bus->Kind != (speaker ? PUJJO_CONTROL_AMP : PUJJO_CONTROL_CODEC))
         return STATUS_INVALID_DEVICE_STATE;
     return STATUS_SUCCESS;
@@ -125,7 +125,7 @@ static NTSTATUS StopRoute(PSOF_DEVICE_CONTEXT parent, PUJJO_ANALOG_LEASE *lease,
     status = SofWaveRtSetMute(lease->Stream, TRUE);
     /* Turn off the amp or restore codec registers before removing SSP clocks. */
     if (lease->PeripheralNeedsShutdown) {
-        part = lease->Peripheral.Shutdown(lease->Peripheral.Header.Context);
+        part = lease->Peripheral.Shutdown(lease->Peripheral.Header.Context, lease);
         if (NT_SUCCESS(part)) lease->PeripheralNeedsShutdown = FALSE;
         if (NT_SUCCESS(status)) status = part;
     }
@@ -197,7 +197,6 @@ static NTSTATUS AnalogAllocate(PVOID context, ULONG requested, PUJJO_AUDIO_BUFFE
     WdfObjectReference(stream->BdlAllocation.CommonBuffer);
     stream->BuffersLeased = TRUE;
     parent->AnalogLease = lease;
-    SetPositionAllowed(parent, lease, TRUE);
     buffer->Stream = lease;
     buffer->Mdl = stream->Mdl;
     buffer->Bytes = stream->BufferSizeBytes;
@@ -249,9 +248,13 @@ static NTSTATUS AnalogSetState(PVOID context, PVOID handle, ULONG state)
     if (lease->Faulted) goto Done;
     if (lease->PeripheralNeedsShutdown) {
         /* RUN is already qualified for the current lease. */
-        status = SofWaveRtSetState(lease->Stream, KSSTATE_RUN);
-        if (!NT_SUCCESS(status) && !NT_SUCCESS(StopRoute(parent, lease, KSSTATE_STOP)))
-            parent->AudioDmaFaulted = TRUE;
+        if (lease->Peripheral.IsActive(lease->Peripheral.Header.Context, lease))
+            status = SofWaveRtSetState(lease->Stream, KSSTATE_RUN);
+        if (!NT_SUCCESS(status)) {
+            lease->Faulted = TRUE;
+            if (!NT_SUCCESS(StopRoute(parent, lease, KSSTATE_STOP)))
+                parent->AudioDmaFaulted = TRUE;
+        }
         goto Done;
     }
     SetPositionAllowed(parent, lease, FALSE);
@@ -264,16 +267,18 @@ static NTSTATUS AnalogSetState(PVOID context, PVOID handle, ULONG state)
         settings.Codec.dsp_muted = 1u;
         settings.GainLimitApplied = 1u;
         lease->PeripheralNeedsShutdown = TRUE;
-        status = lease->Peripheral.Prepare(lease->Peripheral.Header.Context, &settings);
+        status = lease->Peripheral.Prepare(lease->Peripheral.Header.Context, lease, &settings);
     }
     if (NT_SUCCESS(status) && profile->Role != PujjoAudioSpeaker) {
         pj5682s_jack jack = PJ5682S_JACK_ABSENT;
-        status = lease->Peripheral.ReadJack(lease->Peripheral.Header.Context,
+        status = lease->Peripheral.ReadJack(lease->Peripheral.Header.Context, lease,
             profile->Role == PujjoAudioHeadsetMic, &jack);
         if (NT_SUCCESS(status) && (jack == PJ5682S_JACK_ABSENT ||
             (profile->Role == PujjoAudioHeadsetMic && jack != PJ5682S_JACK_HEADSET)))
             status = STATUS_DEVICE_NOT_CONNECTED;
     }
+    if (NT_SUCCESS(status) && !lease->Peripheral.IsActive(lease->Peripheral.Header.Context, lease))
+        status = STATUS_DEVICE_NOT_READY;
     if (NT_SUCCESS(status)) status = SofWaveRtSetMute(lease->Stream, FALSE);
     if (NT_SUCCESS(status)) SetPositionAllowed(parent, lease, TRUE);
     else {
@@ -293,7 +298,8 @@ static NTSTATUS AnalogPosition(PVOID context, PVOID handle, PULONG position)
     KIRQL irql;
     NTSTATUS status = STATUS_DEVICE_NOT_READY;
     KeAcquireSpinLock(&child->Parent->AudioPositionLock, &irql);
-    if (lease->PositionAllowed) status = SofWaveRtGetPosition(lease->Stream, position);
+    if (lease->PositionAllowed && lease->Peripheral.IsActive(lease->Peripheral.Header.Context, lease))
+        status = SofWaveRtGetPosition(lease->Stream, position);
     KeReleaseSpinLock(&child->Parent->AudioPositionLock, irql);
     return status;
 }

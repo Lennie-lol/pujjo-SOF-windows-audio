@@ -113,12 +113,12 @@ jobs:
             $env:CL = $case.Defines
             $variant = if ($case.Name) { $case.Name } else { $case.Project }
             $isolated = Join-Path $env:RUNNER_TEMP ("guarded-" + $variant)
-            $intermediates = if ($case.Project -eq 'sof_dsp') {
-              @("/p:SolutionDir=$isolated/")
+            $intermediate = if ($case.Project -eq 'sof_dsp') {
+              "/p:SolutionDir=$isolated/"
             } else {
-              @("/p:IntDir=$isolated/obj/")
+              "/p:IntDir=$isolated/obj/"
             }
-            msbuild "$($case.Project).vcxproj" /t:Rebuild /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 @intermediates "/p:OutDir=$isolated/bin/" /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:minimal
+            msbuild "$($case.Project).vcxproj" /t:Rebuild /p:Configuration=${{ matrix.configuration }} /p:Platform=x64 $intermediate "/p:OutDir=$isolated/bin/" /p:TargetPlatformVersion=10.0.26100.0 /p:WindowsTargetPlatformVersion=10.0.26100.0 /v:minimal /fl "/flp:LogFile=build-logs/guarded-$variant.log;Verbosity=normal"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             if (!(Test-Path "$isolated/bin/$($case.Project).sys")) { throw "Missing guarded driver $variant" }
             $objects = Join-Path $isolated 'obj'
@@ -142,6 +142,23 @@ jobs:
             }
           }
           'NOT INSTALLABLE - NOT HARDWARE VERIFIED. Unsigned compile-only development products.' | Set-Content "$output/NOT-INSTALLABLE.txt"
+      - name: Validate PortCls endpoint INF without staging it
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $kitRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
+          $tool = @(
+            (Join-Path $kitRoot 'Tools\10.0.26100.0\x64\InfVerif.exe')
+            (Join-Path $kitRoot 'bin\10.0.26100.0\x64\InfVerif.exe')
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (!$tool) { throw 'Missing InfVerif from WDK 10.0.26100.0' }
+          $scratch = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/portcls-inf"
+          $inf = Join-Path $scratch.FullName 'pujjo_audio.inf'
+          Copy-Item src/driver/pujjo_audio.inx $inf
+          Copy-Item bin/x64/Release/pujjo_audio.sys $scratch.FullName
+          & $tool /w /v $inf
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify read-only diagnostic INFs and generate unsigned catalogs
         if: matrix.configuration == 'Release'
         shell: pwsh

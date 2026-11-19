@@ -9,7 +9,7 @@ using System.Runtime.InteropServices;
 public static class PujjoFirmwareTables {
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern uint GetSystemFirmwareTable(uint provider, uint id,
-        [Out] byte[] buffer, uint size);
+        [Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 3)] byte[] buffer, uint size);
 }
 '@
 }
@@ -22,7 +22,7 @@ if ($size -eq 0) {
     return
 }
 if ($size -lt 37 -or $size -gt 1MB) { throw "NHLT size outside parser bounds ($size bytes)" }
-$bytes = [byte[]]::new($size)
+$bytes = [byte[]]::new([int]$size)
 $actual = [PujjoFirmwareTables]::GetSystemFirmwareTable($provider, $table, $bytes, $size)
 if ($actual -ne $size -or [BitConverter]::ToUInt32($bytes, 0) -ne $table) {
     throw 'NHLT changed or returned the wrong signature during acquisition'

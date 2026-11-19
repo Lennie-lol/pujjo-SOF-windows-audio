@@ -49,6 +49,8 @@ typedef struct _PJ_DEV_CONTEXT {
     WDFDEVICE Device;
     KMUTEX RuntimeLock;
     BOOLEAN Online;
+    PVOID RouteOwner;
+    PVOID volatile ActiveOwner;
 #ifdef PJ_TARGET_CODEC
     PJ5682S_SPB_WINDOWS RuntimeSpb;
     BOOLEAN RuntimeConnectionKnown;
@@ -128,15 +130,20 @@ static VOID RuntimeDereference(PVOID context)
     WdfObjectDereference(ctx->Device);
 }
 
-static NTSTATUS RuntimePrepare(PVOID context, const PUJJO_PERIPHERAL_PROFILE *profile)
+static NTSTATUS RuntimePrepare(PVOID context, PVOID owner, const PUJJO_PERIPHERAL_PROFILE *profile)
 {
     PJ_DEV_CONTEXT *ctx = context;
     NTSTATUS status = STATUS_DEVICE_NOT_READY;
 
-    if (!profile || profile->BoardQualified != 1u || profile->DspMuted != 1u)
+    if (!owner || !profile || profile->BoardQualified != 1u || profile->DspMuted != 1u)
         return STATUS_ACCESS_DENIED;
     RuntimeLock(ctx);
     if (!ctx->Online || !ctx->ResourceEvidenceValid) goto Done;
+    if (ctx->RouteOwner) {
+        status = STATUS_DEVICE_BUSY;
+        goto Done;
+    }
+    ctx->RouteOwner = owner;
 #ifdef PJ_TARGET_CODEC
     if (ctx->RuntimeConnectionKnown &&
         (ctx->Evidence.connection_low != ctx->RuntimeConnectionLow ||
@@ -177,35 +184,47 @@ static NTSTATUS RuntimePrepare(PVOID context, const PUJJO_PERIPHERAL_PROFILE *pr
         status = Pj1019GpioStartMuted(&ctx->RuntimeGpio, &amp);
     }
 #endif
+    if (NT_SUCCESS(status)) InterlockedExchangePointer(&ctx->ActiveOwner, owner);
 Done:
     RuntimeUnlock(ctx);
     return status;
 }
 
-static NTSTATUS RuntimeShutdown(PVOID context)
+static NTSTATUS RuntimeShutdown(PVOID context, PVOID owner)
 {
     PJ_DEV_CONTEXT *ctx = context;
     NTSTATUS status = STATUS_DEVICE_NOT_READY;
     RuntimeLock(ctx);
-    if (ctx->Online && ctx->ResourceEvidenceValid) {
+    if (!owner || ctx->RouteOwner != owner) {
+        /* A failed preparation that never acquired ownership needs no rollback. */
+        status = STATUS_SUCCESS;
+    } else if (ctx->Online && ctx->ResourceEvidenceValid) {
+        InterlockedExchangePointer(&ctx->ActiveOwner, NULL);
 #ifdef PJ_TARGET_CODEC
         status = Pj5682sSpbStopControl(&ctx->RuntimeSpb);
 #else
         status = ctx->RuntimeGpio.Powered ? Pj1019GpioShutdown(&ctx->RuntimeGpio) :
                  ctx->RuntimeGpio.Faulted ? STATUS_IO_DEVICE_ERROR : STATUS_SUCCESS;
 #endif
+        if (NT_SUCCESS(status)) ctx->RouteOwner = NULL;
     }
     RuntimeUnlock(ctx);
     return status;
 }
 
+static BOOLEAN RuntimeIsActive(PVOID context, PVOID owner)
+{
+    PJ_DEV_CONTEXT *ctx = context;
+    return owner && InterlockedCompareExchangePointer(&ctx->ActiveOwner, NULL, NULL) == owner;
+}
+
 #ifdef PJ_TARGET_CODEC
-static NTSTATUS RuntimeReadJack(PVOID context, BOOLEAN ready, pj5682s_jack *jack)
+static NTSTATUS RuntimeReadJack(PVOID context, PVOID owner, BOOLEAN ready, pj5682s_jack *jack)
 {
     PJ_DEV_CONTEXT *ctx = context;
     NTSTATUS status = STATUS_DEVICE_NOT_READY;
     RuntimeLock(ctx);
-    if (ctx->Online && ctx->ResourceEvidenceValid)
+    if (ctx->Online && ctx->ResourceEvidenceValid && RuntimeIsActive(ctx, owner))
         status = Pj5682sSpbGetJack(&ctx->RuntimeSpb, ready, jack);
     RuntimeUnlock(ctx);
     return status;
@@ -239,6 +258,7 @@ static NTSTATUS RuntimeInitialize(WDFDEVICE device)
     bus.Header.InterfaceDereference = RuntimeDereference;
     bus.Prepare = RuntimePrepare;
     bus.Shutdown = RuntimeShutdown;
+    bus.IsActive = RuntimeIsActive;
     WDF_QUERY_INTERFACE_CONFIG_INIT(&config, &bus.Header, &GUID_PUJJO_PERIPHERAL_CONTROL, NULL);
     status = WdfDeviceAddQueryInterface(device, &config);
     if (!NT_SUCCESS(status)) return status;
@@ -249,6 +269,7 @@ static NTSTATUS RuntimeDisconnect(PJ_DEV_CONTEXT *ctx, BOOLEAN release)
 {
     NTSTATUS status, closeStatus = STATUS_SUCCESS;
     RuntimeLock(ctx);
+    InterlockedExchangePointer(&ctx->ActiveOwner, NULL);
     ctx->Online = FALSE;
 #ifdef PJ_TARGET_CODEC
     status = Pj5682sSpbSetPower(&ctx->RuntimeSpb, FALSE);
@@ -257,6 +278,7 @@ static NTSTATUS RuntimeDisconnect(PJ_DEV_CONTEXT *ctx, BOOLEAN release)
     status = Pj1019GpioSetPower(&ctx->RuntimeGpio, FALSE);
     if (release) closeStatus = Pj1019GpioClose(&ctx->RuntimeGpio);
 #endif
+    if (NT_SUCCESS(status)) ctx->RouteOwner = NULL;
     if (release) ctx->ResourceEvidenceValid = FALSE;
     RuntimeUnlock(ctx);
     return NT_SUCCESS(status) ? closeStatus : status;

@@ -179,7 +179,7 @@ static NTSTATUS SofWaveRtCreateStreamCore(
     _In_ SOF_ENDPOINT_TYPE EndpointType,
     _In_ BOOLEAN IsCapture,
     _In_ ULONG StreamTag,
-    _In_ const PSOF_AUDIO_FORMAT_PARAMS Format,
+    _In_ const SOF_AUDIO_FORMAT_PARAMS *Format,
     _In_ ULONG BufferSizeBytes,
     _In_ ULONG PeriodMs,
     _In_ ULONG VerifiedSspPort,
@@ -513,7 +513,7 @@ NTSTATUS SofWaveRtCreateSspStream(PSOF_DEVICE_CONTEXT Ctx, SOF_ENDPOINT_TYPE End
         Endpoint != SOF_ENDPOINT_PUJJO_SPEAKER)
         return STATUS_INVALID_PARAMETER;
     return SofWaveRtCreateStreamCore(Ctx, Endpoint, Endpoint == SOF_ENDPOINT_PUJJO_HEADSET_MIC,
-        0, (PSOF_AUDIO_FORMAT_PARAMS)Format, BufferBytes, PeriodMs, VerifiedPort, Stream);
+        0, Format, BufferBytes, PeriodMs, VerifiedPort, Stream);
 }
 #endif
 
