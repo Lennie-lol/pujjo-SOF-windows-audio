@@ -70,7 +70,7 @@ int main(void) {
  assert(Pj5682sSpbOpen(&owner,1,0,&spb)==0 && !spb.Powered);Pj5682sSpbClose(&spb);
  /* Runtime transport uses exact-length SPB reads and writes. The
   * diagnostic callbacks exercised above remain identity-only. */
- const pj5682s_control_profile codec_profile={1,1,1,1,24576000,3072000,48000,32,0,PJ5682S_ROUTE_DAC};
+ const pj5682s_control_profile codec_profile={1,1,1,1,24576000,3072000,48000,32,0,PJ5682S_ROUTE_DAC,0,0};
  pj5682s_analog_program codec_program={1,{{0x0063,0xa000,0xa000,15,20}}};
  emulate_codec=1;
  codec_registers[0xff]=PJ5682S_EXPECTED_DEVICE_ID;
@@ -90,6 +90,24 @@ int main(void) {
  assert(codec_registers[0x63]==0 && codec_registers[0x61]==0 && delays==2);
  assert(Pj5682sSpbGetJack(&spb,Pj5682sJackPresence,&jack)==STATUS_DEVICE_NOT_READY);
  assert(Pj5682sSpbSetPower(&spb,TRUE)==0);
+ /* Exercise the new clocked path through the actual SPB transport code. */
+ pj5682s_control_profile pll_profile=codec_profile;
+ pll_profile.mclk_hz=19200000;
+ pll_profile.bclk_hz=2400000;
+ pll_profile.slot_bits=25;
+ before=sends;
+ assert(Pj5682sSpbStartControl(&spb,&pll_profile,&codec_program)==STATUS_ACCESS_DENIED);
+ assert(sends==before);
+ pll_profile.pll2_qualified=1;
+ pll_profile.pll2_settle_ms=25;
+ before=delays;
+ assert(Pj5682sSpbStartControl(&spb,&pll_profile,&codec_program)==0);
+ assert(delays==before+2);
+ assert(codec_registers[0x9b]==0x0203 && codec_registers[0x65]==0x50a0);
+ assert(codec_registers[0x80]==0x4000 && codec_registers[0x73]==0x1021);
+ assert(Pj5682sSpbStopControl(&spb)==0 && delays==before+3);
+ assert(codec_registers[0x9b]==0 && codec_registers[0x65]==0 &&
+        codec_registers[0x80]==0 && codec_registers[0x63]==0);
  spb_written_count=3;
  assert(Pj5682sSpbStartControl(&spb,&codec_profile,&codec_program)==STATUS_IO_DEVICE_ERROR);
  assert(spb.Control.faulted);
