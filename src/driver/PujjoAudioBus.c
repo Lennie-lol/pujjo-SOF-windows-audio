@@ -121,6 +121,21 @@ Done:
     return status;
 }
 
+/* Cleanup is allowed after a device-wide fault. Preserve the first error
+ * and still stop DMA when the gain command fails. */
+static NTSTATUS AudioStopCapture(PSOF_DEVICE_CONTEXT ctx,
+                                 PSOF_WAVERT_STREAM stream, KSSTATE state)
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    NTSTATUS transition;
+    if (stream->State == KSSTATE_RUN)
+        status = SofWaveRtSetMute(stream, TRUE);
+    transition = SofWaveRtSetState(stream, state);
+    if (NT_SUCCESS(status)) status = transition;
+    if (!NT_SUCCESS(status)) ctx->AudioDmaFaulted = TRUE;
+    return status;
+}
+
 static VOID AudioFree(PVOID Context, PVOID Stream)
 {
     PSOF_DEVICE_CONTEXT ctx = Context;
@@ -129,6 +144,8 @@ static VOID AudioFree(PVOID Context, PVOID Stream)
     if (ctx->DmicStream == stream && stream) {
         AudioSetPositionEnabled(ctx, FALSE);
         ctx->DmicStream = NULL;
+        if (!stream->Detached)
+            (void)AudioStopCapture(ctx, stream, KSSTATE_STOP);
         if (!NT_SUCCESS(SofWaveRtFreeStream(stream))) ctx->AudioDmaFaulted = TRUE;
     }
     AudioUnlock(ctx);
@@ -145,17 +162,18 @@ static NTSTATUS AudioSetState(PVOID Context, PVOID Stream, ULONG State)
     if (ctx->AudioOnline && ctx->DmicStream == stream && stream &&
         (State != KSSTATE_RUN || !ctx->AudioDmaFaulted)) {
         AudioSetPositionEnabled(ctx, FALSE);
-        if (State != KSSTATE_RUN && stream->State == KSSTATE_RUN)
-            status = SofWaveRtSetMute(stream, TRUE);
-        else
+        if (State != KSSTATE_RUN) {
+            status = AudioStopCapture(ctx, stream, (KSSTATE)State);
+        } else {
             status = STATUS_SUCCESS;
-
-        NTSTATUS transition = SofWaveRtSetState(stream, (KSSTATE)State);
-        if (NT_SUCCESS(status)) status = transition;
-        if (NT_SUCCESS(status) && State == KSSTATE_RUN) {
-            status = SofWaveRtSetMute(stream, FALSE);
-            if (!NT_SUCCESS(status) && !NT_SUCCESS(SofWaveRtSetState(stream, KSSTATE_STOP)))
-                ctx->AudioDmaFaulted = TRUE;
+            if (stream->State != KSSTATE_RUN)
+                status = SofWaveRtSetMute(stream, TRUE);
+            if (NT_SUCCESS(status))
+                status = SofWaveRtSetState(stream, KSSTATE_RUN);
+            if (NT_SUCCESS(status))
+                status = SofWaveRtSetMute(stream, FALSE);
+            if (!NT_SUCCESS(status))
+                (void)AudioStopCapture(ctx, stream, KSSTATE_STOP);
         }
         if (NT_SUCCESS(status) && stream->DescriptorPublished)
             AudioSetPositionEnabled(ctx, TRUE);
@@ -190,8 +208,15 @@ NTSTATUS SofDisconnectAudioChild(PSOF_DEVICE_CONTEXT Ctx)
     AudioLock(Ctx);
     AudioSetOnline(Ctx, FALSE);
     AudioSetPositionEnabled(Ctx, FALSE);
-    if (Ctx->DmicStream)
-        status = SofWaveRtDetachStream(Ctx->DmicStream);
+    if (Ctx->DmicStream) {
+        PSOF_WAVERT_STREAM stream = Ctx->DmicStream;
+        /* Mute a live capture route before detaching its DMA resources. */
+        if (!stream->Detached && stream->State == KSSTATE_RUN)
+            status = SofWaveRtSetMute(stream, TRUE);
+        NTSTATUS detach = SofWaveRtDetachStream(stream);
+        if (NT_SUCCESS(status)) status = detach;
+        if (!NT_SUCCESS(status)) Ctx->AudioDmaFaulted = TRUE;
+    }
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_ANALOG
     NTSTATUS analogStatus = SofDisconnectAnalogLocked(Ctx);
     if (NT_SUCCESS(status)) status = analogStatus;
