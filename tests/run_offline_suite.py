@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 SUITES=[
  'tests/test_topology_fallback.py','tests/test_ssp_profile_contract.py',
+ 'tests/run_analog_route_tests.py',
  'tests/test_prepare_ssp_candidate.py','tests/run_nhlt_graph_tests.py',
  'tests/test_kmdf_security.py','tests/test_bringup_static.py',
  'tests/run_bringup_tests.py','tests/test_pujjo_sof_fw_static.py',

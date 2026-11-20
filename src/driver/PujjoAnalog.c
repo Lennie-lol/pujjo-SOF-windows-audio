@@ -34,11 +34,16 @@ static VOID UnlockAudio(PSOF_DEVICE_CONTEXT parent)
     KeReleaseMutex(&parent->AudioMutex, FALSE);
 }
 
-static BOOLEAN RouteOnline(PSOF_DEVICE_CONTEXT parent)
+static BOOLEAN RouteSessionOnline(PSOF_DEVICE_CONTEXT parent)
 {
     return !parent->AnalogClosed && parent->ArmedTesting && parent->EnablePortCls &&
            parent->CurrentPowerState == PowerDeviceD0 &&
-           parent->FwState == SOF_FW_BOOT_COMPLETE && !parent->AudioDmaFaulted;
+           parent->FwState == SOF_FW_BOOT_COMPLETE;
+}
+
+static BOOLEAN RouteOnline(PSOF_DEVICE_CONTEXT parent)
+{
+    return RouteSessionOnline(parent) && !parent->AudioDmaFaulted;
 }
 
 static VOID SetPositionAllowed(PSOF_DEVICE_CONTEXT parent, PUJJO_ANALOG_LEASE *lease,
@@ -133,7 +138,12 @@ static NTSTATUS StopRoute(PSOF_DEVICE_CONTEXT parent, PUJJO_ANALOG_LEASE *lease,
     }
     part = SofWaveRtSetState(lease->Stream, state);
     if (NT_SUCCESS(status)) status = part;
-    if (!NT_SUCCESS(status)) lease->Faulted = TRUE;
+    if (!NT_SUCCESS(status)) {
+        /* An unconfirmed stop may still own clocks, DMA or the peripheral.
+         * Preserve the failure across lease destruction and block new routes. */
+        lease->Faulted = TRUE;
+        parent->AudioDmaFaulted = TRUE;
+    }
     return status;
 }
 
@@ -333,12 +343,15 @@ static NTSTATUS AnalogSetState(PVOID context, PVOID handle, ULONG state)
 
     if (state > KSSTATE_RUN) return STATUS_INVALID_PARAMETER;
     LockAudio(parent);
-    if (!lease || parent->AnalogLease != lease || lease->Detached || !RouteOnline(parent)) goto Done;
+    if (!lease || parent->AnalogLease != lease || lease->Detached ||
+        !RouteSessionOnline(parent)) goto Done;
     if (state != KSSTATE_RUN) {
+        /* A fault blocks RUN, not best-effort cleanup in a live session. */
         status = StopRoute(parent, lease, (KSSTATE)state);
         goto Done;
     }
     if (lease->Faulted) goto Done;
+    if (!RouteOnline(parent)) goto Done;
     if (lease->PeripheralNeedsShutdown) {
         /* RUN is already qualified for the current lease. */
         if (lease->Peripheral.IsActive(lease->Peripheral.Header.Context, lease))
@@ -374,9 +387,15 @@ static NTSTATUS AnalogSetState(PVOID context, PVOID handle, ULONG state)
             status = STATUS_DEVICE_NOT_CONNECTED;
         if (NT_SUCCESS(status) && jack == PJ5682S_JACK_HEADSET) lease->JackClassified = TRUE;
     }
-    if (NT_SUCCESS(status) && !lease->Peripheral.IsActive(lease->Peripheral.Header.Context, lease))
+    if (NT_SUCCESS(status) && (!RouteOnline(parent) ||
+        !lease->Peripheral.IsActive(lease->Peripheral.Header.Context, lease)))
         status = STATUS_DEVICE_NOT_READY;
     if (NT_SUCCESS(status)) status = SofWaveRtSetMute(lease->Stream, FALSE);
+    /* A removal during the IPC exchange invalidates the route. This recheck
+     * does not guarantee electrical timing; it prevents publishing a lost route. */
+    if (NT_SUCCESS(status) && (!RouteOnline(parent) ||
+        !lease->Peripheral.IsActive(lease->Peripheral.Header.Context, lease)))
+        status = STATUS_DEVICE_NOT_READY;
     if (NT_SUCCESS(status)) SetPositionAllowed(parent, lease, TRUE);
     else {
         lease->Faulted = TRUE;
