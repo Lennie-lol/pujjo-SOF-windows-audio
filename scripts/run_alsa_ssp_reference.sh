@@ -30,3 +30,17 @@ python3 "$root/scripts/generate_pujjo_ssp_candidate.py" \
 python3 "$root/tests/run_nhlt_bounds_tests.py" --candidate-dir "$out"
 python3 "$root/scripts/audit_pujjo_rev3_nhlt.py" "$out"
 printf '%s\n' "$rev" > "$out/alsa-revision.txt"
+
+# Independently generate a standalone DMIC0 review payload with untouched
+# upstream filter and register calculations. No approved NHLT is produced.
+cc -std=gnu11 -O2 -ffunction-sections -fdata-sections \
+    -I"$tmp" -I"$nhlt" \
+    "$root/tests/alsa_dmic_reference.c" "$nhlt/dmic/dmic-process.c" \
+    "$nhlt/dmic/dmic-debug.c" -Wl,--gc-sections -lasound \
+    -o "$tmp/dmic-encoder"
+mkdir -p "$out/dmic"
+"$tmp/dmic-encoder" "$out/dmic/dmic0-reference.bin"
+"$tmp/dmic-encoder" "$tmp/dmic0-second.bin"
+cmp "$out/dmic/dmic0-reference.bin" "$tmp/dmic0-second.bin"
+python3 "$root/scripts/audit_pujjo_dmic_reference.py" \
+    "$out/dmic/dmic0-reference.bin" "$out/dmic/dmic0-review.json"

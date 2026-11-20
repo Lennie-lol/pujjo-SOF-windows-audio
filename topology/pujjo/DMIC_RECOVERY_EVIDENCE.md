@@ -24,3 +24,22 @@ Recovery DSP image sof-adl-n.ri is 725760 bytes, SHA-256 56f64335f87ff20345e20e1
 Current AudioSelectFormat in PujjoAudioBus.c requires stereo at 48 kHz. Recovery PCM99 requires four-channel S32_LE while UCM maps logical microphone devices from that stream. Do not simply change the endpoint channel count or discard a PDM controller. Review IPC4 DMIC encoder input, gateway attributes and FIR/decimation configuration, and verify either supported four-channel capture with explicit channel selection or a separately justified stereo hardware configuration. Exact active physical mics and final PDM clock are not demonstrated by these topology tokens; the min/max bounds do not select a frequency.
 
 Status: recovery configuration decoded, not an IPC4 gateway payload, not hardware qualification. Keep fallback and activation guards unchanged. No original files or private paths committed.
+
+## Independent IPC4-era reference encoder
+
+SOF v2.12 topology2/platform/intel/dmic-default.conf explicitly names
+38.4 MHz and driver version 1 for TGL/ADL. Use that independently sourced
+IO clock with the recovery's bounds and four-channel geometry. The pinned
+ALSA v1.2.13 encoder generates the complete DMIC0 reference, including
+CIC/FIR register records and coefficients. A separate parser audits the
+serialized fields and exact sample-rate relationship; CI regenerates twice
+and rejects malformed copies. The standalone FIFO0 reference intentionally
+does not configure FIFO1. The upstream encoder's 16 ms clock-on delay is
+distinct from the source topology's 200 ms unmute ramp; this is NOT
+proof of equivalent mute behavior on the running DSP.
+
+The firmware catalog test now also reports the actual pinned firmware's
+768-byte (4ch/32bit/48kHz, 1ms) copier/gain plan without assuming support.
+The existing stereo requirements are unchanged. These offline references
+are not a Windows endpoint or fallback table; channel layout, exact firmware
+interpretation and buffer budgets still need review before driver integration.

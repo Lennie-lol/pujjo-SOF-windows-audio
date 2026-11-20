@@ -72,16 +72,16 @@ int main(int argc, char **argv) {
     }
     assert(p[0].module.module_id!=p[1].module.module_id);
     int dmic_supported=0;
-    for(unsigned j=0;j<2;++j) {
-        PJ_DWORD chunk=j?384u:192u, cp=0,gp=0;
+    for(unsigned j=0;j<3;++j) {
+        PJ_DWORD chunk=j==2?768u:(j?384u:192u), cp=0,gp=0;
         pj_firmware_config c={0},g={0};
         pj_catalog_status a=pj_firmware_plan_ll(&p[0],chunk,chunk,&c,&cp);
         pj_catalog_status b=pj_firmware_plan_ll(&p[1],chunk,chunk,&g,&gp);
         int supported=a==PJ_CATALOG_OK && b==PJ_CATALOG_OK && 2u*cp+gp<=20u;
         printf("chunk=%u supported=%d copier_status=%d gain_status=%d copier_pages=%u gain_pages=%u copier_cpc=%u gain_cpc=%u\n",
             chunk,supported,(int)a,(int)b,cp,gp,c.cpc,g.cpc);
-        if(supported)dmic_supported=1;
-        if(j)assert(supported); /* all analog routes use stereo 32-bit at 48kHz */
+        if(j<2 && supported)dmic_supported=1;
+        if(j==1)assert(supported); /* all analog routes use stereo 32-bit at 48kHz */
     }
     assert(dmic_supported);
     free(image);
