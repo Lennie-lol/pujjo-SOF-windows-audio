@@ -104,3 +104,39 @@ int PujjoReadMemoryBar(const PJ_DWORD bars[6], PJ_DWORD index,
     }
     return 0;
 }
+
+/* The diagnostic is scoped to the one recovery-evidenced baseboard revision.
+ * Require a complete unambiguous table rather than a matching first record.
+ * SMBIOS Type 2 version (revision) string index is byte 6. */
+int PujjoMatchRawSmbiosRev3(const PJ_BYTE *raw, PJ_SIZE raw_size)
+{
+    PJ_SIZE size, pos, end;
+    unsigned boards = 0;
+    int match = 0;
+    if (!raw || raw_size < 8) return 0;
+    size = (PJ_SIZE)raw[4] | ((PJ_SIZE)raw[5] << 8) |
+           ((PJ_SIZE)raw[6] << 16) | ((PJ_SIZE)raw[7] << 24);
+    if (!size || size != raw_size - 8) return 0;
+    end = raw_size;
+    for (pos = 8; pos < end;) {
+        const PJ_BYTE *hdr = raw + pos;
+        PJ_SIZE len, start, next;
+        if (end - pos < 4) return 0;
+        len = hdr[1];
+        if (len < 4 || len > end - pos) return 0;
+        start = pos + len;
+        next = start;
+        while (next + 1 < end && !(raw[next] == 0 && raw[next+1] == 0)) ++next;
+        if (next + 1 >= end) return 0;
+        if (hdr[0] == 2) {
+            if (++boards != 1 || len < 8) return 0;
+            match = smbios_string_equals(raw + start, next + 2 - start, hdr[4], "Google") &&
+                    smbios_string_equals(raw + start, next + 2 - start, hdr[5], "Pujjo") &&
+                    smbios_string_equals(raw + start, next + 2 - start, hdr[6], "rev3");
+        }
+        if (hdr[0] == 127)
+            return len == 4 && next == start && next + 2 == end && boards == 1 && match;
+        pos = next + 2;
+    }
+    return 0;
+}

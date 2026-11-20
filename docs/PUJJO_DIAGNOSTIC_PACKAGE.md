@@ -66,3 +66,11 @@ parser lookups, independent reference encoder and the 768-byte firmware
 catalog budget. This is offline qualification, not confirmation of actual
 clocks, physical microphone array, codec identity, GPIO polarity or SSP
 timing. No evaluated hardware profile is promoted in this submission.
+
+The boot-only diagnostic now has a dedicated exact SMBIOS guard for Google
+Pujjo rev3 (not Pujjo1e or another board revision), requiring a single valid
+Type 2 record and end-of-table marker. The PCI subsystem IDs must both be
+zero, matching the recorded Windows inventory. This narrows the diagnostic
+to the documented target; identity checks do not establish physical safety.
+Existing family-level guards for other development variants are unchanged.
+No signing, hardware activation or firmware boot is performed by CI.

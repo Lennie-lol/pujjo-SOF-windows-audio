@@ -40,6 +40,19 @@ static size_t make_smbios(uint8_t *out, size_t capacity,
     return bytes;
 }
 
+static size_t make_rev3(uint8_t *raw, const char *product, const char *revision)
+{
+    size_t n = make_smbios(raw, 512, "Google", product, 0);
+    size_t bytes = strlen(revision) + 1;
+    size_t term = n - 7;
+    memmove(raw + term + bytes, raw + term, 7);
+    memcpy(raw + term, revision, bytes);
+    raw[8 + 6] = 3;
+    n += bytes;
+    raw[4] = (uint8_t)(n-8);
+    return n;
+}
+
 int main(void)
 {
     uint8_t raw[512];
@@ -72,6 +85,26 @@ int main(void)
     len = make_smbios(raw, sizeof(raw), "Google", "Pujjo", 0);
     raw[9] = 255; /* length overruns SMBIOS table */
     EXPECT_FALSE(PujjoMatchRawSmbios(raw, len));
+    len = make_rev3(raw, "Pujjo", "rev3");
+    EXPECT_TRUE(PujjoMatchRawSmbiosRev3(raw,len));
+    EXPECT_FALSE(PujjoMatchRawSmbiosRev3(raw,len-1));
+    EXPECT_FALSE(PujjoMatchRawSmbiosRev3(raw,len+1));
+    raw[14]=0;
+    EXPECT_FALSE(PujjoMatchRawSmbiosRev3(raw,len));
+    len = make_rev3(raw, "Pujjo", "rev2");
+    EXPECT_FALSE(PujjoMatchRawSmbiosRev3(raw,len));
+    len = make_rev3(raw, "Pujjo1e", "rev3");
+    EXPECT_FALSE(PujjoMatchRawSmbiosRev3(raw,len));
+    len = make_rev3(raw, "Pujjo", "rev3");
+    raw[len-6]=3;
+    EXPECT_FALSE(PujjoMatchRawSmbiosRev3(raw,len));
+    len = make_rev3(raw, "Pujjo", "rev3");
+    size_t ep = len-6, board_bytes = ep-8;
+    memmove(raw+ep+board_bytes,raw+ep,6);
+    memcpy(raw+ep,raw+8,board_bytes);
+    len+=board_bytes;
+    raw[4]=(uint8_t)(len-8);
+    EXPECT_FALSE(PujjoMatchRawSmbiosRev3(raw,len));
     PJ_DWORD bars[6] = {0xdeeac004u, 0, 0, 0, 0xdef00004u, 1u};
     PJ_DWORD low = 0, high = 0;
     EXPECT_TRUE(PujjoReadMemoryBar(bars, 0, &low, &high));

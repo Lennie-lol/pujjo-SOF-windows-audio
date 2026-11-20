@@ -210,6 +210,10 @@ SofEvtDevicePrepareHardware(
 
     /* Only the Intel Alder Lake-N 54C8 controller is in scope.
      * Never silently default to another Intel DSP when PCI config access fails. */
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    if (pciConfig.u.type0.SubVendorID != 0 || pciConfig.u.type0.SubSystemID != 0)
+        return STATUS_NOT_SUPPORTED;
+#endif
     if (ctx->VendorId != 0x8086 || ctx->DeviceId != 0x54C8) {
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
                    "[PUJJO] Expected Intel 8086:54C8; actual %04x:%04x. Refusing.\n",

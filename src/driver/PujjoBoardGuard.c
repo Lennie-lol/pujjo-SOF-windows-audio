@@ -25,8 +25,13 @@ BOOLEAN PujjoBoardIdentityMatches(void)
     raw = (PJ_BYTE *)ExAllocatePool2(POOL_FLAG_PAGED, size, 'jPuP');
     if (!raw) return FALSE;
     st = AuxKlibGetSystemFirmwareTable(PUJJO_RSMB_PROVIDER, 0, raw, size, &actual);
-    if (NT_SUCCESS(st) && actual >= 8 && actual <= size)
+    if (NT_SUCCESS(st) && actual >= 8 && actual <= size) {
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+        accepted = PujjoMatchRawSmbiosRev3(raw, actual) ? TRUE : FALSE;
+#else
         accepted = PujjoMatchRawSmbios(raw, actual) ? TRUE : FALSE;
+#endif
+    }
     ExFreePoolWithTag(raw, 'jPuP');
     return accepted;
 }
