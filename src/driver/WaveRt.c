@@ -152,7 +152,7 @@ static NTSTATUS SofWaveRtApplyCachedGain(PSOF_WAVERT_STREAM Stream, BOOLEAN Mute
     if (Mute)
         return SofIpc4SetMute(Stream->DeviceContext, Stream->GainInstance,
             SOF_IPC4_GAIN_ALL_CHANNELS_MASK, TRUE, 0);
-    if (Stream->VolumeLevelDb[0] == Stream->VolumeLevelDb[1])
+    if (Stream->Format.ChannelsCount > 2u || Stream->VolumeLevelDb[0] == Stream->VolumeLevelDb[1])
         return SofIpc4SetVolumeLevel(Stream->DeviceContext, Stream->GainInstance,
             SOF_IPC4_GAIN_ALL_CHANNELS_MASK, Stream->VolumeLevelDb[0]);
     if (Stream->Format.ChannelsCount == 1u)
@@ -234,6 +234,13 @@ static NTSTATUS SofWaveRtCreateStreamCore(
         (Format->ValidBitDepth != 16u && Format->ValidBitDepth != 24u &&
          Format->ValidBitDepth != 32u) ||
         (Format->BitDepth == 32u && Format->ValidBitDepth == 16u))
+        return STATUS_NOT_SUPPORTED;
+    if (Format->ChannelsCount == 4u &&
+        (EndpointType != SOF_ENDPOINT_DMIC_PDM || Format->BitDepth != 32u ||
+         Format->ValidBitDepth != 32u || Format->ChannelMap != SOF_IPC4_CH_MAP_QUAD ||
+         Format->ChannelConfig != SOF_IPC4_CHANNEL_CONFIG_3_POINT_1))
+        return STATUS_NOT_SUPPORTED;
+    if (Format->ChannelsCount != 2u && Format->ChannelsCount != 4u)
         return STATUS_NOT_SUPPORTED;
     if (StreamTag && StreamTag != directionSlot + 1u)
         return STATUS_INVALID_PARAMETER;
@@ -1434,7 +1441,8 @@ NTSTATUS SofWaveRtSetVolume(
     NTSTATUS status = STATUS_SUCCESS;
     ULONG chMask;
 
-    if (Stream == NULL || (Channel != -1 && Channel != 0 && Channel != 1) ||
+    if (Stream == NULL || (Stream->Format.ChannelsCount > 2u && Channel != -1) ||
+        (Channel != -1 && Channel != 0 && Channel != 1) ||
         (Channel == 1 && Stream->Format.ChannelsCount < 2u)) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -1486,6 +1494,7 @@ NTSTATUS SofWaveRtGetVolume(
 )
 {
     if (Stream == NULL || VolumeDbOut == NULL ||
+        (Stream->Format.ChannelsCount > 2u && Channel != -1) ||
         (Channel != -1 && Channel != 0 && Channel != 1) ||
         (Channel == 1 && Stream->Format.ChannelsCount < 2u)) {
         return STATUS_INVALID_PARAMETER;

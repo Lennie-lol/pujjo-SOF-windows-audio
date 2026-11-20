@@ -40,9 +40,17 @@ static BOOLEAN IsPcm(const KSDATAFORMAT *Format)
            IsEqualGUID(Format->Specifier, KSDATAFORMAT_SPECIFIER_WAVEFORMATEX);
 }
 
+/* Raw microphone slots have no proven speaker-position mapping. */
+static ULONG PcmChannelMask(const PUJJO_AUDIO_FORMAT &Format)
+{
+    return Format.Channels == 4u ? 0u : KSAUDIO_SPEAKER_STEREO;
+}
+
 static NTSTATUS ValidateFormat(PKSDATAFORMAT Data, const PUJJO_AUDIO_FORMAT &Expected)
 {
-    if (!Data || Data->FormatSize < sizeof(KSDATAFORMAT_WAVEFORMATEX) || !IsPcm(Data))
+    if ((Expected.Channels != 2u && Expected.Channels != 4u) ||
+        (Expected.Channels == 4u && (Expected.ContainerBits != 32u || Expected.ValidBits != 32u)) ||
+        !Data || Data->FormatSize < sizeof(KSDATAFORMAT_WAVEFORMATEX) || !IsPcm(Data))
         return STATUS_NO_MATCH;
     const WAVEFORMATEX &format = reinterpret_cast<PKSDATAFORMAT_WAVEFORMATEX>(Data)->WaveFormatEx;
     const USHORT block = static_cast<USHORT>(Expected.Channels * (Expected.ContainerBits / 8));
@@ -51,7 +59,7 @@ static NTSTATUS ValidateFormat(PKSDATAFORMAT Data, const PUJJO_AUDIO_FORMAT &Exp
         format.nAvgBytesPerSec != Expected.Rate * block)
         return STATUS_NO_MATCH;
     if (format.wFormatTag == WAVE_FORMAT_PCM)
-        return !format.cbSize && Expected.ContainerBits == Expected.ValidBits ?
+        return Expected.Channels == 2u && !format.cbSize && Expected.ContainerBits == Expected.ValidBits ?
                STATUS_SUCCESS : STATUS_NO_MATCH;
     if (format.wFormatTag != WAVE_FORMAT_EXTENSIBLE || format.cbSize != 22 ||
         Data->FormatSize < sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE))
@@ -59,7 +67,7 @@ static NTSTATUS ValidateFormat(PKSDATAFORMAT Data, const PUJJO_AUDIO_FORMAT &Exp
     const auto extended = reinterpret_cast<const WAVEFORMATEXTENSIBLE *>(&format);
     return IsEqualGUID(extended->SubFormat, KSDATAFORMAT_SUBTYPE_PCM) &&
            extended->Samples.wValidBitsPerSample == Expected.ValidBits &&
-           extended->dwChannelMask == KSAUDIO_SPEAKER_STEREO ?
+           extended->dwChannelMask == PcmChannelMask(Expected) ?
            STATUS_SUCCESS : STATUS_NO_MATCH;
 }
 
@@ -222,17 +230,29 @@ static const KSDATARANGE_AUDIO CaptureRange = {
      STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM), STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)},
     2, 16, 32, 48000, 48000
 };
+static const KSDATARANGE_AUDIO DmicFourRange = {
+    {sizeof(KSDATARANGE_AUDIO), 0, 0, 0, STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+     STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM), STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)},
+    4, 32, 32, 48000, 48000
+};
 static const KSDATARANGE BridgeRange = {
     sizeof(KSDATARANGE), 0, 0, 0, STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
     STATICGUIDOF(KSDATAFORMAT_SUBTYPE_ANALOG), STATICGUIDOF(KSDATAFORMAT_SPECIFIER_NONE)
 };
 static PKSDATARANGE CaptureRanges[] = {(PKSDATARANGE)&CaptureRange};
+static PKSDATARANGE DmicFourRanges[] = {(PKSDATARANGE)&DmicFourRange};
 static PKSDATARANGE BridgeRanges[] = {(PKSDATARANGE)&BridgeRange};
 
 static const PCPIN_DESCRIPTOR WavePins[] = {
     {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
         KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_NONE, &KSCATEGORY_AUDIO, nullptr, 0}},
     {1, 1, 0, nullptr, {0, nullptr, 0, nullptr, 1, CaptureRanges,
+        KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_SINK, &KSCATEGORY_AUDIO, nullptr, 0}}
+};
+static const PCPIN_DESCRIPTOR DmicFourPins[] = {
+    {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
+        KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_NONE, &KSCATEGORY_AUDIO, nullptr, 0}},
+    {1, 1, 0, nullptr, {0, nullptr, 0, nullptr, 1, DmicFourRanges,
         KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_SINK, &KSCATEGORY_AUDIO, nullptr, 0}}
 };
 static const PCPIN_DESCRIPTOR TopologyPins[] = {
@@ -248,6 +268,11 @@ static const GUID WaveCategories[] = {
 static const GUID TopologyCategories[] = {STATICGUIDOF(KSCATEGORY_AUDIO)};
 static const PCFILTER_DESCRIPTOR WaveFilter = {
     0, nullptr, sizeof(PCPIN_DESCRIPTOR), RTL_NUMBER_OF(WavePins), WavePins,
+    0, 0, nullptr, RTL_NUMBER_OF(PinConnections), PinConnections,
+    RTL_NUMBER_OF(WaveCategories), WaveCategories
+};
+static const PCFILTER_DESCRIPTOR DmicFourFilter = {
+    0, nullptr, sizeof(PCPIN_DESCRIPTOR), RTL_NUMBER_OF(DmicFourPins), DmicFourPins,
     0, 0, nullptr, RTL_NUMBER_OF(PinConnections), PinConnections,
     RTL_NUMBER_OF(WaveCategories), WaveCategories
 };
@@ -353,7 +378,8 @@ public:
     STDMETHODIMP GetDescription(PPCFILTER_DESCRIPTOR *Out) override
     {
         if (!Out) return STATUS_INVALID_PARAMETER;
-        *Out = (PPCFILTER_DESCRIPTOR)(IsCaptureRole(m_format.Role) ? &WaveFilter : &RenderFilter);
+        *Out = (PPCFILTER_DESCRIPTOR)(m_format.Role == PujjoAudioDmic && m_format.Channels == 4u ?
+            &DmicFourFilter : IsCaptureRole(m_format.Role) ? &WaveFilter : &RenderFilter);
         return STATUS_SUCCESS;
     }
     STDMETHODIMP Init(PUNKNOWN, PRESOURCELIST, PPORTWAVERT Port) override
@@ -404,7 +430,7 @@ public:
         format.Format.nAvgBytesPerSec = m_format.Rate * format.Format.nBlockAlign;
         format.Format.cbSize = 22;
         format.Samples.wValidBitsPerSample = m_format.ValidBits;
-        format.dwChannelMask = KSAUDIO_SPEAKER_STEREO;
+        format.dwChannelMask = PcmChannelMask(m_format);
         format.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
         output->DataFormat.SampleSize = format.Format.nBlockAlign;
         return STATUS_SUCCESS;

@@ -73,6 +73,9 @@ int main(void) {
     assert(!pj_pcm_notification_ring(48000u,2u,24u,24u,65536u,&ring,&ms));
     assert(!pj_pcm_notification_ring(48000u,2u,32u,24u,0u,&ring,&ms));
     assert(ring==66048u && ms==86u);
+    assert(pj_pcm_notification_ring(48000u,4u,32u,32u,65536u,&ring,&ms));
+    assert(pj_pcm_period(48000u,4u,32u,32u,ms,ring,&period_bytes));
+    assert(period_bytes==768u*ms && ring==2u*period_bytes && ring>=65536u);
     puts("PASS: DMA carry, span overflow, alignment, and checked PCM geometry");
     return 0;
 }
@@ -127,6 +130,9 @@ int main(void) {
     SOF_AUDIO_FORMAT_PARAMS f={48000u,32u,24u,2u,0u,0u,0u};
     ULONG n=17u;
     assert(SofIpc4ComputeChunkBytes(&f,&n)==STATUS_SUCCESS && n==384u);
+    f.ChannelsCount=4u; f.ValidBitDepth=32u;
+    assert(SofIpc4ComputeChunkBytes(&f,&n)==STATUS_SUCCESS && n==768u);
+    f.ChannelsCount=2u;
     f.SamplingFrequency=44100u;
     f.BitDepth=16u;
     f.ValidBitDepth=16u;

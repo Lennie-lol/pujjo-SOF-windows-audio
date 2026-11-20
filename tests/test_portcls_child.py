@@ -149,6 +149,18 @@ int main() {
     assert(ValidateFormat(raw,{48000,2,16,16})==0);
     assert(ValidateFormat(raw,{48000,2,16,12})==-1);
     assert(ValidateFormat(nullptr,expected)==-1);
+    PUJJO_AUDIO_FORMAT four{48000,4,32,32};
+    f.WaveFormatExt={{0xfffe,4,48000,768000,16,32,22},{32},0,2};
+    assert(ValidateFormat(raw,four)==0);
+    assert(PcmChannelMask(four)==0 && PcmChannelMask(expected)==3);
+    f.WaveFormatExt.dwChannelMask=3;
+    assert(ValidateFormat(raw,four)==-1);
+    f.WaveFormatExt.dwChannelMask=0;
+    f.WaveFormatExt.Format.nBlockAlign=8;
+    assert(ValidateFormat(raw,four)==-1);
+    f.WaveFormatExt.Format={1,4,48000,768000,16,32,0};
+    assert(ValidateFormat(raw,four)==-1);
+    assert(ValidateFormat(raw,{48000,4,32,24})==-1);
 }
 '''
 jack_property = port[port.index("static NTSTATUS HandleJackProperty"):port.index("class DmicTopology")]

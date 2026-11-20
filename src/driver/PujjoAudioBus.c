@@ -87,6 +87,15 @@ static NTSTATUS AudioAllocate(PVOID Context, ULONG RequestedBytes, PUJJO_AUDIO_B
 
     SofIpc4BuildDefaultStereoFormat(ctx->AudioFormat.Rate, ctx->AudioFormat.ContainerBits, &format);
     format.ValidBitDepth = ctx->AudioFormat.ValidBits;
+    if (ctx->AudioFormat.Channels == 4u) {
+        /* SOF v2.12 DMIC format convention, not physical speaker positions. */
+        format.ChannelsCount = 4u;
+        format.ChannelMap = SOF_IPC4_CH_MAP_QUAD;
+        format.ChannelConfig = SOF_IPC4_CHANNEL_CONFIG_3_POINT_1;
+    } else if (ctx->AudioFormat.Channels != 2u) {
+        status = STATUS_NOT_SUPPORTED;
+        goto Done;
+    }
     if (!pj_pcm_notification_ring(format.SamplingFrequency, format.ChannelsCount,
             format.BitDepth, format.ValidBitDepth, RequestedBytes, &size, &periodMs)) {
         status = STATUS_INVALID_BUFFER_SIZE;
@@ -231,9 +240,8 @@ NTSTATUS SofDisconnectAudioChild(PSOF_DEVICE_CONTEXT Ctx)
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_AUDIO
 static NTSTATUS AudioSelectFormat(PSOF_DEVICE_CONTEXT Ctx)
 {
-    /* Stereo 48 kHz is supported by the capture miniport. Require a
-     * matching, nonempty ACPI blob for the exact DAI format. */
-    static const USHORT samples[][2] = {{16, 16}, {32, 24}, {32, 32}};
+    /* Prefer the recovery-derived native format; legacy stereo requires an exact separate record. */
+    static const USHORT samples[][3] = {{4, 32, 32}, {2, 16, 16}, {2, 32, 24}, {2, 32, 32}};
     SOF_NHLT_CONFIG_KEY key = {
         NHLT_LINK_DMIC, 0, NHLT_DIRECTION_CAPTURE, NHLT_DEVICE_DMIC, 48000, 2, 0, 0
     };
@@ -241,8 +249,9 @@ static NTSTATUS AudioSelectFormat(PSOF_DEVICE_CONTEXT Ctx)
     if (!Ctx->NhltTable || !Ctx->NhltTableSize) return STATUS_NOT_FOUND;
     for (ULONG i = 0; i < RTL_NUMBER_OF(samples); ++i) {
         ULONG bytes = 0;
-        key.ContainerBits = samples[i][0];
-        key.ValidBits = samples[i][1];
+        key.Channels = samples[i][0];
+        key.ContainerBits = samples[i][1];
+        key.ValidBits = samples[i][2];
         NTSTATUS status = SofNhltCopyConfiguration(Ctx->NhltTable, Ctx->NhltTableSize,
                                                    &key, NULL, 0, &bytes);
         if (status == STATUS_BUFFER_TOO_SMALL) {

@@ -138,12 +138,13 @@ int main(void) {
     for(unsigned route=0;route<4;++route) {
         BOOLEAN dmic=route==3,capture=route==1||dmic;
         ULONG bus=route==2?1:0;
+        fmt.ChannelsCount=dmic?4u:2u; fmt.ValidBitDepth=dmic?32u:24u;
         reset(&d);
         assert(call(&d,bus,dmic,capture,&fmt,&h,&g,&a)==0);
         assert(h==1 && g==2 && a==3 && step==10 && !deletes && !active_memory);
         assert(observed.VirtualBusId==bus && observed.Direction==capture);
         assert(observed.LinkType==(dmic?2u:3u) && observed.DeviceType==(dmic?1u:4u));
-        assert(observed.SampleRate==48000 && observed.Channels==2 && observed.ContainerBits==32 && observed.ValidBits==24);
+        assert(observed.SampleRate==48000 && observed.Channels==(dmic?4u:2u) && observed.ContainerBits==32 && observed.ValidBits==(dmic?32u:24u));
         assert(copies[0]==(dmic?12u:capture?13u:14u) && nodes[0]==(bus<<4));
         assert(copies[1]==(capture?15u:16u) && nodes[1]==1);
         assert(bound[0][0]==1 && bound[0][1]==(capture?a:h) && bound[0][2]==2 && bound[0][3]==g);
@@ -161,6 +162,7 @@ int main(void) {
             }
         }
     }
+    fmt.ChannelsCount=2u; fmt.ValidBitDepth=24u;
     reset(&d);assert(call(&d,1,0,1,&fmt,&h,&g,&a)==STATUS_NOT_SUPPORTED && !step);
     assert(call(&d,2,0,0,&fmt,&h,&g,&a)==STATUS_NOT_SUPPORTED && !step);
     assert(call(&d,1,1,1,&fmt,&h,&g,&a)==STATUS_NOT_SUPPORTED && !step);

@@ -43,3 +43,16 @@ The firmware catalog test now also reports the actual pinned firmware's
 The existing stereo requirements are unchanged. These offline references
 are not a Windows endpoint or fallback table; channel layout, exact firmware
 interpretation and buffer budgets still need review before driver integration.
+
+## Four-slot Windows capture plumbing
+
+The capture bus prefers an exact 48 kHz four-channel 32/32 NHLT record,
+with legacy stereo lookup retained. IPC4 uses SOF v2.12 DMIC convention
+CHANNEL_CONFIG_3_POINT_1 (4) and CHANNEL_MAP_3_POINT_1 (0xFFFF3210), from
+platform/intel/dmic-generic.conf and include/common/common_definitions.conf.
+Windows exposes raw slots with channel mask zero rather than inferred geometry.
+PortCls advertises a distinct four-channel range only for DMIC. Independent
+per-channel volume is rejected on four-channel streams; master gain is available.
+Graph tests cover capture and rollback, PCM tests reject format mismatches,
+and DMA tests check 768 bytes/ms. No channel downmix or front/rear separation
+is implemented yet. Fallback approval, hardware gates and signing are unchanged.
