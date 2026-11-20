@@ -56,3 +56,17 @@ per-channel volume is rejected on four-channel streams; master gain is available
 Graph tests cover capture and rollback, PCM tests reject format mismatches,
 and DMA tests check 768 bytes/ms. No channel downmix or front/rear separation
 is implemented yet. Fallback approval, hardware gates and signing are unchanged.
+
+## Complete replacement candidate
+
+The pinned encoder workflow now assembles complete-candidate-only.nhlt and
+complete-candidate-review.json in the portable results. It preserves all
+three reviewed SSP records and adds DMIC0 capture, 48 kHz, 4 channels,
+32-bit container and valid width. The Intel DMIC ID AE20 is from ALSA's
+nhlt.h; device type is the Windows parser's DMIC value 1. Generic endpoint
+capability and zero channel mask intentionally avoid claiming physical
+microphone geometry. The production NHLT parser tests exact binary payload
+lookup for all four routes, wrong formats/directions, truncated data and
+checksum corruption. No reviewed header is generated or enabled, no native
+ACPI override or analog approval is installed. Full hardware qualification
+and physical microphone/channel identification remain outstanding.

@@ -63,7 +63,11 @@ const_names = ("ssp_table", "ssp0_expected", "ssp1_expected")
 args_parser = argparse.ArgumentParser(description=__doc__)
 args_parser.add_argument("--candidate-dir", type=Path,
                          help="Test the actual review-only ALSA comparison artifacts")
+args_parser.add_argument("--complete", action="store_true",
+                         help="Test the combined four-route candidate")
 args = args_parser.parse_args()
+if args.complete and args.candidate_dir is None:
+    args_parser.error("--complete requires --candidate-dir")
 if args.candidate_dir is None:
     ssp0, ssp1 = blob(0), blob(1)
     ssp_table, _ = build(table(0, ssp0), table(1, ssp1), ssp0, ssp1)
@@ -81,6 +85,14 @@ else:
         raise ValueError("candidate NHLT differs from verified encoder comparison")
 fixture = "\n".join("static const UCHAR %s[] = {%s};" % (name, ",".join(map(str, data)))
                     for name, data in zip(const_names, (ssp_table, ssp0, ssp1))) + "\n"
+if args.complete:
+    from assemble_pujjo_complete_nhlt import audit
+    complete = (folder / "complete-candidate-only.nhlt").read_bytes()
+    dmic = (folder / "dmic/dmic0-reference.bin").read_bytes()
+    audit(complete, ssp_table, dmic)
+    fixture += "#define TEST_COMPLETE_NHLT 1\n"
+    fixture += "\n".join("static const UCHAR %s[] = {%s};" % (name, ",".join(map(str,data)))
+                         for name,data in (("complete_table",complete),("dmic_expected",dmic))) + "\n"
 analog_source = (root / "src/driver/PujjoAnalog.c").read_text()
 analog_helpers = analog_source[analog_source.index("static ULONG SspWord"):
                                analog_source.index("/* Firmware may acknowledge RUN")]
@@ -262,8 +274,51 @@ static void test_generated_ssp(void) {
     assert(!NT_SUCCESS(VerifySspConfiguration(&d,&p)));
     puts("PASS: candidate NHLT through production parser and analog profile verifier, all three routes");
 }
+#ifdef TEST_COMPLETE_NHLT
+static void test_complete(void) {
+    SOF_NHLT_INFO info;
+    ULONG length=0;
+    UCHAR payload[sizeof(dmic_expected)], damaged[sizeof(complete_table)];
+    SOF_NHLT_CONFIG_KEY key={NHLT_LINK_DMIC,0,NHLT_DIRECTION_CAPTURE,NHLT_DEVICE_DMIC,48000,4,32,32};
+    assert(SofNhltParse(complete_table,sizeof(complete_table),&info)==STATUS_SUCCESS);
+    assert(info.TotalEndpoints==4u && info.DmicEndpointsCount==1u && info.SspEndpointsCount==3u);
+    assert(info.Dmic.Present && info.Dmic.ChannelCount==4u && info.Dmic.BitDepth==32u);
+    assert(info.Dmic.SampleRate==48000u && info.ExternalCodecPresent && !info.SdwEndpointsCount);
+    assert(SofNhltCopyConfiguration(complete_table,sizeof(complete_table),&key,NULL,0,&length)==STATUS_BUFFER_TOO_SMALL);
+    assert(length==sizeof(dmic_expected));
+    memset(payload,0xa5,sizeof(payload));
+    assert(SofNhltCopyConfiguration(complete_table,sizeof(complete_table),&key,payload,sizeof(payload)-1,&length)==STATUS_BUFFER_TOO_SMALL);
+    assert(payload[0]==0xa5);
+    assert(SofNhltCopyConfiguration(complete_table,sizeof(complete_table),&key,payload,sizeof(payload),&length)==STATUS_SUCCESS);
+    assert(length==sizeof(dmic_expected) && !memcmp(payload,dmic_expected,length));
+    key.Channels=2;
+    assert(SofNhltCopyConfiguration(complete_table,sizeof(complete_table),&key,payload,sizeof(payload),&length)==STATUS_NOT_FOUND);
+    key.Channels=4;key.ValidBits=24;
+    assert(SofNhltCopyConfiguration(complete_table,sizeof(complete_table),&key,payload,sizeof(payload),&length)==STATUS_NOT_FOUND);
+    key.ValidBits=32;key.VirtualBusId=1;
+    assert(SofNhltCopyConfiguration(complete_table,sizeof(complete_table),&key,payload,sizeof(payload),&length)==STATUS_NOT_FOUND);
+    key.VirtualBusId=0;key.Direction=NHLT_DIRECTION_RENDER;
+    assert(SofNhltCopyConfiguration(complete_table,sizeof(complete_table),&key,payload,sizeof(payload),&length)==STATUS_NOT_FOUND);
+    key=(SOF_NHLT_CONFIG_KEY){NHLT_LINK_SSP,0,NHLT_DIRECTION_RENDER,NHLT_DEVICE_I2S,48000,2,32,24};
+    for(unsigned route=0;route<3;++route) {
+        key.VirtualBusId=route==2;key.Direction=route==1?NHLT_DIRECTION_CAPTURE:NHLT_DIRECTION_RENDER;
+        assert(SofNhltCopyConfiguration(complete_table,sizeof(complete_table),&key,payload,sizeof(payload),&length)==STATUS_SUCCESS);
+        assert(length==96u && !memcmp(payload,route==2?ssp1_expected:ssp0_expected,96));
+    }
+    key.Direction=NHLT_DIRECTION_CAPTURE;
+    assert(SofNhltCopyConfiguration(complete_table,sizeof(complete_table),&key,payload,sizeof(payload),&length)==STATUS_NOT_FOUND);
+    memcpy(damaged,complete_table,sizeof(damaged));damaged[sizeof(damaged)-1]^=1;
+    assert(SofNhltParse(damaged,sizeof(damaged),&info)==STATUS_INVALID_PARAMETER);
+    memcpy(damaged,complete_table,sizeof(damaged));fix_checksum(damaged,sizeof(damaged)-4u);
+    assert(SofNhltParse(damaged,sizeof(damaged)-4u,&info)==STATUS_INVALID_PARAMETER);
+    puts("PASS: production parser resolves all four exact candidate routes and rejects incorrect formats");
+}
+#endif
 int main(void) {
     test_lookup();
+#ifdef TEST_COMPLETE_NHLT
+    test_complete();
+#endif
     test_generated_ssp();
     UCHAR bytes[1200]={0}; SOF_NHLT_INFO info;
     const ULONG first=(ULONG)sizeof(ACPI_NHLT_HEADER)+1u;
