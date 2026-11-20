@@ -16,6 +16,14 @@ jobs:
         run: python3 tests/run_offline_suite.py --logs build-logs/offline
       - name: Compiler, sanitizer and static analyzer matrix
         run: python3 tests/run_compiler_matrix.py
+      - name: Verify real pinned ADL-N firmware manifest and audio module budgets
+        run: |
+          firmware="$RUNNER_TEMP/sof-adl-n.ri"
+          curl --fail --silent --show-error --location --retry 2 --max-time 120 \
+            'https://raw.githubusercontent.com/thesofproject/sof-bin/fcd5ae85ead7ecd67ff199335b61fac825843ca0/v2.12.x/sof-ipc4-v2.12/adl-n/intel-signed/sof-adl-n.ri' \
+            --output "$firmware"
+          python3 tests/verify_pinned_adln_firmware.py "$firmware" build-logs/firmware-candidate.json
+          PUJJO_FIRMWARE_TEST_FILE="$firmware" python3 tests/run_loader_transport_tests.py
       - name: Install ALSA encoder build dependency
         run: |
           sudo apt-get update -q
