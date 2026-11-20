@@ -52,3 +52,15 @@ verify source selectors against the running ADL-N firmware, M/N state and
 reserved fields, then qualify on-device timing and peripherals. The output
 is not automatically consumed by the Windows build. The empty approved
 analog profile table and all activation guards remain unchanged.
+
+## Pujjo rev3 offline candidate audit
+
+User-reported Windows inventory identifies Google Pujjo rev3 with
+MrChromebox-2609.0, build 26300, DSP 8086:54c8 and the RTL5682 and RTL1019
+nodes under the working 8086:54eb I2C controller. The Windows NHLT query
+returned 1168 (not found). These observations are board identity evidence,
+not an electrical qualification. CI now independently audits the exact
+three SSP endpoint records against the fixed candidate and regenerates the
+complete table from the pinned ALSA encoder outputs. The JSON audit makes
+missing DMIC0 explicit. No DMIC gateway bytes have been fabricated and no
+reviewed kernel header or analog approval has been emitted.

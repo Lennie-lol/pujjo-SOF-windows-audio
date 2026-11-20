@@ -72,6 +72,36 @@ class Prepare(unittest.TestCase):
         self.assertEqual(pos, len(result))
         self.assertEqual(set(report["records"][2]["clock_differences"]), {"mdivctlr", "mdivr"})
 
+    def test_rev3_exact_table_audit(self):
+        from audit_pujjo_rev3_nhlt import audit
+        from generate_pujjo_ssp_candidate import candidate
+        a,b=candidate(0),candidate(1)
+        data,_=build(table(0,a),table(1,b),a,b)
+        self.assertEqual(len(audit(data)),3)
+        def changed(index):
+            bad=bytearray(data)
+            bad[index]^=1
+            bad[9]=0
+            bad[9]=-sum(bad)&255
+            return bytes(bad)
+        for offset in (36,37,37+4,37+ENDPOINT.size,
+                       37+ENDPOINT.size+7+20,37+ENDPOINT.size+7+WAVE.size,
+                       len(data)-1):
+            with self.subTest(offset=offset), self.assertRaises(ValueError):
+                audit(changed(offset))
+        with self.assertRaises(ValueError):
+            audit(data[:-1])
+        with self.assertRaises(ValueError):
+            audit(data+bytes(1))
+        # Repaired checksum does not legalize duplicate routes.
+        bad=bytearray(data)
+        ep=struct.unpack_from("<I",data,37)[0]
+        bad[37+ep:37+2*ep]=bad[37:37+ep]
+        bad[9]=0
+        bad[9]=-sum(bad)&255
+        with self.assertRaises(ValueError):
+            audit(bytes(bad))
+
     def test_reject_nonclock_changes(self):
         base = blob(0)
         for index in (0, 3, 12, 17, 20, 21, 22, 23):

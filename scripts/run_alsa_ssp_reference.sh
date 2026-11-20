@@ -28,4 +28,5 @@ cc -std=gnu11 -O2 -ffunction-sections -fdata-sections \
 python3 "$root/scripts/generate_pujjo_ssp_candidate.py" \
     "$out/ssp0-reference.nhlt" "$out/ssp1-reference.nhlt" "$out"
 python3 "$root/tests/run_nhlt_bounds_tests.py" --candidate-dir "$out"
+python3 "$root/scripts/audit_pujjo_rev3_nhlt.py" "$out"
 printf '%s\n' "$rev" > "$out/alsa-revision.txt"
