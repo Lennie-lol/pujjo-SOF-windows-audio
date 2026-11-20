@@ -126,6 +126,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           foreach ($case in @(
             @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_ENABLE_EXPERIMENTAL_AUDIO /DPUJJO_ENABLE_EXPERIMENTAL_ANALOG' },
+            @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_DSP_BOOT_DIAGNOSTIC'; Name='dsp-boot-only' },
             @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_READONLY_PROBE'; Name='codec-identity' },
             @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_CONTROL'; Name='codec-runtime' },
             @{ Project='pujjo_rt1019_probe'; Defines='/DPJ1019_ENABLE_CONTROL'; Name='amp-runtime' }
@@ -192,6 +193,21 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $revision = (git rev-parse HEAD).Trim()
           ./scripts/Stage-PujjoDiagnosticPackage.ps1 -BinaryDirectory "$env:RUNNER_TEMP/guarded-codec-identity/bin" -OutputDirectory "$env:RUNNER_TEMP/pujjo-codec-identity" -SourceRevision $revision -CodecIdentity
+      - name: Stage separate DSP boot-only submission
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:CL = ''
+          $revision = (git rev-parse HEAD).Trim()
+          ./scripts/Stage-PujjoDspBootDiagnostic.ps1 -BinaryDirectory "$env:RUNNER_TEMP/guarded-dsp-boot-only/bin" -OutputDirectory "$env:RUNNER_TEMP/pujjo-dsp-boot-only" -SourceRevision $revision
+      - name: Upload unsigned DSP boot-only submission input
+        if: success() && matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pujjo-DSP-boot-only-UNSIGNED-SUBMISSION
+          path: ${{ runner.temp }}/pujjo-dsp-boot-only/
+          if-no-files-found: error
       - name: Upload unsigned codec identity submission input
         if: success() && matrix.configuration == 'Release'
         uses: actions/upload-artifact@v4

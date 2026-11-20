@@ -43,3 +43,26 @@ Before binding a signed diagnostic, export the Windows firmware NHLT from PowerS
 ```
 
 Use the resource diagnostic first and record its translated I2C, GPIO, and interrupt descriptors through kernel debug capture. Use the separately signed codec identity variant only after reviewing the resource capture and rehearsing rollback. It reads the codec ID in D0 and reports the value and status through kernel debug output. Opaque GPIO connection IDs identify resources but supply no SDB polarity evidence. Neither package contains a DSP, an audio endpoint, or runtime codec or amplifier control.
+
+## DSP boot-only submission
+
+A separate guarded x64 build defines PUJJO_DSP_BOOT_DIAGNOSTIC alongside
+the DSP boot and reviewed firmware compile flags, never the audio/analog
+or replacement NHLT flags. Its INF uses forced-safe defaults. PrepareHardware
+requires a successfully consumed one-shot persistent canary; D0Entry consumes
+the in-memory authorization before invoking the loader. Failed canary file
+disposition, failed token write or failed registry flush does not arm the
+single-shot path. Existing hardware identity checks and loader digest gates
+remain in place. No package changes hardware state during CI.
+
+The Release artifact contains INF, SYS, unsigned catalog and hashes. It
+does not contain a firmware binary, installation/arming script, or approved
+replacement topology. The exact pinned ADL-N firmware is a separate
+prerequisite. Microsoft signing, final catalog checks, recovery rehearsal,
+physical hardware review and explicit authorization remain blockers to use.
+
+The four-route 2453-byte NHLT candidate passed CI #119, including real
+parser lookups, independent reference encoder and the 768-byte firmware
+catalog budget. This is offline qualification, not confirmation of actual
+clocks, physical microphone array, codec identity, GPIO polarity or SSP
+timing. No evaluated hardware profile is promoted in this submission.

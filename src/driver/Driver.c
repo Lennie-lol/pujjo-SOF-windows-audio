@@ -161,11 +161,11 @@ SofCheckAndConsumeCanaryFile(void)
     );
 
     if (NT_SUCCESS(canStatus) && canHandle != NULL) {
-        filePresent = TRUE;
         FILE_DISPOSITION_INFORMATION dispInfo;
         dispInfo.DeleteFile = TRUE;
-        ZwSetInformationFile(canHandle, &canIoStatus, &dispInfo, sizeof(dispInfo), FileDispositionInformation);
-        ZwClose(canHandle);
+        canStatus = ZwSetInformationFile(canHandle, &canIoStatus, &dispInfo, sizeof(dispInfo), FileDispositionInformation);
+        filePresent = NT_SUCCESS(canStatus);
+        if (!NT_SUCCESS(ZwClose(canHandle))) filePresent = FALSE;
     }
 
     return filePresent;
@@ -234,12 +234,10 @@ DriverEntry(
                    "[SOF] Safety: Forced safe mode active (SafeBootPolicy=0). Audio bypassed.\n");
     } else if (g_SafeBootPolicy == SOF_SAFE_BOOT_SINGLE_SHOT) {
         /* SOF_SAFE_BOOT_SINGLE_SHOT: Requires BOTH token==1 AND \SystemRoot\sof_canary.bin */
-        if (bootSafetyToken == 1 && canaryFilePresent) {
+        if (bootSafetyToken == 1 && canaryFilePresent && paramsKey != NULL &&
+            NT_SUCCESS(SofWriteRegistryDword(paramsKey, L"BootSafetyToken", 0)) &&
+            NT_SUCCESS(ZwFlushKey(paramsKey))) {
             /* ATOMIC DISARM: Immediately clear token in registry and flush to guarantee safe next boot */
-            if (paramsKey != NULL) {
-                SofWriteRegistryDword(paramsKey, L"BootSafetyToken", 0);
-                ZwFlushKey(paramsKey);
-            }
             g_CanaryArmed = TRUE;
             SofLogBreadcrumb("[Safety] Canary file consumed & token reset to 0 in DriverEntry! Armed for single boot.\n");
             DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,

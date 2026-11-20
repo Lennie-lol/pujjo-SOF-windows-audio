@@ -35,6 +35,12 @@
 
 NTSYSAPI NTSTATUS NTAPI ZwFlushKey(_In_ HANDLE KeyHandle);
 
+#if defined(PUJJO_DSP_BOOT_DIAGNOSTIC) && (!defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) || \
+    !defined(PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED) || defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO) || \
+    defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG) || defined(PUJJO_REVIEWED_TOPOLOGY_NHLT))
+#error DSP diagnostic must be boot-only and must not consume a replacement NHLT
+#endif
+
 static BOOLEAN SofHardwareDevelopmentAllowed(VOID)
 {
 #if defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)
@@ -166,6 +172,10 @@ SofEvtDevicePrepareHardware(
     char msg[256];
 
     if (!SofHardwareDevelopmentAllowed()) return STATUS_NOT_SUPPORTED;
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    if (!g_CanaryArmed || g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT)
+        return STATUS_NOT_SUPPORTED;
+#endif
 
     /* Pujjo-only fork. Fail closed before touching PCI registers. */
     if (!PujjoBoardIdentityMatches()) {
@@ -537,6 +547,14 @@ SofEvtDeviceD0Entry(
 
     /* The loader is the sole owner of the cold firmware boot sequence.
      * No speculative HDMI/HDA/SSP graph creation or codec programming here. */
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    if (!g_CanaryArmed || g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT ||
+        ctx->EnablePortCls != 0)
+        return STATUS_NOT_SUPPORTED;
+    /* Consume the in-memory authorization too, before any firmware boot.
+     * DriverEntry already consumed persistent authorization. */
+    g_CanaryArmed = FALSE;
+#endif
     bootStatus = SofStartFirmwareBoot(ctx, NULL);
     if (!NT_SUCCESS(bootStatus)) {
         SofLogBreadcrumb("[Power] D0 entry aborted: firmware boot failed.\n");

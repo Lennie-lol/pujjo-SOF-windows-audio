@@ -47,3 +47,24 @@ for setting in ("ArmedTesting", "EnablePortCls", "EnableUsbOffload", "EnableS0Id
     assert f"HKR,Parameters,{setting},0x00010001,0" in template
 assert "SimulateJackState" not in template
 assert "SimulateJackState" not in (driver_dir / "HdaVerb.c").read_text()
+
+# Diagnostic-only compile guard and one-shot consumption must precede hardware access.
+driver = (driver_dir / "Driver.c").read_text()
+assert 'filePresent = NT_SUCCESS(canStatus);' in driver
+assert 'NT_SUCCESS(SofWriteRegistryDword(paramsKey, L"BootSafetyToken", 0))' in driver
+assert 'NT_SUCCESS(ZwFlushKey(paramsKey))' in driver
+assert '#error DSP diagnostic must be boot-only' in device
+prepare=device.split("SofEvtDevicePrepareHardware(",1)[1]
+assert prepare.index('g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT') < prepare.index('WdfFdoQueryForInterface')
+d0=device.split("SofEvtDeviceD0Entry(",1)[1]
+assert d0.index('g_CanaryArmed = FALSE;') < d0.index('bootStatus = SofStartFirmwareBoot(ctx, NULL);')
+diagnostic=(root / "packaging/diagnostics/pujjo_dsp_boot_only.inx").read_text()
+for setting in ("SafeBootPolicy","BootSafetyToken","ArmedTesting","EnablePortCls","EnableUsbOffload","EnableS0Idle"):
+    assert f"HKR,Parameters,{setting},0x00010001,0" in diagnostic
+assert "AddInterface=" not in diagnostic
+assert "Pujjo-DSP-boot-only-UNSIGNED-SUBMISSION" in workflow
+assert "Name='dsp-boot-only'" in workflow
+stage=(root / "scripts/Stage-PujjoDspBootDiagnostic.ps1").read_text()
+assert "InfVerif" in stage and "Inf2Cat" in stage
+assert "pnputil" not in stage.lower()
+print("PASS: separate forced-safe DSP boot-only submission and fail-closed single-shot guards")
