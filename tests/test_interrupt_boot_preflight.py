@@ -180,3 +180,58 @@ assert boot.index('SofStopIccmaxDma(Ctx, &iccmax)') < boot.index('KeWaitForSingl
 iccmax=loader.split('static NTSTATUS SofStopIccmaxDma(',1)[1].split('static NTSTATUS SofQueryBootedFirmwareVersion',1)[0]
 assert iccmax.index('if (attempt == 500u) return STATUS_IO_TIMEOUT;') < iccmax.index('Dma->Published = FALSE;') < iccmax.index('SofFreeDmaBuffer(')
 print('PASS: cAVS register transitions reject timeout, missing acknowledgement, and disappearing MMIO')
+
+# Execute actual descriptor readback logic against host-only MMIO doubles.
+address_helper = 'static NTSTATUS SofLoaderDmaAddressesMatch(' + loader.split(
+    'static NTSTATUS SofLoaderDmaAddressesMatch(', 1)[1].split('\n}', 1)[0] + '\n}\n'
+address_fixture = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stddef.h>
+typedef uint32_t ULONG;
+typedef unsigned char *PUCHAR;
+typedef int NTSTATUS;
+#define MAXULONG UINT32_MAX
+#define STATUS_SUCCESS 0
+#define STATUS_DEVICE_NOT_READY -1
+#define SOF_HDA_ADSP_REG_SD_BDLPL 0u
+#define SOF_HDA_ADSP_REG_SD_BDLPU 4u
+static unsigned char registers[8];
+static ULONG low, high, reads;
+static ULONG readl(PUCHAR address) {
+    ++reads;
+    if(address==registers) return low;
+    assert(address==registers+4);
+    return high;
+}
+'''
+address_cases = r'''
+int main(void) {
+    assert(SofLoaderDmaAddressesMatch(NULL,0,0)==STATUS_DEVICE_NOT_READY && reads==0);
+    low=0x123480u; high=2;
+    assert(SofLoaderDmaAddressesMatch(registers,low,high)==0 && reads==2);
+    assert(SofLoaderDmaAddressesMatch(registers,0,0)==STATUS_DEVICE_NOT_READY);
+    assert(SofLoaderDmaAddressesMatch(registers,low,0)==STATUS_DEVICE_NOT_READY);
+    assert(SofLoaderDmaAddressesMatch(registers,0,high)==STATUS_DEVICE_NOT_READY);
+    low=MAXULONG;
+    assert(SofLoaderDmaAddressesMatch(registers,low,high)==STATUS_DEVICE_NOT_READY);
+    low=0; high=MAXULONG;
+    assert(SofLoaderDmaAddressesMatch(registers,low,high)==STATUS_DEVICE_NOT_READY);
+    high=0;
+    assert(SofLoaderDmaAddressesMatch(registers,0,0)==0);
+    return 0;
+}
+'''
+with tempfile.TemporaryDirectory(prefix='pj_loader_bdl_') as d:
+    src=Path(d)/'test.c';exe=Path(d)/('test.exe' if os.name=='nt' else 'test')
+    src.write_text(address_fixture+address_helper+address_cases)
+    subprocess.run([os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror',
+                    *shlex.split(os.environ.get('CFLAGS','')),str(src),'-o',str(exe)],check=True,timeout=60)
+    subprocess.run([str(exe)],check=True,timeout=10)
+assert boot.index('dmaConfigured = TRUE;') < boot.index('SofLoaderDmaAddressesMatch(streamRegs,') < boot.index('SofStartIccmaxDma(Ctx, &iccmax)')
+assert stop.index('writel(0, streamRegs + SOF_HDA_ADSP_REG_SD_BDLPU)') < stop.index('SofLoaderDmaAddressesMatch(streamRegs, 0, 0)') < stop.index('dmaConfigured = FALSE;')
+assert 'goto dma_unconfirmed;' in stop.split('SofLoaderDmaAddressesMatch(streamRegs, 0, 0)',1)[1].split('dmaConfigured = FALSE;',1)[0]
+assert iccmax.index('SofLoaderDmaAddressesMatch(Dma->Registers, 0, 0)') < iccmax.index('Dma->Published = FALSE;')
+iccmax_start=loader.split('static NTSTATUS SofStartIccmaxDma(',1)[1].split('static NTSTATUS SofStopIccmaxDma(',1)[0]
+assert iccmax_start.index('SofLoaderDmaAddressesMatch(Dma->Registers,') < iccmax_start.index('SofCodeLoaderWriteControl(Dma->Registers, SOF_HDA_SD_CTL_DMA_START)')
+print('PASS: loader and ICCMAX BDL publication and detachment readback')

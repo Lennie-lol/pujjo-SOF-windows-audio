@@ -826,6 +826,19 @@ static NTSTATUS SofVerifyAdlNIpc4Candidate(PUCHAR Image, ULONG ImageBytes)
 #endif
 
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT
+/* Confirm both halves of the descriptor address, failing closed on loss. */
+static NTSTATUS SofLoaderDmaAddressesMatch(PUCHAR registers, ULONG low, ULONG high)
+{
+    ULONG actualLow, actualHigh;
+    if (!registers) return STATUS_DEVICE_NOT_READY;
+    actualLow = readl(registers + SOF_HDA_ADSP_REG_SD_BDLPL);
+    actualHigh = readl(registers + SOF_HDA_ADSP_REG_SD_BDLPU);
+    if (actualLow == MAXULONG || actualHigh == MAXULONG ||
+        actualLow != low || actualHigh != high)
+        return STATUS_DEVICE_NOT_READY;
+    return STATUS_SUCCESS;
+}
+
 /* cAVS 2.5 ICCMAX boot workaround, as used by the Linux ADL-N
  * descriptor. A temporary capture descriptor keeps the platform guardband
  * active during boot. It is unrelated to microphone routing. */
@@ -904,6 +917,9 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     if (ltrp == 0xffu || (ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK) != SOF_ADLN_LTRP_BOOT_GUARDBAND ||
         ppctl == MAXULONG || !(ppctl & 1u))
         return STATUS_DEVICE_NOT_READY;
+    status = SofLoaderDmaAddressesMatch(Dma->Registers,
+        Dma->Bdl.PhysicalAddress.LowPart, (ULONG)Dma->Bdl.PhysicalAddress.HighPart);
+    if (!NT_SUCCESS(status)) return status;
     SofCodeLoaderWriteControl(Dma->Registers, SOF_HDA_SD_CTL_DMA_START);
     for (ULONG i = 0; i < 500u; ++i) {
         ctl = SofCodeLoaderReadControl(Dma->Registers);
@@ -930,9 +946,11 @@ static NTSTATUS SofStopIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
             KeStallExecutionProcessor(10);
         }
         if (attempt == 500u) return STATUS_IO_TIMEOUT;
-        Dma->Published = FALSE;
         writel(0, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPL);
         writel(0, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPU);
+        status = SofLoaderDmaAddressesMatch(Dma->Registers, 0, 0);
+        if (!NT_SUCCESS(status)) return status;
+        Dma->Published = FALSE;
         WRITE_REGISTER_UCHAR(Dma->Registers + SOF_HDA_ADSP_REG_SD_STS, SOF_HDA_CL_DMA_SD_INT_MASK);
         ppctl = readl(Dma->Ppctl);
         if (ppctl != MAXULONG)
@@ -1169,6 +1187,9 @@ SofStartFirmwareBoot(
     sdOffset = SOF_HDA_ADSP_LOADER_BASE + (streamIndex * SOF_HDA_ADSP_SD_ENTRY_SIZE);
     streamRegs = bar0 + sdOffset;
     dmaConfigured = TRUE;
+    status = SofLoaderDmaAddressesMatch(streamRegs,
+        bdlDma.PhysicalAddress.LowPart, (ULONG)bdlDma.PhysicalAddress.HighPart);
+    if (!NT_SUCCESS(status)) goto boot_failed;
     Ctx->DspNeedsPowerDown = TRUE;
     status = SofStartIccmaxDma(Ctx, &iccmax);
     if (!NT_SUCCESS(status)) goto boot_failed;
@@ -1487,13 +1508,16 @@ stop_dma:
                 status = STATUS_IO_DEVICE_ERROR;
         }
 
-        /* Detach DMA addresses even on an early boot failure. The RUN
-         * handshake above determines whether the common buffers may be freed. */
-        dmaConfigured = FALSE;
+        /* Confirm RUN clear and address detachment before freeing buffers. */
         SofCodeLoaderWriteControl(streamRegs, 0);
         WRITE_REGISTER_UCHAR(streamRegs + SOF_HDA_ADSP_REG_SD_STS, SOF_HDA_CL_DMA_SD_INT_MASK);
         writel(0, streamRegs + SOF_HDA_ADSP_REG_SD_BDLPL);
         writel(0, streamRegs + SOF_HDA_ADSP_REG_SD_BDLPU);
+        if (!NT_SUCCESS(SofLoaderDmaAddressesMatch(streamRegs, 0, 0))) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto dma_unconfirmed;
+        }
+        dmaConfigured = FALSE;
         {
             ULONG intctl = readl(bar0 + SOF_HDA_INTCTL);
             if (intctl == MAXULONG) {
