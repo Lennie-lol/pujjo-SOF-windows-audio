@@ -39,6 +39,7 @@ typedef struct { long long QuadPart; } LARGE_INTEGER;
 #define STATUS_NOT_SUPPORTED -2
 #define STATUS_INVALID_BUFFER_SIZE -3
 #define STATUS_INVALID_DEVICE_STATE -4
+#define STATUS_INVALID_PARAMETER -5
 #define NT_SUCCESS(s) ((s)>=0)
 #define NHLT_LINK_SSP 3
 #define NHLT_DIRECTION_CAPTURE 1
