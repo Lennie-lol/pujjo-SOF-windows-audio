@@ -36,6 +36,35 @@ def candidate(port):
     return blob
 
 
+def audit_clock_plan(blob, port):
+    """Decode clock selectors and validate exact integral recovery geometry.
+
+    This is conditional on unity M/N and the reference cAVS clock source
+    mapping. The running Intel-signed DSP's state is not inferred.
+    """
+    d = decode(blob, port)
+    clocks = {0: 38400000, 1: 24576000}
+    control = d["mdivctlr"]
+    mclk_source = (control >> 16) & 3
+    bclk_source = (control >> 20) & 3
+    if control != (1 | (port << 20)) or d["mdivr"] != 0:
+        raise ValueError("unexpected MCLK/BCLK source or divider")
+    if not d["ssc0"] & (1 << 6):
+        raise ValueError("external clock selection absent")
+    scr = ((d["ssc0"] >> 8) & 0xfff) + 1
+    slot = (d["sspsp"] >> 16) & 0x3f
+    padding = ((d["sspsp"] >> 23) & 3) | (((d["sspsp"] >> 26) & 7) << 2)
+    if slot != 24 + padding or clocks[bclk_source] != 48000 * 2 * slot * scr:
+        raise ValueError("BCLK does not match frame geometry")
+    if clocks[mclk_source] != 19200000 * (d["mdivr"] + 2):
+        raise ValueError("MCLK does not match requested rate")
+    return {"port": port, "mclk_selector": mclk_source, "bclk_selector": bclk_source,
+            "scr_divisor": scr, "mclk_hz": 19200000,
+            "bclk_hz": 48000 * 2 * slot, "slot_bits": slot,
+            "conditional_on_unverified_unity_mn": True,
+            "acs_set": bool(d["ssc0"] & (1 << 30)),
+            "hardware_qualified": False}
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("reference0", type=Path)
@@ -50,6 +79,7 @@ def main():
                    "candidate_ssp0_sha256": digest(a), "candidate_ssp1_sha256": digest(b),
                    "clock_plan": {"mclk_source": "XTAL 38.4 MHz", "mclk_hz": 19200000,
                                   "ssp0_bclk_hz": 2400000, "ssp1_bclk_hz": 3072000},
+                   "decoded_clock_audit": [audit_clock_plan(a, 0), audit_clock_plan(b, 1)],
                    "reservation": "ACS retained pending running-firmware and reserved-bit review"})
     args.output.mkdir(parents=True, exist_ok=True)
     for name, data in (("ssp0-candidate.bin", a), ("ssp1-candidate.bin", b),

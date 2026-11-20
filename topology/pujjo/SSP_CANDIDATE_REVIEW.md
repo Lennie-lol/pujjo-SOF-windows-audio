@@ -64,3 +64,42 @@ three SSP endpoint records against the fixed candidate and regenerates the
 complete table from the pinned ALSA encoder outputs. The JSON audit makes
 missing DMIC0 explicit. No DMIC gateway bytes have been fabricated and no
 reviewed kernel header or analog approval has been emitted.
+
+## Independent clock and peripheral review
+
+Zephyr v4.2.0 drivers/dai/intel/ssp/ssp_regs_v2.h defines MCDSS at
+bits 17:16, MNDSS at 21:20, SCR at 19:8, ECS at bit 6 and ACS at
+bit 30. intel_adsp_cavs25.dtsi identifies the 38.4 MHz and
+24.576 MHz clocks; ssp.c uses divider minus two for non-bypass MCLK,
+and the IPC4 v1.5 clock control accepts one divider. The candidate
+audit now calculates both expected 48 kHz stereo wire clocks from
+the encoded selectors, dividers and pad fields, and rejects mutated
+clock geometry. The full-register clock control is shared, so the
+existing single analog lease remains essential. Unity M/N is an
+assumption, and ACS is retained pending running firmware qualification;
+the reference contains both a FIXME and an ACS assignment.
+
+Linux v6.13 sound/soc/codecs/rt5682s.c supports direct PLLB coefficients
+M=2 N=6 K=3 for 19.2 MHz to 24.576 MHz, corroborating the existing
+planner. Its cold probe also performs supply setup, a minimum 50 ms
+initial wait, identity verification, reset, patching, a 20 ms wait,
+headphone calibration with bounded polling, and bias/charge-pump setup.
+The Windows clocked control path is NOT an equivalent cold initialization:
+it depends on a prequalified analog path and verified identity, then
+journals masked clock/routing changes with reverse-order rollback.
+No qualified board power/calibration program exists yet. A PLL delay
+is not proof of lock; actual padded 25-bit slot and depop behavior
+remain unverified. Do not enable a generic reset/patch sequence.
+
+Linux v6.13 sound/soc/codecs/rt1015p.c matches RTL1019 and uses a
+logical SDB GPIO, first-enable 300 ms delay, disable after playback,
+and recalibration after suspend. Windows uses translated Resource Hub
+IDs with explicit polarity, requires a muted DSP and qualified gain
+limit, and attempts shutdown on failure. The delay corroborates the
+lower bound but does not prove physical calibration or polarity.
+Actual GPIO assignment, safe output level and power sequencing must
+be measured. No amplifier activation or analog profile approval changed.
+
+References: https://github.com/zephyrproject-rtos/zephyr/tree/v4.2.0/drivers/dai/intel/ssp
+https://github.com/torvalds/linux/blob/v6.13/sound/soc/codecs/rt5682s.c
+https://github.com/torvalds/linux/blob/v6.13/sound/soc/codecs/rt1015p.c

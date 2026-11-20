@@ -51,6 +51,21 @@ class Prepare(unittest.TestCase):
         with self.assertRaises(ValueError):
             candidate(2)
 
+    def test_clock_plan_audit(self):
+        from generate_pujjo_ssp_candidate import candidate, audit_clock_plan
+        for port, expected in ((0, 2400000), (1, 3072000)):
+            data = candidate(port)
+            report = audit_clock_plan(data, port)
+            self.assertEqual(report["bclk_hz"], expected)
+            self.assertEqual(report["mclk_hz"], 19200000)
+            self.assertFalse(report["hardware_qualified"])
+            for word, bit in ((21, 16), (21, 20), (21, 1), (23, 0),
+                              (11, 6), (11, 8), (14, 23)):
+                changed = bytearray(data)
+                changed[word*4 + bit//8] ^= 1 << (bit%8)
+                with self.subTest(port=port, word=word, bit=bit), self.assertRaises(ValueError):
+                    audit_clock_plan(changed, port)
+
     def test_windows_metadata_and_payload(self):
         a, b = blob(0), blob(1)
         result, report = build(table(0, a), table(1, blob(1, 0x10000, 0xfff)), a, b)
