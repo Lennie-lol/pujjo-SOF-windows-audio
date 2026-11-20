@@ -187,8 +187,11 @@ static NTSTATUS AudioPosition(PVOID Context, PVOID Stream, PULONG Position)
     PSOF_DEVICE_CONTEXT ctx = Context;
     KIRQL irql;
     NTSTATUS status = STATUS_DEVICE_NOT_READY;
+    if (!Stream || !Position) return STATUS_INVALID_PARAMETER;
     KeAcquireSpinLock(&ctx->AudioPositionLock, &irql);
-    if (ctx->AudioOnline && ctx->AudioPositionEnabled)
+    /* Allocation publishes the pointer before enabling reads; Free disables
+     * and drains this lock before clearing the pointer and freeing memory. */
+    if (ctx->AudioOnline && ctx->AudioPositionEnabled && ctx->DmicStream == Stream)
         status = SofWaveRtGetPosition(Stream, Position);
     KeReleaseSpinLock(&ctx->AudioPositionLock, irql);
     return status;

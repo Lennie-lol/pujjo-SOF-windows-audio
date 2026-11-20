@@ -10,13 +10,16 @@ root = Path(__file__).resolve().parents[1]
 source = (root / "src/driver/PujjoAudioBus.c").read_text()
 callbacks = source[source.index("static NTSTATUS AudioStopCapture("):
                    source.index("static NTSTATUS AudioPosition(")]
+position = source[source.index("static NTSTATUS AudioPosition("):
+                  source.index("static NTSTATUS AudioNotification(")]
 disconnect = source[source.index("NTSTATUS SofDisconnectAudioChild("):
                     source.index("#ifdef PUJJO_ENABLE_EXPERIMENTAL_AUDIO\nstatic NTSTATUS AudioSelectFormat(")]
 prefix = r'''
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-typedef unsigned ULONG;
+typedef unsigned ULONG, *PULONG;
+typedef int KIRQL;
 typedef int NTSTATUS, BOOLEAN;
 typedef void *PVOID;
 #define VOID void
@@ -29,7 +32,7 @@ typedef void *PVOID;
 #define NT_SUCCESS(s) ((s)>=0)
 typedef enum { KSSTATE_STOP, KSSTATE_ACQUIRE, KSSTATE_PAUSE, KSSTATE_RUN } KSSTATE;
 typedef struct { KSSTATE State; int Detached,DescriptorPublished; } STREAM, *PSOF_WAVERT_STREAM;
-typedef struct { STREAM *DmicStream; int AudioOnline,AudioDmaFaulted,Position; } DEVICE, *PSOF_DEVICE_CONTEXT;
+typedef struct { STREAM *DmicStream; int AudioOnline,AudioDmaFaulted,Position,AudioPositionEnabled,AudioPositionLock; } DEVICE, *PSOF_DEVICE_CONTEXT;
 enum { MUTE=1,UNMUTE,RUN,STOP,PAUSE,DETACH,FREE,ACQUIRE };
 static int trace[32],n,fail1,fail2,locked;
 static int event(int op) {
@@ -40,7 +43,10 @@ static int event(int op) {
 static void AudioLock(DEVICE *d) { assert(d&&!locked);locked=1; }
 static void AudioUnlock(DEVICE *d) { assert(d&&locked);locked=0; }
 static void AudioSetOnline(DEVICE *d,int v) { assert(locked);d->AudioOnline=v; }
-static void AudioSetPositionEnabled(DEVICE *d,int v) { assert(locked);d->Position=v; }
+static void AudioSetPositionEnabled(DEVICE *d,int v) { assert(locked);d->Position=d->AudioPositionEnabled=v; }
+static void KeAcquireSpinLock(int *lock,KIRQL *irql) { assert(!*lock);*lock=1;*irql=0; }
+static void KeReleaseSpinLock(int *lock,KIRQL irql) { assert(*lock&&irql==0);*lock=0; }
+static int SofWaveRtGetPosition(STREAM *s,PULONG p) { assert(s&&p);*p=128;return 0; }
 static int SofWaveRtSetMute(STREAM *s,int mute) { assert(s&&!s->Detached);return event(mute?MUTE:UNMUTE); }
 static int SofWaveRtSetState(STREAM *s,KSSTATE state) {
     assert(s&&!s->Detached);
@@ -89,13 +95,21 @@ int main(void) {
     reset();s.State=KSSTATE_RUN;AudioFree(&d,&s);expect((int[]){MUTE,STOP,FREE},3);assert(!d.DmicStream&&!d.Position);
     reset();assert(AudioSetState(&d,&other,KSSTATE_RUN)==STATUS_DEVICE_NOT_READY&&!n);
     assert(AudioSetState(&d,&s,99)==STATUS_INVALID_PARAMETER&&!n);
-    puts("PASS: production DMIC capture start, rollback, faulted stop and detached lease cleanup");
+    reset();assert(AudioSetState(&d,&s,KSSTATE_RUN)==0);
+    ULONG pos=99;
+    assert(AudioPosition(&d,&s,&pos)==0&&pos==128);
+    pos=99;assert(AudioPosition(&d,&other,&pos)==STATUS_DEVICE_NOT_READY&&pos==99);
+    assert(AudioPosition(&d,NULL,&pos)==STATUS_INVALID_PARAMETER);
+    assert(AudioPosition(&d,&s,NULL)==STATUS_INVALID_PARAMETER);
+    AudioFree(&d,&s);
+    assert(AudioPosition(&d,&s,&pos)==STATUS_DEVICE_NOT_READY&&pos==99&&!d.AudioPositionLock);
+    puts("PASS: production DMIC capture lifecycle and position ownership");
 }
 '''
 with tempfile.TemporaryDirectory(prefix="pj_dmic_route_") as tmp:
     src=Path(tmp)/"route.c"
     exe=Path(tmp)/("route.exe" if os.name=="nt" else "route")
-    src.write_text(prefix+callbacks+disconnect+suffix)
+    src.write_text(prefix+callbacks+position+disconnect+suffix)
     subprocess.run([os.environ.get("CC","cc"),"-std=c11","-Wall","-Wextra","-Werror",
                     *shlex.split(os.environ.get("CFLAGS","")),str(src),"-o",str(exe)],check=True,timeout=40)
     subprocess.run([str(exe)],check=True,timeout=15)

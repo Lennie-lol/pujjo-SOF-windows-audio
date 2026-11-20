@@ -15,6 +15,7 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(PUJJO_ANALOG_CHILD, GetAnalogChild)
 
 typedef struct _PUJJO_ANALOG_LEASE {
     PSOF_WAVERT_STREAM Stream;
+    PUJJO_AUDIO_ROLE Role;
     PUJJO_PERIPHERAL_INTERFACE Peripheral;
     PFILE_OBJECT PeripheralFile;
     BOOLEAN PeripheralNeedsShutdown;
@@ -52,6 +53,16 @@ static VOID SetPositionAllowed(PSOF_DEVICE_CONTEXT parent, PUJJO_ANALOG_LEASE *l
     KIRQL irql;
     KeAcquireSpinLock(&parent->AudioPositionLock, &irql);
     lease->PositionAllowed = allowed;
+    KeReleaseSpinLock(&parent->AudioPositionLock, irql);
+}
+
+/* The audio mutex serializes mutations; the position spin lock makes
+ * publication/withdrawal visible to DISPATCH_LEVEL readers. */
+static VOID SetAnalogLease(PSOF_DEVICE_CONTEXT parent, PUJJO_ANALOG_LEASE *lease)
+{
+    KIRQL irql;
+    KeAcquireSpinLock(&parent->AudioPositionLock, &irql);
+    parent->AnalogLease = lease;
     KeReleaseSpinLock(&parent->AudioPositionLock, irql);
 }
 
@@ -287,6 +298,7 @@ static NTSTATUS AnalogAllocate(PVOID context, ULONG requested, PUJJO_AUDIO_BUFFE
         status = STATUS_INSUFFICIENT_RESOURCES;
         goto Done;
     }
+    lease->Role = profile->Role;
     status = OpenPeripheral(profile->Role == PujjoAudioSpeaker, lease);
     if (!NT_SUCCESS(status)) goto Done;
     status = SofWaveRtCreateSspStream(parent, endpoint, profile->VerifiedSsp, &format,
@@ -304,7 +316,7 @@ static NTSTATUS AnalogAllocate(PVOID context, ULONG requested, PUJJO_AUDIO_BUFFE
     WdfObjectReference(stream->RingAllocation.CommonBuffer);
     WdfObjectReference(stream->BdlAllocation.CommonBuffer);
     stream->BuffersLeased = TRUE;
-    parent->AnalogLease = lease;
+    SetAnalogLease(parent, lease);
     buffer->Stream = lease;
     buffer->Mdl = stream->Mdl;
     buffer->Bytes = stream->BufferSizeBytes;
@@ -325,13 +337,13 @@ static VOID AnalogFree(PVOID context, PVOID handle)
     PSOF_DEVICE_CONTEXT parent = child->Parent;
     PUJJO_ANALOG_LEASE *lease = handle;
     LockAudio(parent);
-    if (lease && parent->AnalogLease == lease) {
+    if (lease && parent->AnalogLease == lease && lease->Role == child->Profile.Role) {
         if (!lease->Detached && !NT_SUCCESS(StopRoute(parent, lease, KSSTATE_STOP)))
             parent->AudioDmaFaulted = TRUE;
         SetPositionAllowed(parent, lease, FALSE);
+        SetAnalogLease(parent, NULL);
         if (!NT_SUCCESS(SofWaveRtFreeStream(lease->Stream))) parent->AudioDmaFaulted = TRUE;
         ClosePeripheral(lease);
-        parent->AnalogLease = NULL;
         ExFreePoolWithTag(lease, SOF_DEVICE_TAG);
     }
     UnlockAudio(parent);
@@ -348,8 +360,8 @@ static NTSTATUS AnalogSetState(PVOID context, PVOID handle, ULONG state)
 
     if (state > KSSTATE_RUN) return STATUS_INVALID_PARAMETER;
     LockAudio(parent);
-    if (!lease || parent->AnalogLease != lease || lease->Detached ||
-        !RouteSessionOnline(parent)) goto Done;
+    if (!lease || parent->AnalogLease != lease || lease->Role != profile->Role ||
+        lease->Detached || !RouteSessionOnline(parent)) goto Done;
     if (state != KSSTATE_RUN) {
         /* A fault blocks RUN, not best-effort cleanup in a live session. */
         status = StopRoute(parent, lease, (KSSTATE)state);
@@ -448,8 +460,11 @@ static NTSTATUS AnalogPosition(PVOID context, PVOID handle, PULONG position)
     PUJJO_ANALOG_LEASE *lease = handle;
     KIRQL irql;
     NTSTATUS status = STATUS_DEVICE_NOT_READY;
+    if (!lease || !position) return STATUS_INVALID_PARAMETER;
     KeAcquireSpinLock(&child->Parent->AudioPositionLock, &irql);
-    if (lease->PositionAllowed && lease->Peripheral.IsActive(lease->Peripheral.Header.Context, lease))
+    /* Compare against the published lease before dereferencing a handle. */
+    if (child->Parent->AnalogLease == lease && lease->Role == child->Profile.Role &&
+        lease->PositionAllowed && lease->Peripheral.IsActive(lease->Peripheral.Header.Context, lease))
         status = SofWaveRtGetPosition(lease->Stream, position);
     KeReleaseSpinLock(&child->Parent->AudioPositionLock, irql);
     return status;

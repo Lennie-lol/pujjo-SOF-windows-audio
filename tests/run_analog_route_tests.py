@@ -14,11 +14,16 @@ stop = source[source.index("static NTSTATUS StopRoute("):
               source.index("static ULONG SspWord(")]
 run = source[source.index("static NTSTATUS AnalogSetState("):
              source.index("static NTSTATUS AnalogJackPresent(")]
+position = source[source.index("static NTSTATUS AnalogPosition("):
+                  source.index("static NTSTATUS AnalogNotification(")]
+assert source.index("SetAnalogLease(parent, NULL);") < source.index("SofWaveRtFreeStream(lease->Stream)", source.index("static VOID AnalogFree("))
+assert "parent->AnalogLease = lease;" in source.split("static VOID SetAnalogLease(",1)[1].split("\n}",1)[0]
 prefix = r'''
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-typedef unsigned ULONG;
+typedef unsigned ULONG, *PULONG;
+typedef int KIRQL;
 typedef int BOOLEAN, NTSTATUS;
 typedef void *PVOID;
 #define TRUE 1
@@ -45,12 +50,13 @@ typedef struct {
     int (*IsActive)(void *, void *);
 } BUS;
 typedef struct {
-    STREAM *Stream; BUS Peripheral;
+    STREAM *Stream; BUS Peripheral; int Role;
     int PeripheralNeedsShutdown,JackClassified,PositionAllowed,Faulted,Detached;
 } PUJJO_ANALOG_LEASE;
 typedef struct {
     int AnalogClosed,ArmedTesting,EnablePortCls,CurrentPowerState,FwState,AudioDmaFaulted;
     PUJJO_ANALOG_LEASE *AnalogLease;
+    int AudioPositionLock;
 } DEVICE, *PSOF_DEVICE_CONTEXT;
 typedef struct { DEVICE *Parent; PUJJO_ANALOG_PROFILE Profile; } PUJJO_ANALOG_CHILD;
 enum { MUTE=1,VOLUME,RUN,WAIT,PREPARE,JACK,UNMUTE,SHUTDOWN,STOP,PAUSE };
@@ -92,6 +98,9 @@ static int readjack(void *ctx,void *owner,int query,pj5682s_jack *out) {
     *out=jack;return record(JACK);
 }
 static int isactive(void *ctx,void *owner) { assert(ctx&&owner);return active; }
+static void KeAcquireSpinLock(int *lock,KIRQL *irql) { assert(!*lock);*lock=1;*irql=0; }
+static void KeReleaseSpinLock(int *lock,KIRQL irql) { assert(*lock&&irql==0);*lock=0; }
+static int SofWaveRtGetPosition(STREAM *s,PULONG p) { assert(s&&p);*p=128;return 0; }
 '''
 suffix = r'''
 static DEVICE d;
@@ -103,7 +112,7 @@ static void reset(int role) {
     count=fail_op=fail_rollback=active=drop_on_unmute=locked=0;jack=PJ5682S_JACK_HEADSET;
     d.ArmedTesting=d.EnablePortCls=1;d.CurrentPowerState=PowerDeviceD0;d.FwState=SOF_FW_BOOT_COMPLETE;
     d.AnalogLease=&lease;child.Parent=&d;child.Profile.Role=role;child.Profile.MaximumPlaybackGain=-100;
-    stream.IsCapture=role==PujjoAudioHeadsetMic;lease.Stream=&stream;
+    stream.IsCapture=role==PujjoAudioHeadsetMic;lease.Stream=&stream;lease.Role=role;
     lease.Peripheral=(BUS){{&d},prepare,shutdown,readjack,isactive};
 }
 static int call(ULONG state) { int rc=AnalogSetState(&child,&lease,state);assert(!locked);return rc; }
@@ -143,6 +152,17 @@ int main(void) {
         reset(role);lease.Detached=1;assert(call(KSSTATE_STOP)==STATUS_DEVICE_NOT_READY&&!count);
         reset(role);d.AnalogClosed=1;assert(call(KSSTATE_RUN)==STATUS_DEVICE_NOT_READY&&!count);
         reset(role);assert(call(77)==STATUS_INVALID_PARAMETER&&!count);
+        reset(role);assert(call(KSSTATE_RUN)==0);
+        ULONG pos=99;
+        assert(AnalogPosition(&child,&lease,&pos)==0&&pos==128&&!d.AudioPositionLock);
+        PUJJO_ANALOG_CHILD foreign=child;
+        foreign.Profile.Role=role==1?2:1;
+        count=0;assert(AnalogSetState(&foreign,&lease,KSSTATE_RUN)==STATUS_DEVICE_NOT_READY&&!count);
+        pos=99;assert(AnalogPosition(&foreign,&lease,&pos)==STATUS_DEVICE_NOT_READY&&pos==99);
+        assert(AnalogPosition(&child,NULL,&pos)==STATUS_INVALID_PARAMETER);
+        assert(AnalogPosition(&child,&lease,NULL)==STATUS_INVALID_PARAMETER);
+        d.AnalogLease=NULL;
+        assert(AnalogPosition(&child,&lease,&pos)==STATUS_DEVICE_NOT_READY&&pos==99&&!d.AudioPositionLock);
     }
     reset(PujjoAudioHeadsetMic);jack=PJ5682S_JACK_PRESENT_UNCLASSIFIED;
     assert(call(KSSTATE_RUN)==STATUS_DEVICE_NOT_CONNECTED&&!lease.PositionAllowed&&!active);
@@ -154,7 +174,7 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix="pj_analog_route_") as tmp:
     src=Path(tmp)/"route.c"
     exe=Path(tmp)/("route.exe" if os.name=="nt" else "route")
-    src.write_text(prefix+online+stop+run+suffix)
+    src.write_text(prefix+online+stop+run+position+suffix)
     subprocess.run([os.environ.get("CC","cc"),"-std=c11","-Wall","-Wextra","-Werror",
                     *shlex.split(os.environ.get("CFLAGS","")),str(src),"-o",str(exe)],check=True,timeout=40)
     subprocess.run([str(exe)],check=True,timeout=15)
