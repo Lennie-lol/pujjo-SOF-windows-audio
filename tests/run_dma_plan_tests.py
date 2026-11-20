@@ -258,8 +258,13 @@ assert volume.index("if (!NT_SUCCESS(status)) return status;") < volume.index("S
 mute=wave.split("NTSTATUS SofWaveRtSetMute(",1)[1].split("\n}",1)[0]
 assert mute.index("if (!NT_SUCCESS(status)) return status;") < mute.index("Stream->MasterMute = Mute;")
 bus=(root/"src/driver/PujjoAudioBus.c").read_text()
-assert bus.index("status = SofWaveRtSetMute(stream, FALSE);") < bus.index(
-    "if (!NT_SUCCESS(status) && !NT_SUCCESS(SofWaveRtSetState(stream, KSSTATE_STOP)))")
+capture_stop=bus.split("static NTSTATUS AudioStopCapture(",1)[1].split("\n}",1)[0]
+assert capture_stop.index("SofWaveRtSetMute(stream, TRUE)") < capture_stop.index("transition = SofWaveRtSetState(stream, state);")
+assert capture_stop.index("transition = SofWaveRtSetState(stream, state);") < capture_stop.index("if (NT_SUCCESS(status)) status = transition;")
+assert "if (!NT_SUCCESS(status)) ctx->AudioDmaFaulted = TRUE;" in capture_stop
+capture_state=bus.split("static NTSTATUS AudioSetState(",1)[1].split("\n}",1)[0]
+assert capture_state.index("status = SofWaveRtSetMute(stream, FALSE);") < capture_state.index("(void)AudioStopCapture(ctx, stream, KSSTATE_STOP);") < capture_state.index("AudioSetPositionEnabled(ctx, TRUE);")
+assert "if (!NT_SUCCESS(status))\n                (void)AudioStopCapture(ctx, stream, KSSTATE_STOP);" in capture_state
 print("PASS: gain error propagation, per-channel restoration and control publication")
 
 for name in ("RegisterNotificationEvent", "UnregisterNotificationEvent", "SignalNotification"):

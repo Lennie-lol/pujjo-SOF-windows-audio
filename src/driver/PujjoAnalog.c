@@ -195,8 +195,13 @@ static NTSTATUS VerifySspConfiguration(PSOF_DEVICE_CONTEXT parent,
     BOOLEAN nonzero = FALSE;
     NTSTATUS status;
 
+    if (!parent || !profile) return STATUS_INVALID_PARAMETER;
     if (!parent->NhltTable || !parent->NhltTableSize)
         return STATUS_DEVICE_NOT_READY;
+    /* Enforce exact negotiated PCM even for callers outside publication. */
+    if (profile->Format.Rate != 48000u || profile->Format.Channels != 2u ||
+        profile->Format.ContainerBits != 32u || profile->Format.ValidBits != 24u)
+        return STATUS_NOT_SUPPORTED;
     for (ULONG i = 0; i < sizeof(profile->VerifiedSspConfig); ++i)
         if (profile->VerifiedSspConfig[i]) nonzero = TRUE;
     if (!nonzero || !SspGeometryMatches(profile)) return STATUS_NOT_SUPPORTED;

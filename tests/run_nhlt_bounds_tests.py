@@ -81,6 +81,26 @@ else:
         raise ValueError("candidate NHLT differs from verified encoder comparison")
 fixture = "\n".join("static const UCHAR %s[] = {%s};" % (name, ",".join(map(str, data)))
                     for name, data in zip(const_names, (ssp_table, ssp0, ssp1))) + "\n"
+analog_source = (root / "src/driver/PujjoAnalog.c").read_text()
+analog_helpers = analog_source[analog_source.index("static ULONG SspWord"):
+                               analog_source.index("/* Firmware may acknowledge RUN")]
+analog_types = r'''
+#define FALSE 0
+#define STATUS_NOT_SUPPORTED -7
+#define STATUS_DEVICE_NOT_READY -8
+#define STATUS_INVALID_BUFFER_SIZE -9
+#define PUJJO_REVIEWED_SSP_BYTES 96u
+#define PJ_IPC4_MAX_MAILBOX_PAYLOAD 4096u
+enum { PujjoAudioHeadphone=1, PujjoAudioHeadsetMic=2, PujjoAudioSpeaker=3 };
+struct sof_ipc4_copier_data { ULONG words[16]; };
+typedef struct {
+    int Role;
+    ULONG VerifiedSsp;
+    UCHAR VerifiedSspConfig[96];
+    struct { ULONG Rate,Channels,ContainerBits,ValidBits; } Format;
+} PUJJO_ANALOG_PROFILE;
+typedef struct { const void *NhltTable; ULONG NhltTableSize; } DEVICE, *PSOF_DEVICE_CONTEXT;
+'''
 main = r'''
 static void fix_checksum(UCHAR *buf, ULONG size) {
     ULONG i; UCHAR sum=0;
@@ -215,7 +235,32 @@ static void test_generated_ssp(void) {
     key.ValidBits=24;
     key.ContainerBits=24;
     assert(SofNhltCopyConfiguration(ssp_table,sizeof(ssp_table),&key,actual,96,&length)==STATUS_NOT_FOUND);
-    puts("PASS: candidate generator to production NHLT parser, exact SSP PCM selection");
+    DEVICE d={ssp_table,sizeof(ssp_table)};
+    PUJJO_ANALOG_PROFILE p={0};
+    p.Format.Rate=48000; p.Format.Channels=2;
+    p.Format.ContainerBits=32; p.Format.ValidBits=24;
+    for(int role=PujjoAudioHeadphone; role<=PujjoAudioSpeaker; ++role) {
+        p.Role=role; p.VerifiedSsp=(role==PujjoAudioSpeaker);
+        memcpy(p.VerifiedSspConfig,p.VerifiedSsp?ssp1_expected:ssp0_expected,96);
+        assert(VerifySspConfiguration(&d,&p)==STATUS_SUCCESS);
+        p.VerifiedSspConfig[0]^=1;
+        assert(VerifySspConfiguration(&d,&p)==STATUS_NOT_SUPPORTED);
+        p.VerifiedSspConfig[0]^=1;
+        p.VerifiedSsp^=1;
+        assert(VerifySspConfiguration(&d,&p)==STATUS_NOT_SUPPORTED);
+        p.VerifiedSsp^=1;
+        p.Format.ValidBits=32;
+        assert(VerifySspConfiguration(&d,&p)==STATUS_NOT_SUPPORTED);
+        p.Format.ValidBits=24;
+    }
+    assert(VerifySspConfiguration(NULL,&p)==STATUS_INVALID_PARAMETER);
+    assert(VerifySspConfiguration(&d,NULL)==STATUS_INVALID_PARAMETER);
+    UCHAR damaged[sizeof(ssp_table)];
+    memcpy(damaged,ssp_table,sizeof(damaged));
+    damaged[sizeof(damaged)-1]^=1;
+    d.NhltTable=damaged;
+    assert(!NT_SUCCESS(VerifySspConfiguration(&d,&p)));
+    puts("PASS: candidate NHLT through production parser and analog profile verifier, all three routes");
 }
 int main(void) {
     test_lookup();
@@ -260,7 +305,7 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix="pj_nhlt_") as temp:
     src = Path(temp) / "nhlt.c"
     exe = Path(temp) / ("nhlt.exe" if os.name == "nt" else "nhlt")
-    src.write_text(shim + consts + packed + "\n#pragma pack(pop)\n" + info + body + fixture + main)
+    src.write_text(shim + consts + packed + "\n#pragma pack(pop)\n" + info + body + fixture + analog_types + analog_helpers + main)
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
                     *shlex.split(os.environ.get("CFLAGS", "")), str(src), "-o", str(exe)], check=True, timeout=40)
     subprocess.run([str(exe)], check=True, timeout=15)
