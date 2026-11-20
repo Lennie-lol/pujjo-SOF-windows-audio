@@ -99,3 +99,90 @@ with tempfile.TemporaryDirectory(prefix="pj_dmic_route_") as tmp:
     subprocess.run([os.environ.get("CC","cc"),"-std=c11","-Wall","-Wextra","-Werror",
                     *shlex.split(os.environ.get("CFLAGS","")),str(src),"-o",str(exe)],check=True,timeout=40)
     subprocess.run([str(exe)],check=True,timeout=15)
+
+# Compile the actual capture format selector with mock NHLT and firmware
+# catalog lookups. Publication must never advertise an unusable gateway.
+selector = source[source.index("static NTSTATUS AudioSelectFormat("):
+                  source.index("\n#endif", source.index("static NTSTATUS AudioSelectFormat("))]
+select_prefix = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+typedef uint32_t ULONG;
+typedef uint16_t USHORT;
+typedef int NTSTATUS;
+#define STATUS_SUCCESS 0
+#define STATUS_INVALID_PARAMETER -1
+#define STATUS_NOT_FOUND -2
+#define STATUS_BUFFER_TOO_SMALL -3
+#define STATUS_INVALID_BUFFER_SIZE -4
+#define STATUS_OBJECT_NAME_COLLISION -5
+#define NT_SUCCESS(x) ((x)>=0)
+#define NHLT_LINK_DMIC 2
+#define NHLT_DIRECTION_CAPTURE 1
+#define NHLT_DEVICE_DMIC 0
+#define PJ_CATALOG_OK 0
+#define PJ_IPC4_MAX_MAILBOX_PAYLOAD 4096u
+#define RTL_NUMBER_OF(x) (sizeof(x)/sizeof((x)[0]))
+enum { PujjoAudioDmic=0 };
+struct sof_ipc4_gtw_attributes { ULONG flags; };
+struct sof_ipc4_copier_data { ULONG words[16]; };
+typedef struct { ULONG LinkType,VirtualBusId,Direction,DeviceType,SampleRate,Channels,ContainerBits,ValidBits; } SOF_NHLT_CONFIG_KEY;
+typedef struct { ULONG Rate,Channels,ContainerBits,ValidBits,Role; } FORMAT;
+typedef struct { const void *NhltTable; ULONG NhltTableSize; int CopierProfile,GainProfile; FORMAT AudioFormat; } DEVICE,*PSOF_DEVICE_CONTEXT;
+typedef struct { ULONG unused; } pj_firmware_config;
+static int calls, allowed, first_status, reject_chunk, too_many_pages;
+static ULONG blob_bytes;
+static int SofNhltCopyConfiguration(const void *table,ULONG size,const SOF_NHLT_CONFIG_KEY *key,void *dest,ULONG cap,ULONG *bytes) {
+    assert(table && size && !dest && !cap);
+    assert(key->LinkType==2 && key->VirtualBusId==0 && key->Direction==1 && key->DeviceType==0);
+    assert(key->SampleRate==48000 && key->Channels==2);
+    ++calls;
+    if(first_status) return first_status;
+    if(calls!=allowed && allowed!=4) return STATUS_NOT_FOUND;
+    *bytes=blob_bytes;return STATUS_BUFFER_TOO_SMALL;
+}
+static int pj_firmware_plan_ll(int *p,ULONG ibs,ULONG obs,pj_firmware_config *c,ULONG *pages) {
+    assert(p && c && ibs==obs && (ibs==192 || ibs==384));
+    *pages=too_many_pages?10:2;
+    return reject_chunk==(int)ibs?1:0;
+}
+'''
+select_cases = r'''
+int main(void) {
+    int table=1;
+    DEVICE d={&table,1,0,0,{1,2,3,4,99}};
+    assert(AudioSelectFormat(NULL)==STATUS_INVALID_PARAMETER);
+    d.NhltTableSize=0;assert(AudioSelectFormat(&d)==STATUS_NOT_FOUND && !calls);d.NhltTableSize=1;
+    blob_bytes=96;
+    allowed=0;assert(AudioSelectFormat(&d)==STATUS_NOT_FOUND && calls==3 && d.AudioFormat.Role==99);
+    for(int format=1;format<=3;++format) {
+        calls=0;allowed=format;
+        assert(AudioSelectFormat(&d)==0 && calls==format);
+        assert(d.AudioFormat.Rate==48000 && d.AudioFormat.Channels==2 && d.AudioFormat.Role==0);
+        assert(d.AudioFormat.ContainerBits==(format==1?16u:32u));
+        assert(d.AudioFormat.ValidBits==(format==1?16u:format==2?24u:32u));
+    }
+    calls=0;allowed=4;reject_chunk=192;
+    assert(AudioSelectFormat(&d)==0 && calls==2 && d.AudioFormat.ValidBits==24);
+    reject_chunk=0;calls=0;too_many_pages=1;
+    assert(AudioSelectFormat(&d)==STATUS_NOT_FOUND && calls==3);
+    too_many_pages=0;calls=0;first_status=STATUS_OBJECT_NAME_COLLISION;
+    assert(AudioSelectFormat(&d)==STATUS_OBJECT_NAME_COLLISION && calls==1);first_status=0;
+    for(ULONG bad=0;bad<=5;++bad) {
+        calls=0;blob_bytes=bad;
+        assert(AudioSelectFormat(&d)==STATUS_INVALID_BUFFER_SIZE && calls==1);
+    }
+    calls=0;blob_bytes=4096;
+    assert(AudioSelectFormat(&d)==STATUS_INVALID_BUFFER_SIZE && calls==1);
+    puts("PASS: actual DMIC format selection, rejected malformed gateways and firmware budgets");
+}
+'''
+with tempfile.TemporaryDirectory(prefix="pj_dmic_format_") as tmp:
+    src=Path(tmp)/"format.c"
+    exe=Path(tmp)/("format.exe" if os.name=="nt" else "format")
+    src.write_text(select_prefix+selector+select_cases)
+    subprocess.run([os.environ.get("CC","cc"),"-std=c11","-Wall","-Wextra","-Werror",
+                    *shlex.split(os.environ.get("CFLAGS","")),str(src),"-o",str(exe)],check=True,timeout=40)
+    subprocess.run([str(exe)],check=True,timeout=15)

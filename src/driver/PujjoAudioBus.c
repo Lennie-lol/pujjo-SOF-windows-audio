@@ -234,15 +234,18 @@ static NTSTATUS AudioSelectFormat(PSOF_DEVICE_CONTEXT Ctx)
     SOF_NHLT_CONFIG_KEY key = {
         NHLT_LINK_DMIC, 0, NHLT_DIRECTION_CAPTURE, NHLT_DEVICE_DMIC, 48000, 2, 0, 0
     };
-    if (!Ctx->NhltTable) return STATUS_NOT_FOUND;
+    if (!Ctx) return STATUS_INVALID_PARAMETER;
+    if (!Ctx->NhltTable || !Ctx->NhltTableSize) return STATUS_NOT_FOUND;
     for (ULONG i = 0; i < RTL_NUMBER_OF(samples); ++i) {
-        ULONG bytes;
+        ULONG bytes = 0;
         key.ContainerBits = samples[i][0];
         key.ValidBits = samples[i][1];
         NTSTATUS status = SofNhltCopyConfiguration(Ctx->NhltTable, Ctx->NhltTableSize,
                                                    &key, NULL, 0, &bytes);
         if (status == STATUS_BUFFER_TOO_SMALL) {
-            if ((bytes & 3u) || bytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD -
+            /* Copier requires attributes plus a nonempty gateway payload. */
+            if (bytes <= sizeof(struct sof_ipc4_gtw_attributes) ||
+                (bytes & 3u) || bytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD -
                     (sizeof(struct sof_ipc4_copier_data) - sizeof(ULONG)))
                 return STATUS_INVALID_BUFFER_SIZE;
             pj_firmware_config record;
@@ -258,8 +261,11 @@ static NTSTATUS AudioSelectFormat(PSOF_DEVICE_CONTEXT Ctx)
             Ctx->AudioFormat.Channels = key.Channels;
             Ctx->AudioFormat.ContainerBits = key.ContainerBits;
             Ctx->AudioFormat.ValidBits = key.ValidBits;
+            Ctx->AudioFormat.Role = PujjoAudioDmic;
             return STATUS_SUCCESS;
         }
+        /* A size-only lookup cannot successfully copy a nonempty blob. */
+        if (NT_SUCCESS(status)) return STATUS_INVALID_BUFFER_SIZE;
         if (status != STATUS_NOT_FOUND) return status;
     }
     return STATUS_NOT_FOUND;
