@@ -69,6 +69,16 @@ pj_ipc4_status pj_ipc4_large_reply_size(PJ_DWORD request_extension,
 pj_ipc4_status pj_ipc4_fw_version(const PJ_BYTE *config, PJ_SIZE bytes,
     PJ_WORD version[4]);
 
+/* FW_CONFIG tuples from the bundled IPC4 header. Require a version, both
+ * mailbox sizes and a nonzero pipeline count for the boot admission check.
+ * Outputs remain unchanged on malformed, duplicate or insufficient data. */
+typedef struct {
+    PJ_WORD version[4];
+    PJ_DWORD dl_bytes, ul_bytes, max_pipelines;
+} pj_ipc4_boot_caps;
+pj_ipc4_status pj_ipc4_fw_boot_caps(const PJ_BYTE *config, PJ_SIZE bytes,
+    PJ_DWORD required_mailbox, PJ_DWORD required_pipelines, pj_ipc4_boot_caps *out);
+
 /* DWORD-aligned span inside an already mapped MMIO window; no I/O. */
 int pj_ipc4_mmio_span_valid(PJ_DWORD mapped_bytes, PJ_DWORD offset, PJ_DWORD bytes);
 #ifdef __cplusplus

@@ -1150,9 +1150,20 @@ NTSTATUS SofIpcGetBootFirmwareVersion(
                                         SOF_FW_BOOT_READY_RECEIVED);
         ExReleaseRundownProtection(&Ctx->IpcRundown);
     }
-    if (NT_SUCCESS(status) &&
-        pj_ipc4_fw_version(reply.Payload, reply.PayloadSize, Version) != PJ_IPC4_VALID)
-        status = STATUS_DEVICE_PROTOCOL_ERROR;
+    if (NT_SUCCESS(status)) {
+        pj_ipc4_boot_caps caps;
+        /* One DMIC and one analog lease can coexist. Require the full
+         * mailbox capacity used by the current single-block transport. */
+        if (pj_ipc4_fw_boot_caps(reply.Payload, reply.PayloadSize,
+            PJ_IPC4_MAX_MAILBOX_PAYLOAD, 2u, &caps) != PJ_IPC4_VALID) {
+            status = STATUS_DEVICE_PROTOCOL_ERROR;
+        } else {
+            RtlCopyMemory(Version, caps.version, sizeof(caps.version));
+            DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+                "[SOF] FW_CONFIG: DL=%lu UL=%lu pipelines=%lu\n",
+                (ULONG)caps.dl_bytes, (ULONG)caps.ul_bytes, (ULONG)caps.max_pipelines);
+        }
+    }
     ExFreePoolWithTag(reply.Payload, SOF_DEVICE_TAG);
     return status;
 }

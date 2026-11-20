@@ -216,8 +216,41 @@ static void test_large_reply(void)
     assert(version[0]==2u && version[1]==12u && version[2]==0u && version[3]==1u);
 }
 
+static void test_boot_caps(void)
+{
+    const PJ_BYTE valid[] = {
+        0,0,0,0, 8,0,0,0, 2,0,12,0,0,0,1,0,
+        6,0,0,0, 4,0,0,0, 0,16,0,0,
+        7,0,0,0, 4,0,0,0, 0,16,0,0,
+        9,0,0,0, 4,0,0,0, 10,0,0,0
+    };
+    PJ_BYTE mutated[sizeof(valid)+12u];
+    pj_ipc4_boot_caps caps = {0};
+    assert(pj_ipc4_fw_boot_caps(valid,sizeof(valid),4096u,2u,&caps)==PJ_IPC4_VALID);
+    assert(caps.version[0]==2u && caps.version[1]==12u && caps.version[3]==1u);
+    assert(caps.dl_bytes==4096u && caps.ul_bytes==4096u && caps.max_pipelines==10u);
+    assert(pj_ipc4_fw_boot_caps(valid,sizeof(valid),4096u,11u,&caps)==PJ_IPC4_BUFFER_SMALL);
+    assert(pj_ipc4_fw_boot_caps(valid,sizeof(valid)-12u,4096u,2u,&caps)==PJ_IPC4_INVALID_HEADER);
+    assert(pj_ipc4_fw_boot_caps(valid,sizeof(valid)-1u,4096u,2u,&caps)==PJ_IPC4_TRUNCATED);
+    assert(pj_ipc4_fw_boot_caps(valid,sizeof(valid),4097u,2u,&caps)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_fw_boot_caps(valid,sizeof(valid),4096u,0u,&caps)==PJ_IPC4_BAD_PARAMETER);
+    assert(pj_ipc4_fw_boot_caps(valid,sizeof(valid),4096u,2u,0)==PJ_IPC4_BAD_PARAMETER);
+    for (unsigned i=0;i<sizeof(valid);++i) mutated[i]=valid[i];
+    mutated[25]=8u;
+    assert(pj_ipc4_fw_boot_caps(mutated,sizeof(valid),4096u,2u,&caps)==PJ_IPC4_BUFFER_SMALL);
+    mutated[25]=16u;mutated[37]=8u;
+    assert(pj_ipc4_fw_boot_caps(mutated,sizeof(valid),4096u,2u,&caps)==PJ_IPC4_BUFFER_SMALL);
+    mutated[37]=16u;mutated[40]=7u;
+    assert(pj_ipc4_fw_boot_caps(mutated,sizeof(valid),4096u,2u,&caps)==PJ_IPC4_INVALID_HEADER);
+    mutated[40]=9u;
+    for(unsigned i=0;i<12u;++i) mutated[sizeof(valid)+i]=valid[40u+i];
+    assert(pj_ipc4_fw_boot_caps(mutated,sizeof(mutated),4096u,2u,&caps)==PJ_IPC4_INVALID_HEADER);
+    assert(caps.dl_bytes==4096u && caps.ul_bytes==4096u && caps.max_pipelines==10u);
+}
+
 int main(void)
 {
+    test_boot_caps();
     test_large_reply();
     protocol_tests();graph_tests();config_tests();transaction_tests();
     puts("PASS: IPC4 protocol frames and fail-closed transaction model");

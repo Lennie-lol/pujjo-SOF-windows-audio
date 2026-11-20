@@ -17,3 +17,11 @@ budgets using the production low-latency planner. Only metadata reports enter
 CI artifacts; the firmware image is not staged or executed. A passing result
 does not establish ROM authentication, runtime IPC compatibility or physical
 boot. All activation gates remain unchanged.
+
+The runtime FW_CONFIG query now also checks the advertised DL/UL mailbox
+capacities and maximum simultaneous pipelines, rather than accepting a
+version tuple alone. The current transport needs 4096 bytes in each direction
+and the existing DMIC plus single analog lease may need two pipelines.
+Missing, malformed, duplicate or insufficient capability tuples block the
+transition to BOOT_COMPLETE. This is a conservative admission requirement;
+actual firmware replies have not been captured from Pujjo hardware yet.

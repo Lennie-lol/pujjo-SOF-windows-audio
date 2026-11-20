@@ -228,3 +228,42 @@ pj_ipc4_status pj_ipc4_fw_version(const PJ_BYTE *config, PJ_SIZE bytes,
         version[i] = (PJ_WORD)(value[i * 2u] | ((PJ_WORD)value[i * 2u + 1u] << 8));
     return PJ_IPC4_VALID;
 }
+
+pj_ipc4_status pj_ipc4_fw_boot_caps(const PJ_BYTE *config, PJ_SIZE bytes,
+    PJ_DWORD required_mailbox, PJ_DWORD required_pipelines, pj_ipc4_boot_caps *out)
+{
+    pj_ipc4_boot_caps result = {0};
+    PJ_DWORD seen = 0u;
+    pj_ipc4_status status;
+    if (!config || !out || !required_mailbox ||
+        required_mailbox > PJ_IPC4_MAX_MAILBOX_PAYLOAD || !required_pipelines)
+        return PJ_IPC4_BAD_PARAMETER;
+    status = pj_ipc4_fw_version(config, bytes, result.version);
+    if (status != PJ_IPC4_VALID) return status;
+    while (bytes) {
+        PJ_DWORD type = read_le32(config), length = read_le32(config + 4u);
+        PJ_DWORD bit = 0u, *target = 0;
+        /* The version parser above has checked every tuple's span. */
+        config += 8u;
+        bytes -= 8u;
+        switch (type) {
+        case 6u: bit = 1u; target = &result.dl_bytes; break;
+        case 7u: bit = 2u; target = &result.ul_bytes; break;
+        case 9u: bit = 4u; target = &result.max_pipelines; break;
+        default: break;
+        }
+        if (target) {
+            if ((seen & bit) || length != 4u) return PJ_IPC4_INVALID_HEADER;
+            *target = read_le32(config);
+            seen |= bit;
+        }
+        config += length;
+        bytes -= length;
+    }
+    if (seen != 7u) return PJ_IPC4_INVALID_HEADER;
+    if (result.dl_bytes < required_mailbox || result.ul_bytes < required_mailbox ||
+        result.max_pipelines < required_pipelines)
+        return PJ_IPC4_BUFFER_SMALL;
+    *out = result;
+    return PJ_IPC4_VALID;
+}
