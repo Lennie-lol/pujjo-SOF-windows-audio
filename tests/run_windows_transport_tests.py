@@ -10,12 +10,14 @@ with tempfile.TemporaryDirectory(prefix='pj_wdf_') as d:
     tmp=Path(d)
     for name in ('ntddk.h','wdf.h','reshub.h','spb.h','gpio.h'):
         (tmp/name).write_text('#include "wdk_host_mock.h"\n')
-    exe=tmp/('transport.exe' if os.name=='nt' else 'transport')
-    cmd=[os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror',
-         *shlex.split(os.environ.get('CFLAGS','')),
-         *(['-pthread','-DPJ_HOST_THREADS'] if os.name=='posix' else []),
-         '-I'+str(tmp),'-I'+str(ROOT/'tests'),'-I'+str(ROOT/'src/driver/experimental'),
-         str(ROOT/'tests/test_windows_transports.c'),'-o',str(exe)]
-    print(' '.join(cmd),flush=True)
-    subprocess.run(cmd,check=True,timeout=120)
-    subprocess.run([str(exe)],check=True,timeout=30)
+    for lab in (False, True):
+        exe=tmp/(('transport-lab' if lab else 'transport')+('.exe' if os.name=='nt' else ''))
+        cmd=[os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror',
+             *shlex.split(os.environ.get('CFLAGS','')),
+             *(['-pthread','-DPJ_HOST_THREADS'] if os.name=='posix' else []),
+             *(['-DPJ5682S_ENABLE_LAB_COLD_INIT'] if lab else []),
+             '-I'+str(tmp),'-I'+str(ROOT/'tests'),'-I'+str(ROOT/'src/driver/experimental'),
+             str(ROOT/'tests/test_windows_transports.c'),'-o',str(exe)]
+        print(' '.join(cmd),flush=True)
+        subprocess.run(cmd,check=True,timeout=120)
+        subprocess.run([str(exe)],check=True,timeout=30)
