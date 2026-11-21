@@ -26,6 +26,10 @@ assert 'PujjoRt5682sSpbWindows.c' in project
 assert 'pj5682s_cold_invalidate(&state->Cold);' in win, 'Power/close must invalidate epoch'
 assert 'pj5682s_cold_is_ready(&state->Cold)' in win, 'Live routes must be gated on cold READY'
 assert 'state->Control.faulted = 1;' in win, 'Stale rollback across D3 must latch fault'
+assert 'PJ5682S_ENABLE_LAB_COLD_INIT' not in project, 'Lab writes must be OFF in WDK'
+assert '#ifdef PJ5682S_ENABLE_LAB_COLD_INIT' in win, 'Lab bridge must require opt-in'
+assert 'state->ColdAttempted = TRUE' in win, 'Only one cold attempt per epoch'
+assert 'state->ColdTransactionActive = FALSE;' in win, 'Clear private I2C permission'
 assert 'status = StopControlLocked(state);\n        }' not in win, 'No cross-epoch rollback attempt'
 assert not list(root.rglob('*.inf')) and not list(root.rglob('*.cat'))
 print('PASS: RT5682S source safety gates and optional Windows SPB connection')
