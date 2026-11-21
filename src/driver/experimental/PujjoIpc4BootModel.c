@@ -40,8 +40,9 @@ pj_boot_result pj_boot_stage(pj_boot_model *b, const pj_boot_evidence *e)
 }
 pj_boot_result pj_boot_request(pj_boot_model *b, uint32_t timeout_ms, uint32_t *epoch)
 {
-    if (!b || !epoch || !timeout_ms || timeout_ms > 60000u) return PJ_BOOT_BAD_ARG;
-    *epoch = 0u; /* A failure never returns a usable generation. */
+    if (!epoch) return PJ_BOOT_BAD_ARG;
+    *epoch = 0u; /* Even invalid requests must not leak a prior usable token. */
+    if (!b || !timeout_ms || timeout_ms > 60000u) return PJ_BOOT_BAD_ARG;
     if (b->state == PJ_BOOT_FAULT) return PJ_BOOT_FAULT_LATCHED;
     if (b->state != PJ_BOOT_STAGED) return PJ_BOOT_WRONG_STATE;
 #ifndef PJ_IPC4_HOST_TEST
