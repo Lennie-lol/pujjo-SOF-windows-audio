@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Static safety and resource-gate check; no hardware or compiler required."""
 from pathlib import Path
+import subprocess
+import sys
 root=Path(__file__).resolve().parents[1]
 probe=(root/'src/driver/peripheral/PujjoPeripheralKmdf.c').read_text()
 win=(root/'src/driver/peripheral/PujjoRt5682sSpbWindows.c').read_text()
@@ -32,4 +34,5 @@ assert 'state->ColdAttempted = TRUE' in win, 'Only one cold attempt per epoch'
 assert 'state->ColdTransactionActive = FALSE;' in win, 'Clear private I2C permission'
 assert 'status = StopControlLocked(state);\n        }' not in win, 'No cross-epoch rollback attempt'
 assert not list(root.rglob('*.inf')) and not list(root.rglob('*.cat'))
+subprocess.run([sys.executable, str(root/'tests/test_rt5682s_boot_evidence.py')], check=True)
 print('PASS: RT5682S source safety gates and optional Windows SPB connection')
