@@ -78,6 +78,9 @@ static int cold_read(void *ctx, const PJ_BYTE *tx, PJ_SIZE len, PJ_BYTE *rx, PJ_
         value = (chip->mode == 1 || (chip->mode != 2 && chip->samples < 3)) ? 0x8000 : 0;
     }
     if (chip->mode == 3 && reg == 0x0132) value ^= 1;
+    /* Hardware reset clears the prior register image; inject the stuck
+     * calibration status on reads, not by preloading a resettable register. */
+    if (chip->mode == 4 && reg == 0x01ea) value = 0x8000;
     pj5682s_encode_address(value,rx);
     return 0;
 }
@@ -153,10 +156,9 @@ static void test_cold(void)
     }
     cold_setup(&chip,&state);
     chip.mode=4;
-    /* Force a calibration failure, then corrupt the identity on recovery.
+    /* Force a pre-calibration busy-status failure, then corrupt the identity on recovery.
      * The primary error must survive and recovery must not claim success. */
     chip.fail_at=0;
-    chip.regs[0x01ea]=0x8000;
     assert(pj5682s_cold_initialize(&state,&bus,&profile,cold_wait)==PJ5682S_VERIFY_FAILED);
     assert(state.phase==PJ5682S_COLD_FAILED && chip.resets==2);
     assert(state.recovery_status==PJ5682S_WRONG_CHIP);
