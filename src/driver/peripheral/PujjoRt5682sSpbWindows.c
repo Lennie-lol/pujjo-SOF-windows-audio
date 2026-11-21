@@ -64,9 +64,9 @@ NTSTATUS Pj5682sSpbSetPower(PJ5682S_SPB_WINDOWS *state, BOOLEAN powered)
             pj5682s_cold_invalidate(&state->Cold);
             status = STATUS_DEVICE_NOT_READY;
         }
-#endif
         if (powered && !state->Powered && NT_SUCCESS(status))
             state->ColdAttempted = FALSE; /* New D0, NOT proof of rail reset. */
+#endif
         state->Powered = powered && NT_SUCCESS(status);
     }
     WdfWaitLockRelease(state->Lock);
