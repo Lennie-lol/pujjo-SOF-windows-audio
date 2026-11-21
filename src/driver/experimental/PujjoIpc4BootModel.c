@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "PujjoIpc4BootModel.h"
-#include "../PujjoIpc4Protocol.h"
 #include <limits.h>
+/* Fail at the feature boundary before kernel-specific transitive includes:
+ * the mock must never be permitted in a Windows kernel build. */
 #if defined(PJ_IPC4_HOST_TEST) && (defined(_KERNEL_MODE) || defined(_NTDDK_) || defined(_WDF_H_))
 #error "PJ_IPC4_HOST_TEST must never be enabled in a kernel build"
 #endif
+#include "../PujjoIpc4Protocol.h"
 
 void pj_boot_init(pj_boot_model *b)
 {
