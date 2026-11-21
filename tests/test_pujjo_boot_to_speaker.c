@@ -78,6 +78,13 @@ static pj_bringup_evidence evidence(void)
     e.windows_pnp_power_and_teardown_verified=1;
     return e;
 }
+static const uint8_t valid_caps[] = {
+    0,0,0,0, 8,0,0,0, 2,0,12,0,0,0,1,0,
+    6,0,0,0, 4,0,0,0, 0,16,0,0,
+    7,0,0,0, 4,0,0,0, 0,16,0,0,
+    9,0,0,0, 4,0,0,0, 10,0,0,0
+};
+
 int main(void)
 {
     mock_world m;
@@ -104,7 +111,13 @@ int main(void)
     assert(!m.amp_on && !m.unmuted && b.state==PJ_BRINGUP_FAULT);
     /* Simulated firmware notification cannot clear the latched fault. */
     assert(pj_boot_notify(&m.boot,epoch,PJ_BOOT_EVENT_FW_READY)==PJ_BOOT_OK);
+    assert(!pj_boot_is_ready(&m.boot)); /* FW_READY alone cannot enable amp. */
     assert(pj_bringup_prepare(&b,&e,&o)==PJ_BRINGUP_FAULT_LATCHED);
+    pj_bringup_reset(&b);
+    m.used=0u;m.trace[0]='\0';
+    assert(pj_bringup_prepare(&b,&e,&o)==PJ_BRINGUP_IO_ERROR);
+    assert(!m.amp_on && !m.unmuted);
+    assert(pj_boot_confirm_caps(&m.boot,epoch,valid_caps,sizeof(valid_caps))==PJ_BOOT_OK);
     pj_bringup_reset(&b);
     m.used=0u;m.trace[0]='\0';
     assert(pj_bringup_prepare(&b,&e,&o)==PJ_BRINGUP_OK);
@@ -131,6 +144,9 @@ int main(void)
         assert(pj_boot_request(&m.boot,100u,&next)==PJ_BOOT_OK);
         assert(pj_boot_notify(&m.boot,epoch,PJ_BOOT_EVENT_FW_READY)==PJ_BOOT_STALE_EVENT);
         assert(pj_boot_notify(&m.boot,next,PJ_BOOT_EVENT_FW_READY)==PJ_BOOT_OK);
+        assert(!pj_boot_is_ready(&m.boot));
+        assert(pj_boot_confirm_caps(&m.boot,epoch,valid_caps,sizeof(valid_caps))==PJ_BOOT_STALE_EVENT);
+        assert(pj_boot_confirm_caps(&m.boot,next,valid_caps,sizeof(valid_caps))==PJ_BOOT_OK);
     }
     pj_bringup_reset(&b);
     assert(pj_bringup_prepare(&b,&e,&o)==PJ_BRINGUP_OK);
