@@ -14,12 +14,14 @@ static pj_boot_evidence good(void)
     e.dma_resource_contract_verified = 1u;
     return e;
 }
+#ifdef PJ_IPC4_HOST_TEST
 static const uint8_t valid_caps[] = {
     0,0,0,0, 8,0,0,0, 2,0,12,0,0,0,1,0, /* version */
     6,0,0,0, 4,0,0,0, 0,16,0,0,         /* DL=4096 */
     7,0,0,0, 4,0,0,0, 0,16,0,0,         /* UL=4096 */
     9,0,0,0, 4,0,0,0, 10,0,0,0          /* 10 pipelines */
 };
+#endif
 
 int main(void)
 {
