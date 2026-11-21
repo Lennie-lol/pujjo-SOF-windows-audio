@@ -92,6 +92,9 @@ static int cold_write(void *ctx, const PJ_BYTE *tx, PJ_SIZE size)
         chip->regs[0xff] = PJ5682S_EXPECTED_DEVICE_ID;
         chip->triggered = chip->samples = 0;
         ++chip->resets;
+        /* Model a reset transfer that succeeds but leaves the wrong ID. */
+        if (chip->mode == 4 && chip->resets == 2)
+            chip->regs[0xff] = 0;
     } else {
         chip->regs[reg] = val;
         if (reg == 0x01de && val == 0xfc00) chip->triggered = 1;
@@ -148,6 +151,16 @@ static void test_cold(void)
         assert(state.phase==PJ5682S_COLD_FAILED && chip.resets==2);
         if (mode<3) assert(state.polls==60);
     }
+    cold_setup(&chip,&state);
+    chip.mode=4;
+    /* Force a calibration failure, then corrupt the identity on recovery.
+     * The primary error must survive and recovery must not claim success. */
+    chip.fail_at=0;
+    chip.regs[0x01ea]=0x8000;
+    assert(pj5682s_cold_initialize(&state,&bus,&profile,cold_wait)==PJ5682S_VERIFY_FAILED);
+    assert(state.phase==PJ5682S_COLD_FAILED && chip.resets==2);
+    assert(state.recovery_status==PJ5682S_WRONG_CHIP);
+    assert(chip.regs[0xff]==0);
 }
 
 int main(void)
