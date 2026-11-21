@@ -127,6 +127,28 @@ int main(void) {
  assert(spb.Control.faulted);
  spb_written_count=4;
  assert(Pj5682sSpbClose(&spb)==0 && !live_targets);
+ /* A register-write failure during D0 exit must not cause stale rollback
+  * when the next power epoch begins. No I2C transaction may occur on reentry. */
+ {
+  PJ5682S_SPB_WINDOWS stale={0};
+  memset(codec_registers,0,sizeof(codec_registers));
+  codec_registers[0xff]=PJ5682S_EXPECTED_DEVICE_ID;
+  assert(Pj5682sSpbInitialize(&owner,&stale)==0);
+  assert(Pj5682sSpbOpen(&owner,1,0,&stale)==0);
+  assert(Pj5682sSpbSetPower(&stale,TRUE)==0);
+  stale.Cold.phase=PJ5682S_COLD_READY; /* mock-qualified only */
+  assert(Pj5682sSpbStartControl(&stale,&codec_profile,&codec_program)==0);
+  spb_written_count=3; /* simulated partial I2C write during rollback */
+  assert(Pj5682sSpbSetPower(&stale,FALSE)==STATUS_IO_DEVICE_ERROR);
+  assert(!stale.Powered && stale.Control.count && stale.Control.faulted);
+  assert(!pj5682s_cold_is_ready(&stale.Cold));
+  before=sends;
+  assert(Pj5682sSpbSetPower(&stale,TRUE)==STATUS_DEVICE_NOT_READY);
+  assert(sends==before && !stale.Powered);
+  spb_written_count=4;
+  assert(Pj5682sSpbClose(&stale)==STATUS_DEVICE_NOT_READY && !live_targets);
+  destroy_lock(stale.Lock);
+ }
  emulate_codec=0;
  delays=0;
  assert(Pj1019GpioInitialize(&owner,&gpio)==0);
