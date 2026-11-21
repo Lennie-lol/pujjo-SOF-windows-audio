@@ -20,7 +20,7 @@ PATTERNS = {
     "dmic": re.compile(r"\bdmic[01]?\b", re.I),
 }
 FAILURE = re.compile(r"\b(?:fail(?:ed|ure)?|error|timeout|timed out|probe deferred|i/o error)\b", re.I)
-AUDIO_CONTEXT = re.compile(r"\b(?:i2c|gpio|acpi|snd|asoc|clock|power|reset|codec)\b", re.I)
+AUDIO_CONTEXT = re.compile(r"\b(?:sof|i2c|gpio|acpi|snd|asoc|clock|power|reset|codec)\b", re.I)
 TIMESTAMP = re.compile(r"^\s*\[\s*([0-9]+(?:\.[0-9]+)?)\]")
 
 def analyze(text: str) -> dict:
