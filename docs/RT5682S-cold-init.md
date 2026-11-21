@@ -15,7 +15,7 @@ observing a busy-to-idle transition, which can reject a device that finishes bef
 the first observation. A 1 ms post-reset pause is conservative but not board
 measured. Full-width stable readback assumptions need DUT validation. Volatile
 commands are not read back as ordinary registers. A bus failure after reset
-causes an identity-checked best-effort reset and a latched fault; the external
+causes an identity-checked best-effort reset, a second identity check after the reset, and a latched fault; the external
 isolation must remain asserted even if recovery succeeds. No arbitrary reset
 rollback or in-place retry is allowed.
 
