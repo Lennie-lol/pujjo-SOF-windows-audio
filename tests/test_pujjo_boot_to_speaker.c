@@ -78,12 +78,14 @@ static pj_bringup_evidence evidence(void)
     e.windows_pnp_power_and_teardown_verified=1;
     return e;
 }
+#ifdef PJ_IPC4_HOST_TEST
 static const uint8_t valid_caps[] = {
     0,0,0,0, 8,0,0,0, 2,0,12,0,0,0,1,0,
     6,0,0,0, 4,0,0,0, 0,16,0,0,
     7,0,0,0, 4,0,0,0, 0,16,0,0,
     9,0,0,0, 4,0,0,0, 10,0,0,0
 };
+#endif
 
 int main(void)
 {
