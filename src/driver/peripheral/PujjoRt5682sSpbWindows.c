@@ -13,6 +13,41 @@
 #define PJ5682S_SPB_TIMEOUT_MS 1000
 
 #ifdef PJ5682S_ENABLE_CONTROL
+/* The routine is deliberately inert in normal WDK builds. Lab builds
+ * still require an explicit, independent power-epoch confirmation. */
+NTSTATUS Pj5682sSpbColdInitialize(PJ5682S_SPB_WINDOWS *state,
+    const pj5682s_cold_profile *profile, BOOLEAN freshPowerEpochConfirmed)
+{
+    NTSTATUS status = STATUS_ACCESS_DENIED;
+    PAGED_CODE();
+    if (!state || !state->Lock || !profile) return STATUS_INVALID_PARAMETER;
+#ifdef PJ5682S_ENABLE_LAB_COLD_INIT
+    WdfWaitLockAcquire(state->Lock, NULL);
+    if (state->Opened && state->Powered && state->Target &&
+        !state->ColdAttempted && freshPowerEpochConfirmed == TRUE &&
+        !state->Control.count && !state->Control.active && !state->Control.faulted &&
+        profile->board_qualified == 1u && profile->exclusive_owner == 1u &&
+        profile->rails_ready == 1u && profile->outputs_isolated == 1u) {
+        pj5682s_cold_state attempt;
+        const pj5682s_bus bus = {state, ControlRead, ControlWrite};
+        RtlZeroMemory(&attempt, sizeof(attempt));
+        state->ColdAttempted = TRUE; /* Latch before first potential I2C write. */
+        state->ColdTransactionActive = TRUE;
+        status = ControlStatus(pj5682s_cold_initialize(&attempt, &bus, profile, ControlDelay));
+        state->ColdTransactionActive = FALSE;
+        state->Cold = attempt;
+        if (!NT_SUCCESS(status)) {
+            pj5682s_cold_invalidate(&state->Cold);
+            state->Control.faulted = 1; /* No in-place retry after a partial reset. */
+        }
+    }
+    WdfWaitLockRelease(state->Lock);
+#else
+    UNREFERENCED_PARAMETER(freshPowerEpochConfirmed);
+#endif
+    return status;
+}
+
 static NTSTATUS StopControlLocked(PJ5682S_SPB_WINDOWS *state);
 static int ControlDelay(void *context, unsigned milliseconds);
 #endif
@@ -35,6 +70,10 @@ NTSTATUS Pj5682sSpbInitialize(WDFDEVICE device, PJ5682S_SPB_WINDOWS *state)
         /* DeviceAdd is the only valid place to initialize this context. */
         RtlZeroMemory(&state->Cold, sizeof(state->Cold));
         pj5682s_cold_invalidate(&state->Cold);
+        state->ColdAttempted = FALSE;
+#ifdef PJ5682S_ENABLE_LAB_COLD_INIT
+        state->ColdTransactionActive = FALSE;
+#endif
 #endif
     }
     return status;
@@ -61,6 +100,8 @@ NTSTATUS Pj5682sSpbSetPower(PJ5682S_SPB_WINDOWS *state, BOOLEAN powered)
             status = STATUS_DEVICE_NOT_READY;
         }
 #endif
+        if (powered && !state->Powered && NT_SUCCESS(status))
+            state->ColdAttempted = FALSE; /* New D0, NOT proof of rail reset. */
         state->Powered = powered && NT_SUCCESS(status);
     }
     WdfWaitLockRelease(state->Lock);
@@ -101,6 +142,7 @@ NTSTATUS Pj5682sSpbOpen(WDFDEVICE device, ULONG idLow, ULONG idHigh,
     state->Powered = FALSE;
 #ifdef PJ5682S_ENABLE_CONTROL
     pj5682s_cold_invalidate(&state->Cold);
+    state->ColdAttempted = FALSE;
 #endif
     WdfWaitLockRelease(state->Lock);
     return STATUS_SUCCESS;
@@ -118,6 +160,10 @@ NTSTATUS Pj5682sSpbClose(PJ5682S_SPB_WINDOWS *state)
     state->Powered = FALSE;
 #ifdef PJ5682S_ENABLE_CONTROL
     pj5682s_cold_invalidate(&state->Cold);
+    state->ColdAttempted = TRUE;
+#ifdef PJ5682S_ENABLE_LAB_COLD_INIT
+    state->ColdTransactionActive = FALSE;
+#endif
 #endif
     if (state->Target) {
         WdfIoTargetClose(state->Target);
@@ -205,6 +251,28 @@ static int ControlRegister(PJ_WORD reg)
     }
 }
 
+#ifdef PJ5682S_ENABLE_LAB_COLD_INIT
+/* Private, finite register list for the portable reset/calibration program.
+ * Excludes arbitrary addresses, OTP data and external client requests. */
+static int ColdWriteRegister(PJ_WORD reg)
+{
+    switch (reg) {
+    case 0x0000: case 0x0008: case 0x0015: case 0x0019: case 0x0026:
+    case 0x0044: case 0x0061: case 0x0062: case 0x0063: case 0x0073:
+    case 0x0080: case 0x008e: case 0x0091: case 0x0094:
+    case 0x0117: case 0x0118: case 0x0132: case 0x013a: case 0x013b:
+    case 0x01db: case 0x01de: case 0x01df: case 0x01e6:
+    case 0x0211: case 0x0212: case 0x3b00:
+        return 1;
+    default: return 0;
+    }
+}
+static int ColdReadRegister(PJ_WORD reg)
+{
+    return reg == 0x01eau || ColdWriteRegister(reg);
+}
+#endif
+
 static int ControlRead(void *context, const PJ_BYTE *address, PJ_SIZE addressBytes,
                         PJ_BYTE *data, PJ_SIZE dataBytes)
 {
@@ -216,13 +284,17 @@ static int ControlRead(void *context, const PJ_BYTE *address, PJ_SIZE addressByt
     PJ_BYTE result[2] = {0};
     NTSTATUS status;
     PJ_WORD reg;
+    int coldAllowed = 0;
 
     if (!state->Opened || !state->Powered || !state->Target ||
         !address || !data || addressBytes != 2 || dataBytes != 2)
         return -1;
     reg = pj5682s_decode_value(address);
+#ifdef PJ5682S_ENABLE_LAB_COLD_INIT
+    coldAllowed = state->ColdTransactionActive && ColdReadRegister(reg);
+#endif
     if (!ControlRegister(reg) && reg != PJ5682S_DEVICE_ID_REGISTER &&
-        reg != 0x00f0u && reg != 0x0011u && reg != 0x00a0u)
+        reg != 0x00f0u && reg != 0x0011u && reg != 0x00a0u && !coldAllowed)
         return -1;
 
     SPB_TRANSFER_LIST_INIT(&sequence.List, 2);
@@ -248,9 +320,17 @@ static int ControlWrite(void *context, const PJ_BYTE *data, PJ_SIZE bytes)
     WDF_REQUEST_SEND_OPTIONS options;
     ULONG_PTR transferred = 0;
     NTSTATUS status;
+    int allowed;
+    PJ_WORD reg;
 
-    if (!state->Opened || !state->Powered || !state->Target ||
-        !data || bytes != 4 || !ControlRegister(pj5682s_decode_value(data)))
+    if (!state->Opened || !state->Powered || !state->Target || !data || bytes != 4)
+        return -1;
+    reg = pj5682s_decode_value(data);
+    allowed = ControlRegister(reg);
+#ifdef PJ5682S_ENABLE_LAB_COLD_INIT
+    if (state->ColdTransactionActive && ColdWriteRegister(reg)) allowed = 1;
+#endif
+    if (!allowed)
         return -1;
     WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&descriptor, (PVOID)data, 4u);
     WDF_REQUEST_SEND_OPTIONS_INIT(&options, WDF_REQUEST_SEND_OPTION_TIMEOUT);
