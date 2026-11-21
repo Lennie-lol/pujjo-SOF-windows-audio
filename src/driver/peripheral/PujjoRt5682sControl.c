@@ -506,8 +506,14 @@ failed:
      * asserted and attempt a reset only after re-verifying identity. */
     if (state->reset_attempted) {
         state->recovery_status = verify_device(bus);
-        if (state->recovery_status == PJ5682S_OK)
+        if (state->recovery_status == PJ5682S_OK) {
             state->recovery_status = cold_op(bus, &cold_reset, wait);
+            /* A successful bus write is not evidence that reset restored
+             * the expected codec. Keep the original failure latched and
+             * report recovery success only after a fresh identity read. */
+            if (state->recovery_status == PJ5682S_OK)
+                state->recovery_status = verify_device(bus);
+        }
     }
     return status;
 }
