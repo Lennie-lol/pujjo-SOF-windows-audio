@@ -23,5 +23,9 @@ assert 'RESOURCE_HUB_CREATE_PATH_FROM_ID' in win
 assert 'Pj5682sSpbOpen' in win and 'Pj5682sSpbClose' in win
 assert 'PujjoRt5682sCodec.c' in project
 assert 'PujjoRt5682sSpbWindows.c' in project
+assert 'pj5682s_cold_invalidate(&state->Cold);' in win, 'Power/close must invalidate epoch'
+assert 'pj5682s_cold_is_ready(&state->Cold)' in win, 'Live routes must be gated on cold READY'
+assert 'state->Control.faulted = 1;' in win, 'Stale rollback across D3 must latch fault'
+assert 'status = StopControlLocked(state);\n        }' not in win, 'No cross-epoch rollback attempt'
 assert not list(root.rglob('*.inf')) and not list(root.rglob('*.cat'))
 print('PASS: RT5682S source safety gates and optional Windows SPB connection')

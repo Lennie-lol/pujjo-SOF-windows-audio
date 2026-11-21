@@ -16,6 +16,7 @@ typedef struct _PJ5682S_SPB_WINDOWS {
     BOOLEAN Powered;
 #ifdef PJ5682S_ENABLE_CONTROL
     pj5682s_control Control;
+    pj5682s_cold_state Cold; /* Invalid until separately qualified cold init */
 #endif
 } PJ5682S_SPB_WINDOWS;
 /* Initialize exactly once during DeviceAdd, before publishing this state.

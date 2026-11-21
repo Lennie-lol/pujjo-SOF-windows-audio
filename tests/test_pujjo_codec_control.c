@@ -137,6 +137,12 @@ static void test_cold(void)
     unsigned calls=chip.calls;
     assert(pj5682s_cold_initialize(&state,&bus,&profile,cold_wait)==PJ5682S_INCORRECT_STATE);
     assert(chip.calls==calls);
+    assert(pj5682s_cold_is_ready(&state));
+    pj5682s_cold_invalidate(&state);
+    assert(!pj5682s_cold_is_ready(&state));
+    assert(state.failed_at == PJ5682S_COLD_READY && state.phase == PJ5682S_COLD_FAILED);
+    assert(pj5682s_cold_initialize(&state,&bus,&profile,cold_wait)==PJ5682S_INCORRECT_STATE);
+    assert(chip.calls==calls);
     for (unsigned i=1;i<=calls;++i) {
         cold_setup(&chip,&state);
         chip.fail_at=i;

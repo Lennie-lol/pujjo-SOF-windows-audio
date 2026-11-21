@@ -22,3 +22,11 @@ rollback or in-place retry is allowed.
 Next: validate rails/LDO ownership and reset timing, capture calibration busy
 transition and readbacks, and design a power-epoch owner integration (D0/D3
 invalidation and route gating). Do not enable device writes based on host tests.
+
+Power-epoch integration: the optional Windows SPB control owner now always
+invalidates cold READY on resource open, D0 exit and close; start and jack paths
+require READY and are refused by default. A pending register rollback on D0
+re-entry is latched as a fault rather than replayed against an unknown codec
+state. The cold-init executor is *not yet wired* to an actual Windows write
+transport: no rail/LDO/reset electrical qualification has been established, so
+no activation or installed-driver functionality is being claimed.

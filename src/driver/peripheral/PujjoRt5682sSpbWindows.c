@@ -31,6 +31,11 @@ NTSTATUS Pj5682sSpbInitialize(WDFDEVICE device, PJ5682S_SPB_WINDOWS *state)
         state->Owner = device;
         state->Opened = FALSE;
         state->Powered = FALSE;
+#ifdef PJ5682S_ENABLE_CONTROL
+        /* DeviceAdd is the only valid place to initialize this context. */
+        RtlZeroMemory(&state->Cold, sizeof(state->Cold));
+        pj5682s_cold_invalidate(&state->Cold);
+#endif
     }
     return status;
 }
@@ -44,10 +49,16 @@ NTSTATUS Pj5682sSpbSetPower(PJ5682S_SPB_WINDOWS *state, BOOLEAN powered)
     else {
 #ifdef PJ5682S_ENABLE_CONTROL
         if (state->Powered && !powered) status = StopControlLocked(state);
+        if (!powered) {
+            /* D3 is not proof of a codec rail reset: never retain READY. */
+            pj5682s_cold_invalidate(&state->Cold);
+        }
         if (!state->Powered && powered && state->Control.count) {
-            /* A previous D0 exit could not recover the modified registers. */
-            state->Powered = TRUE;
-            status = StopControlLocked(state);
+            /* Never replay an old epoch's saved registers after power loss.
+             * Keep the fault latched until a separately proven reset. */
+            state->Control.faulted = 1;
+            pj5682s_cold_invalidate(&state->Cold);
+            status = STATUS_DEVICE_NOT_READY;
         }
 #endif
         state->Powered = powered && NT_SUCCESS(status);
@@ -88,6 +99,9 @@ NTSTATUS Pj5682sSpbOpen(WDFDEVICE device, ULONG idLow, ULONG idHigh,
     state->Target=target;
     state->Opened=TRUE;
     state->Powered = FALSE;
+#ifdef PJ5682S_ENABLE_CONTROL
+    pj5682s_cold_invalidate(&state->Cold);
+#endif
     WdfWaitLockRelease(state->Lock);
     return STATUS_SUCCESS;
 }
@@ -102,6 +116,9 @@ NTSTATUS Pj5682sSpbClose(PJ5682S_SPB_WINDOWS *state)
         status = state->Powered ? StopControlLocked(state) : STATUS_DEVICE_NOT_READY;
 #endif
     state->Powered = FALSE;
+#ifdef PJ5682S_ENABLE_CONTROL
+    pj5682s_cold_invalidate(&state->Cold);
+#endif
     if (state->Target) {
         WdfIoTargetClose(state->Target);
         WdfObjectDelete(state->Target);
@@ -273,7 +290,7 @@ NTSTATUS Pj5682sSpbStartControl(PJ5682S_SPB_WINDOWS *state,
     pj5682s_status valid = pj5682s_validate_analog(program);
     if (valid != PJ5682S_OK) return ControlStatus(valid);
     WdfWaitLockAcquire(state->Lock, NULL);
-    if (state->Opened && state->Powered) {
+    if (state->Opened && state->Powered && pj5682s_cold_is_ready(&state->Cold)) {
         status = ControlStatus(pj5682s_control_start_clocked(&state->Control, &bus, profile, ControlDelay));
         if (NT_SUCCESS(status))
             status = ControlStatus(pj5682s_control_analog(&state->Control, &bus, program, ControlDelay));
@@ -310,7 +327,7 @@ NTSTATUS Pj5682sSpbGetJack(PJ5682S_SPB_WINDOWS *state, pj5682s_jack_query query,
     if (!state || !state->Lock || !jack ||
         (unsigned)query > Pj5682sJackReadClassified) return STATUS_INVALID_PARAMETER;
     WdfWaitLockAcquire(state->Lock, NULL);
-    if (state->Opened && state->Powered) {
+    if (state->Opened && state->Powered && pj5682s_cold_is_ready(&state->Cold)) {
         pj5682s_status result = query == Pj5682sJackClassify ?
             pj5682s_control_classify(&state->Control, &bus, ControlDelay, jack) :
             pj5682s_control_jack(&state->Control, &bus, query == Pj5682sJackReadClassified, jack);

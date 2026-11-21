@@ -518,3 +518,16 @@ failed:
     return status;
 }
 #undef COLD_COUNT
+
+/* Portable power-epoch guard. Never equate D0Entry with fresh calibration. */
+void pj5682s_cold_invalidate(pj5682s_cold_state *state)
+{
+    if (!state) return;
+    state->failed_at = state->phase;
+    state->phase = PJ5682S_COLD_FAILED;
+}
+
+int pj5682s_cold_is_ready(const pj5682s_cold_state *state)
+{
+    return state && state->phase == PJ5682S_COLD_READY;
+}

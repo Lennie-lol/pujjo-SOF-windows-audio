@@ -99,6 +99,10 @@ typedef struct {
  * not electrical qualification or authorization to unmute. */
 pj5682s_status pj5682s_cold_initialize(pj5682s_cold_state *state,
     const pj5682s_bus *bus, const pj5682s_cold_profile *profile, pj5682s_wait wait);
+/* Called on every bus close / power transition; latches unsafe-to-reuse.
+ * Only independent, verified power-cycle ownership can reset this state. */
+void pj5682s_cold_invalidate(pj5682s_cold_state *state);
+int pj5682s_cold_is_ready(const pj5682s_cold_state *state);
 
 typedef enum {
     Pj5682sJackPresence,
