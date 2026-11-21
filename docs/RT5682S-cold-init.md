@@ -30,3 +30,39 @@ re-entry is latched as a fault rather than replayed against an unknown codec
 state. The cold-init executor is *not yet wired* to an actual Windows write
 transport: no rail/LDO/reset electrical qualification has been established, so
 no activation or installed-driver functionality is being claimed.
+
+## Windows SPB cold bridge (lab builds only; 2026-11-21)
+
+The optional `Pj5682sSpbColdInitialize` now connects the portable cold
+executor to the existing synchronous Windows Resource Hub SPB read/write
+transport under the owner's wait lock, so D0/D3, close, control routes and
+calibration cannot interleave. Only registers used by the audited reset and
+calibration program can be accessed by the private cold path; diagnostic bus
+callbacks remain strictly read-only.
+
+**Production builds remain disabled.** The source-only WDK project defines
+neither `PJ5682S_ENABLE_CONTROL` nor
+`PJ5682S_ENABLE_LAB_COLD_INIT`. Without the lab macro, the bridge returns
+`STATUS_ACCESS_DENIED` before touching I²C. There is no PnP caller.
+
+For controlled lab builds only, the board owner must independently verify and
+affirm **all** of these at the moment of entry:
+- A genuinely fresh codec power/reset epoch, not simply Windows entering D0.
+- Board identity, ownership of the correct translated I²C connection, clock
+  and rails/LDO settling for Pujjo/Pujjo1e.
+- Output isolation/mute, and exclusive codec control across reset and calibration.
+- Absence of active streams, saved-register rollback or latched control faults.
+
+The lab transport permits one cold attempt per D0 epoch. It records READY only
+after the portable state machine succeeds; on transfer failure it latches a
+fault, clears the private transport capability and refuses in-place retries.
+The lab bridge cannot prove the reported qualification claims or physically
+isolate the amplifier by itself. Those must be established by a board-specific
+Windows power owner and independent hardware evidence. A new D0 is NOT a
+verified power-cycle or permission to clear a latched fault.
+
+`tests/run_windows_transport_tests.py` compiles and runs both production-
+disabled and opt-in host-lab modes with a simulated codec reset, calibration
+busy/idle status and error injection. This demonstrates software behavior,
+**not** electrical qualification or working native audio. Do not install the
+candidate on the Chromebook or infer speaker/microphone function from host CI.
