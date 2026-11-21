@@ -50,8 +50,16 @@ int main(void)
     assert(generation == 0u);
     assert(pj_boot_stage(&b, &e) == PJ_BOOT_OK);
     assert(pj_boot_stage(&b, &e) == PJ_BOOT_WRONG_STATE);
+    generation = 42u;
     assert(pj_boot_request(&b, 0u, &generation) == PJ_BOOT_BAD_ARG);
+    assert(generation == 0u);
+    generation = 42u;
     assert(pj_boot_request(&b, 60001u, &generation) == PJ_BOOT_BAD_ARG);
+    assert(generation == 0u);
+    generation = 42u;
+    assert(pj_boot_request(NULL, 100u, &generation) == PJ_BOOT_BAD_ARG);
+    assert(generation == 0u);
+    assert(b.state == PJ_BOOT_STAGED);
     assert(pj_boot_request(&b, 100u, &generation) == PJ_BOOT_OK);
     assert(generation != 0u && !pj_boot_is_ready(&b));
     assert(pj_boot_notify(&b, generation - 1u, PJ_BOOT_EVENT_FW_READY) == PJ_BOOT_STALE_EVENT);
