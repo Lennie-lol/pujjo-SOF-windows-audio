@@ -195,6 +195,39 @@ int main(void) {
   assert(Pj5682sSpbClose(&cold)==STATUS_SUCCESS);
   destroy_lock(cold.Lock);
  }
+#ifdef PJ5682S_ENABLE_LAB_COLD_INIT
+ /* Fault injection at the actual Windows SPB bridge: wrong identity,
+  * truncated read and truncated reset write must all fail closed.
+  * These are host mocks, never permission for real cold writes. */
+ for (unsigned fault=0; fault<3; ++fault) {
+  PJ5682S_SPB_WINDOWS rejected={0};
+  const pj5682s_cold_profile qualified={1,1,1,1};
+  assert(Pj5682sSpbInitialize(&owner,&rejected)==STATUS_SUCCESS);
+  assert(Pj5682sSpbOpen(&owner,1,0,&rejected)==STATUS_SUCCESS);
+  assert(Pj5682sSpbSetPower(&rejected,TRUE)==STATUS_SUCCESS);
+  memset(codec_registers,0,sizeof(codec_registers));
+  codec_registers[0xff]=fault==0 ? 0 : PJ5682S_EXPECTED_DEVICE_ID;
+  emulate_cold_calibration=1;
+  cold_triggered=0;
+  cold_status_reads=0;
+  transferred=fault==1 ? 3 : 4;
+  spb_written_count=fault==2 ? 3 : 4;
+  const NTSTATUS expected=fault==0 ? STATUS_DEVICE_CONFIGURATION_ERROR : STATUS_IO_DEVICE_ERROR;
+  assert(Pj5682sSpbColdInitialize(&rejected,&qualified,TRUE)==expected);
+  assert(rejected.ColdAttempted && rejected.Control.faulted);
+  assert(!rejected.ColdTransactionActive);
+  assert(!pj5682s_cold_is_ready(&rejected.Cold));
+  assert(rejected.Cold.phase==PJ5682S_COLD_FAILED);
+  before=sends;
+  assert(Pj5682sSpbColdInitialize(&rejected,&qualified,TRUE)==STATUS_ACCESS_DENIED);
+  assert(sends==before); /* A failed transfer cannot be retried in D0. */
+  transferred=4;
+  spb_written_count=4;
+  emulate_cold_calibration=0;
+  assert(Pj5682sSpbClose(&rejected)==STATUS_SUCCESS);
+  destroy_lock(rejected.Lock);
+ }
+#endif
  emulate_codec=0;
  delays=0;
  assert(Pj1019GpioInitialize(&owner,&gpio)==0);
