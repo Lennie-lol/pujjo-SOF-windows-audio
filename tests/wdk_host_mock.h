@@ -125,6 +125,8 @@ static int block_send, entered, release_send;
 #endif
 static UCHAR last_gpio_value;
 static int emulate_codec;
+static int emulate_cold_calibration, cold_triggered;
+static unsigned cold_status_reads;
 static uint16_t codec_registers[65536];
 static ULONG_PTR spb_written_count = 4;
 static NTSTATUS WdfIoTargetSendWriteSynchronously(WDFIOTARGET target,void *request,
@@ -132,7 +134,20 @@ static NTSTATUS WdfIoTargetSendWriteSynchronously(WDFIOTARGET target,void *reque
  (void)request;(void)offset;assert(target && target->open && emulate_codec);
  assert(opts->Timeout==-10000000 && input->size==4);
  const uint8_t *tx=input->buffer;
- codec_registers[(tx[0]<<8)|tx[1]]=(uint16_t)((tx[2]<<8)|tx[3]);
+ uint16_t reg=(uint16_t)((tx[0]<<8)|tx[1]);
+ uint16_t value=(uint16_t)((tx[2]<<8)|tx[3]);
+ if (emulate_cold_calibration && reg==0) {
+  memset(codec_registers,0,sizeof(codec_registers));
+  codec_registers[0xff]=0x6749; /* simulated RT5682S reset */
+  cold_triggered=0;
+  cold_status_reads=0;
+ } else {
+  codec_registers[reg]=value;
+  if (emulate_cold_calibration && reg==0x01de && value==0xfc00) {
+   cold_triggered=1;
+   cold_status_reads=0;
+  }
+ }
  ++sends;*bytes=spb_written_count;return fail_send?-12:0;
 }
 static NTSTATUS WdfIoTargetSendIoctlSynchronously(WDFIOTARGET target,void *request,int code,
@@ -145,7 +160,12 @@ static NTSTATUS WdfIoTargetSendIoctlSynchronously(WDFIOTARGET target,void *reque
   const uint8_t *index=e[0].buffer;
   /* Model a controller that modifies output even on short/error returns. */
   uint16_t value=0x6749;
-  if(emulate_codec) value=codec_registers[(index[0]<<8)|index[1]];
+  if(emulate_codec) {
+   uint16_t reg=(uint16_t)((index[0]<<8)|index[1]);
+   value=codec_registers[reg];
+   if (emulate_cold_calibration && reg==0x01ea && cold_triggered)
+    value=(++cold_status_reads<3)?0x8000:0;
+  }
   else assert(index[0]==0 && (index[1]==0xfd || index[1]==0xfe || index[1]==0xff));
   ((uint8_t*)e[1].buffer)[0]=(uint8_t)(value>>8);
   ((uint8_t*)e[1].buffer)[1]=(uint8_t)value;
