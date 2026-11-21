@@ -75,6 +75,14 @@ int main(void) {
  emulate_codec=1;
  codec_registers[0xff]=PJ5682S_EXPECTED_DEVICE_ID;
  assert(Pj5682sSpbOpen(&owner,1,0,&spb)==0 && Pj5682sSpbSetPower(&spb,TRUE)==0);
+ /* D0 does not establish cold calibration: no control bus writes allowed. */
+ before=sends;
+ assert(!pj5682s_cold_is_ready(&spb.Cold));
+ assert(Pj5682sSpbStartControl(&spb,&codec_profile,&codec_program)==STATUS_DEVICE_NOT_READY);
+ assert(sends==before);
+ /* Host mock ONLY: stand in for an independently qualified cold sequence.
+  * Production must never set this phase directly or infer it from D0. */
+ spb.Cold.phase=PJ5682S_COLD_READY;
  codec_program.steps[0].mask=1;
  before=sends;
  assert(Pj5682sSpbStartControl(&spb,&codec_profile,&codec_program)==STATUS_ACCESS_DENIED);
@@ -90,6 +98,12 @@ int main(void) {
  assert(codec_registers[0x63]==0 && codec_registers[0x61]==0 && delays==2);
  assert(Pj5682sSpbGetJack(&spb,Pj5682sJackPresence,&jack)==STATUS_DEVICE_NOT_READY);
  assert(Pj5682sSpbSetPower(&spb,TRUE)==0);
+ before=sends;
+ assert(!pj5682s_cold_is_ready(&spb.Cold));
+ assert(Pj5682sSpbStartControl(&spb,&codec_profile,&codec_program)==STATUS_DEVICE_NOT_READY);
+ assert(sends==before);
+ /* Host-only model of another fully qualified cold initialization. */
+ spb.Cold.phase=PJ5682S_COLD_READY;
  /* Exercise the new clocked path through the actual SPB transport code. */
  pj5682s_control_profile pll_profile=codec_profile;
  pll_profile.mclk_hz=19200000;
