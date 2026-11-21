@@ -13,41 +13,6 @@
 #define PJ5682S_SPB_TIMEOUT_MS 1000
 
 #ifdef PJ5682S_ENABLE_CONTROL
-/* The routine is deliberately inert in normal WDK builds. Lab builds
- * still require an explicit, independent power-epoch confirmation. */
-NTSTATUS Pj5682sSpbColdInitialize(PJ5682S_SPB_WINDOWS *state,
-    const pj5682s_cold_profile *profile, BOOLEAN freshPowerEpochConfirmed)
-{
-    NTSTATUS status = STATUS_ACCESS_DENIED;
-    PAGED_CODE();
-    if (!state || !state->Lock || !profile) return STATUS_INVALID_PARAMETER;
-#ifdef PJ5682S_ENABLE_LAB_COLD_INIT
-    WdfWaitLockAcquire(state->Lock, NULL);
-    if (state->Opened && state->Powered && state->Target &&
-        !state->ColdAttempted && freshPowerEpochConfirmed == TRUE &&
-        !state->Control.count && !state->Control.active && !state->Control.faulted &&
-        profile->board_qualified == 1u && profile->exclusive_owner == 1u &&
-        profile->rails_ready == 1u && profile->outputs_isolated == 1u) {
-        pj5682s_cold_state attempt;
-        const pj5682s_bus bus = {state, ControlRead, ControlWrite};
-        RtlZeroMemory(&attempt, sizeof(attempt));
-        state->ColdAttempted = TRUE; /* Latch before first potential I2C write. */
-        state->ColdTransactionActive = TRUE;
-        status = ControlStatus(pj5682s_cold_initialize(&attempt, &bus, profile, ControlDelay));
-        state->ColdTransactionActive = FALSE;
-        state->Cold = attempt;
-        if (!NT_SUCCESS(status)) {
-            pj5682s_cold_invalidate(&state->Cold);
-            state->Control.faulted = 1; /* No in-place retry after a partial reset. */
-        }
-    }
-    WdfWaitLockRelease(state->Lock);
-#else
-    UNREFERENCED_PARAMETER(freshPowerEpochConfirmed);
-#endif
-    return status;
-}
-
 static NTSTATUS StopControlLocked(PJ5682S_SPB_WINDOWS *state);
 static int ControlDelay(void *context, unsigned milliseconds);
 #endif
@@ -351,6 +316,41 @@ static NTSTATUS ControlStatus(pj5682s_status status)
     case PJ5682S_VERIFY_FAILED: return STATUS_DEVICE_PROTOCOL_ERROR;
     default: return STATUS_IO_DEVICE_ERROR;
     }
+}
+
+/* The routine is deliberately inert in normal WDK builds. Lab builds
+ * still require an explicit, independent power-epoch confirmation. */
+NTSTATUS Pj5682sSpbColdInitialize(PJ5682S_SPB_WINDOWS *state,
+    const pj5682s_cold_profile *profile, BOOLEAN freshPowerEpochConfirmed)
+{
+    NTSTATUS status = STATUS_ACCESS_DENIED;
+    PAGED_CODE();
+    if (!state || !state->Lock || !profile) return STATUS_INVALID_PARAMETER;
+#ifdef PJ5682S_ENABLE_LAB_COLD_INIT
+    WdfWaitLockAcquire(state->Lock, NULL);
+    if (state->Opened && state->Powered && state->Target &&
+        !state->ColdAttempted && freshPowerEpochConfirmed == TRUE &&
+        !state->Control.count && !state->Control.active && !state->Control.faulted &&
+        profile->board_qualified == 1u && profile->exclusive_owner == 1u &&
+        profile->rails_ready == 1u && profile->outputs_isolated == 1u) {
+        pj5682s_cold_state attempt;
+        const pj5682s_bus bus = {state, ControlRead, ControlWrite};
+        RtlZeroMemory(&attempt, sizeof(attempt));
+        state->ColdAttempted = TRUE; /* Latch before first potential I2C write. */
+        state->ColdTransactionActive = TRUE;
+        status = ControlStatus(pj5682s_cold_initialize(&attempt, &bus, profile, ControlDelay));
+        state->ColdTransactionActive = FALSE;
+        state->Cold = attempt;
+        if (!NT_SUCCESS(status)) {
+            pj5682s_cold_invalidate(&state->Cold);
+            state->Control.faulted = 1; /* No in-place retry after a partial reset. */
+        }
+    }
+    WdfWaitLockRelease(state->Lock);
+#else
+    UNREFERENCED_PARAMETER(freshPowerEpochConfirmed);
+#endif
+    return status;
 }
 
 static NTSTATUS StopControlLocked(PJ5682S_SPB_WINDOWS *state)
