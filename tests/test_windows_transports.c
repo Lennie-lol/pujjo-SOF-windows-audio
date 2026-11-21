@@ -149,6 +149,52 @@ int main(void) {
   assert(Pj5682sSpbClose(&stale)==STATUS_DEVICE_NOT_READY && !live_targets);
   destroy_lock(stale.Lock);
  }
+ /* The cold transport is denied by default, and in lab builds it requires
+  * independent rail ownership, isolation, and exactly one attempt per D0. */
+ {
+  PJ5682S_SPB_WINDOWS cold={0};
+  const pj5682s_cold_profile qualified={1,1,1,1};
+  pj5682s_cold_profile denied=qualified;
+  assert(Pj5682sSpbInitialize(&owner,&cold)==0);
+  assert(Pj5682sSpbOpen(&owner,1,0,&cold)==0);
+  before=sends;
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,TRUE)==STATUS_ACCESS_DENIED);
+  assert(sends==before); /* Even qualified flags never bypass D0. */
+  assert(Pj5682sSpbSetPower(&cold,TRUE)==0);
+  denied.outputs_isolated=0;
+  before=sends;
+  assert(Pj5682sSpbColdInitialize(&cold,&denied,TRUE)==STATUS_ACCESS_DENIED);
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,FALSE)==STATUS_ACCESS_DENIED);
+  assert(sends==before);
+#ifdef PJ5682S_ENABLE_LAB_COLD_INIT
+  emulate_cold_calibration=1;
+  transferred=4;
+  codec_registers[0xff]=PJ5682S_EXPECTED_DEVICE_ID;
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,TRUE)==STATUS_SUCCESS);
+  assert(pj5682s_cold_is_ready(&cold.Cold) && cold.ColdAttempted);
+  assert(cold_status_reads==3 && !cold.ColdTransactionActive);
+  before=sends;
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,TRUE)==STATUS_ACCESS_DENIED);
+  assert(sends==before);
+  assert(Pj5682sSpbSetPower(&cold,FALSE)==0);
+  assert(!pj5682s_cold_is_ready(&cold.Cold));
+  assert(Pj5682sSpbSetPower(&cold,TRUE)==0);
+  fail_send=1;
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,TRUE)==STATUS_IO_DEVICE_ERROR);
+  fail_send=0;
+  assert(!pj5682s_cold_is_ready(&cold.Cold) && cold.Control.faulted);
+  before=sends;
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,TRUE)==STATUS_ACCESS_DENIED);
+  assert(sends==before); /* Fault and retry forbidden within power epoch. */
+  emulate_cold_calibration=0;
+#else
+  before=sends;
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,TRUE)==STATUS_ACCESS_DENIED);
+  assert(!pj5682s_cold_is_ready(&cold.Cold) && sends==before);
+#endif
+  assert(Pj5682sSpbClose(&cold)==STATUS_SUCCESS);
+  destroy_lock(cold.Lock);
+ }
  emulate_codec=0;
  delays=0;
  assert(Pj1019GpioInitialize(&owner,&gpio)==0);
