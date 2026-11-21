@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "PujjoIpc4BootModel.h"
+#include "../PujjoIpc4Protocol.h"
 #include <limits.h>
 #if defined(PJ_IPC4_HOST_TEST) && (defined(_KERNEL_MODE) || defined(_NTDDK_) || defined(_WDF_H_))
 #error "PJ_IPC4_HOST_TEST must never be enabled in a kernel build"
@@ -69,6 +70,35 @@ pj_boot_result pj_boot_notify(pj_boot_model *b, uint32_t epoch, pj_boot_event ev
         b->state = PJ_BOOT_FAULT;
         return PJ_BOOT_TIMEOUT;
     }
+    b->state = PJ_BOOT_WAIT_CAPS; /* Real firmware also requires FW_CONFIG. */
+    return PJ_BOOT_OK;
+#endif
+}
+/* Host-only model of the real boot-admission FW_CONFIG parser.
+ * Token is a host-side epoch and is not sent over the IPC4 wire. */
+pj_boot_result pj_boot_confirm_caps(pj_boot_model *b, uint32_t epoch,
+                                    const uint8_t *fw_config, size_t bytes)
+{
+    if (!b) return PJ_BOOT_BAD_ARG;
+    if (b->state == PJ_BOOT_FAULT) return PJ_BOOT_FAULT_LATCHED;
+    if (b->state != PJ_BOOT_WAIT_CAPS) return PJ_BOOT_WRONG_STATE;
+    if (!epoch || epoch != b->epoch) return PJ_BOOT_STALE_EVENT;
+#ifndef PJ_IPC4_HOST_TEST
+    (void)fw_config;
+    (void)bytes;
+    return PJ_BOOT_LOCKED;
+#else
+    pj_ipc4_boot_caps caps;
+    if (!b->remaining_ms) {
+        b->state = PJ_BOOT_FAULT;
+        return PJ_BOOT_TIMEOUT;
+    }
+    if (pj_ipc4_fw_boot_caps(fw_config, bytes, 4096u, 2u, &caps) != PJ_IPC4_VALID) {
+        b->state = PJ_BOOT_FAULT;
+        b->remaining_ms = 0u;
+        return PJ_BOOT_UNVERIFIED;
+    }
+    b->remaining_ms = 0u;
     b->state = PJ_BOOT_READY;
     return PJ_BOOT_OK;
 #endif
@@ -77,7 +107,8 @@ pj_boot_result pj_boot_advance_time(pj_boot_model *b, uint32_t elapsed_ms)
 {
     if (!b) return PJ_BOOT_BAD_ARG;
     if (b->state == PJ_BOOT_FAULT) return PJ_BOOT_FAULT_LATCHED;
-    if (b->state != PJ_BOOT_WAIT_READY) return PJ_BOOT_WRONG_STATE;
+    if (b->state != PJ_BOOT_WAIT_READY && b->state != PJ_BOOT_WAIT_CAPS)
+        return PJ_BOOT_WRONG_STATE;
 #ifndef PJ_IPC4_HOST_TEST
     (void)elapsed_ms;
     return PJ_BOOT_LOCKED;
