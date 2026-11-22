@@ -14,6 +14,7 @@ if not cc:
     raise SystemExit('FAIL: C compiler required for boot/speaker integration tests')
 sources = [exp / n for n in ('PujjoIpc4BootModel.c', 'PujjoBringupCoordinator.c',
            'PujjoAudioInit.c', 'PujjoRt1019pAmp.c', 'PujjoSofFirmwarePolicy.c')]
+sources.append(root / 'src/driver/PujjoIpc4Protocol.c')
 sources.append(root / 'tests/test_pujjo_boot_to_speaker.c')
 with tempfile.TemporaryDirectory(prefix='pj_boot_speaker_') as tmp:
     out = Path(tmp) / ('speaker.exe' if os.name == 'nt' else 'speaker')

@@ -64,3 +64,20 @@ From a clean source checkout:
 On Windows, the portable C runner requires an installed GCC/Clang toolchain.
 The actual Windows WDK source compile remains available via GitHub Actions
 and the separate Windows VM build script. Physical audio remains untested.
+
+## Host boot readiness correction (2026-11-21)
+
+The host-only `PujjoIpc4BootModel` no longer treats an IPC4 `FW_READY`
+notification as an operational DSP. After the matching simulated notification,
+it enters `PJ_BOOT_WAIT_CAPS`. A complete, epoch-matched `FW_CONFIG` reply must
+pass the production `pj_ipc4_fw_boot_caps` parser, including both 4096-byte
+mailboxes and at least two pipelines, before `PJ_BOOT_READY` is set.
+A missing reply times out; malformed or undersized capabilities latch a fault.
+Tests exercise stale generations, duplicate/insufficient capability fields,
+and that the mock speaker remains muted after `FW_READY` alone.
+
+This corrects an optimistic **simulation** only: it does not implement the
+Windows kernel transport or prove firmware has booted on Pujjo. The real
+`SofIpcGetBootFirmwareVersion` already performs the corresponding FW_CONFIG
+admission check, but on-device IPC, DMA, IRQ and power evidence remain missing.
+Hardware writes, installable packages and speaker activation remain disabled.

@@ -17,7 +17,8 @@ with tempfile.TemporaryDirectory(prefix='pj_ipc4_model_') as temp:
     target = Path(temp) / ('boot.exe' if os.name == 'nt' else 'boot')
     for mode, flags in (('locked', []), ('mock', ['-DPJ_IPC4_HOST_TEST'])):
         cmd = [cc, '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wconversion',
-               '-Wsign-conversion', '-pedantic', *flags, str(source), str(test), '-o', str(target)]
+               '-Wsign-conversion', '-pedantic', *flags, str(source), str(root / 'src/driver/PujjoIpc4Protocol.c'),
+               str(test), '-o', str(target)]
         subprocess.run(cmd, check=True, timeout=40)
         subprocess.run([str(target)], check=True, timeout=10)
         print('PASS:', mode, 'IPC4 boot state transitions')

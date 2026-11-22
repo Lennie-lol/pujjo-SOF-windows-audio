@@ -67,6 +67,43 @@ pj5682s_status pj5682s_validate_analog(const pj5682s_analog_program *program);
 pj5682s_status pj5682s_control_analog(pj5682s_control *state, const pj5682s_bus *bus,
     const pj5682s_analog_program *program, pj5682s_wait wait);
 
+
+/* Cold-start owns the entire powered codec, not a stream lease. The
+ * board owner must serialize it with removal, power and route operations.
+ * Qualification flags must come from independently reviewed board evidence.
+ * No Windows caller is enabled by this API. State is zeroed only after a
+ * confirmed new power epoch; never clear a fault to retry on a live codec. */
+typedef enum {
+    PJ5682S_COLD_IDLE = 0,
+    PJ5682S_COLD_SETTLING,
+    PJ5682S_COLD_RESET,
+    PJ5682S_COLD_PATCH,
+    PJ5682S_COLD_PREPARE,
+    PJ5682S_COLD_CALIBRATING,
+    PJ5682S_COLD_RESTORE,
+    PJ5682S_COLD_READY,
+    PJ5682S_COLD_FAILED
+} pj5682s_cold_phase;
+
+typedef struct {
+    unsigned board_qualified, exclusive_owner, rails_ready, outputs_isolated;
+} pj5682s_cold_profile;
+
+typedef struct {
+    pj5682s_cold_phase phase, failed_at;
+    unsigned polls, busy_seen, reset_attempted;
+    pj5682s_status recovery_status;
+} pj5682s_cold_state;
+
+/* PASSIVE_LEVEL / blocking wait required. READY means sequence completed,
+ * not electrical qualification or authorization to unmute. */
+pj5682s_status pj5682s_cold_initialize(pj5682s_cold_state *state,
+    const pj5682s_bus *bus, const pj5682s_cold_profile *profile, pj5682s_wait wait);
+/* Called on every bus close / power transition; latches unsafe-to-reuse.
+ * Only independent, verified power-cycle ownership can reset this state. */
+void pj5682s_cold_invalidate(pj5682s_cold_state *state);
+int pj5682s_cold_is_ready(const pj5682s_cold_state *state);
+
 typedef enum {
     Pj5682sJackPresence,
     Pj5682sJackClassify,

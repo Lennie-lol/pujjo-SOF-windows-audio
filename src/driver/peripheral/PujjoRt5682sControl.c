@@ -370,3 +370,164 @@ pj5682s_status pj5682s_control_classify(pj5682s_control *state, const pj5682s_bu
     }
     return PJ5682S_VERIFY_FAILED;
 }
+
+/* RT5682S cold-start candidate, register facts cross-checked against
+ * Linux v6.13 sound/soc/codecs/rt5682s.{c,h}. This independent executor
+ * fails closed on every transfer and requires a fresh busy-to-idle edge.
+ * It must not be used for resume or an already-owned streaming device. */
+typedef struct {
+    PJ_WORD reg, mask, value;
+    unsigned delay_ms;
+} pj5682s_cold_op;
+
+/* Zero mask is command-only: reset, calibration trigger and volatile SAR
+ * configuration have no stable readback contract. All other entries
+ * verify the selected bits; full-width writes require exclusive ownership. */
+static pj5682s_status cold_op(const pj5682s_bus *bus, const pj5682s_cold_op *op,
+                              pj5682s_wait wait)
+{
+    PJ_WORD value = op->value, observed;
+    PJ_BYTE bytes[4];
+    pj5682s_status status;
+    if (op->mask && op->mask != 0xffffu) {
+        status = read_register(bus, op->reg, &observed);
+        if (status != PJ5682S_OK) return status;
+        value = (PJ_WORD)((observed & (PJ_WORD)~op->mask) | value);
+    }
+    pj5682s_encode_write(op->reg, value, bytes);
+    if (bus->write_only(bus->context, bytes, sizeof(bytes))) return PJ5682S_BUS_ERROR;
+    if (op->delay_ms && wait(bus->context, op->delay_ms)) return PJ5682S_BUS_ERROR;
+    if (!op->mask) return PJ5682S_OK;
+    status = read_register(bus, op->reg, &observed);
+    if (status != PJ5682S_OK) return status;
+    return (observed & op->mask) == op->value ? PJ5682S_OK : PJ5682S_VERIFY_FAILED;
+}
+
+static pj5682s_status cold_batch(const pj5682s_bus *bus, pj5682s_wait wait,
+    const pj5682s_cold_op *ops, unsigned count)
+{
+    for (unsigned i = 0; i < count; ++i) {
+        pj5682s_status status = cold_op(bus, &ops[i], wait);
+        if (status != PJ5682S_OK) return status;
+    }
+    return PJ5682S_OK;
+}
+
+#define COLD_WRITE(r,v) {r,0xffffu,v,0}
+#define COLD_COUNT(a) ((unsigned)(sizeof(a)/sizeof((a)[0])))
+static const pj5682s_cold_op cold_reset = {0,0,0,1};
+static const pj5682s_cold_op cold_patch[] = {
+    COLD_WRITE(0x0008,0x0007), COLD_WRITE(0x0132,0),
+    COLD_WRITE(0x013a,0x2020), COLD_WRITE(0x0118,0x0101),
+    COLD_WRITE(0x0117,0x80c0), COLD_WRITE(0x01e6,2),
+    COLD_WRITE(0x008e,0), COLD_WRITE(0x0091,0x3c15),
+    COLD_WRITE(0x0019,0xfefe), {0x0211,0,0xac00,0},
+    {0x0212,0,0x024c,0}, COLD_WRITE(0x0015,0x0804),
+    {0x0062,0x0080,0,20}
+};
+static const pj5682s_cold_op cold_prepare[] = {
+    {0x0063,0xffff,0xaa80,15}, COLD_WRITE(0x0063,0xfa80),
+    COLD_WRITE(0x0061,0x01c0), COLD_WRITE(0x0094,0x0380),
+    COLD_WRITE(0x0080,0x8000), COLD_WRITE(0x0073,0x1001),
+    COLD_WRITE(0x013a,0x3030), COLD_WRITE(0x013b,0xb000),
+    COLD_WRITE(0x0026,0x686c), COLD_WRITE(0x0044,0x5151),
+    COLD_WRITE(0x01df,0x0321), COLD_WRITE(0x01db,4),
+    {0x01de,0,0x7c00,0}
+};
+static const pj5682s_cold_op cold_trigger = {0x01de,0,0xfc00,0};
+static const pj5682s_cold_op cold_restore[] = {
+    COLD_WRITE(0x0094,0x0180), COLD_WRITE(0x0044,0x5858),
+    COLD_WRITE(0x0026,0xc0c4), COLD_WRITE(0x01df,0x0320),
+    COLD_WRITE(0x0061,0x00c0), COLD_WRITE(0x0063,0x0800),
+    COLD_WRITE(0x0080,0),
+    {0x0094,0x0300,0x0100,0}, {0x0063,0x0080,0x0080,0},
+    {0x01db,0x0003,0x0003,0}, {0x0091,0x0300,0x0200,0},
+    {0x3b00,0x0070,0x0020,0}
+};
+#undef COLD_WRITE
+
+pj5682s_status pj5682s_cold_initialize(pj5682s_cold_state *state,
+    const pj5682s_bus *bus, const pj5682s_cold_profile *profile, pj5682s_wait wait)
+{
+    pj5682s_status status;
+    PJ_WORD sample;
+    if (!state || !bus || !bus->write_then_read || !bus->write_only || !profile || !wait)
+        return PJ5682S_BAD_ARGUMENT;
+    if (state->phase != PJ5682S_COLD_IDLE) return PJ5682S_INCORRECT_STATE;
+    if (profile->board_qualified != 1u || profile->exclusive_owner != 1u ||
+        profile->rails_ready != 1u || profile->outputs_isolated != 1u)
+        return PJ5682S_WRITE_LOCKED;
+
+    state->phase = PJ5682S_COLD_SETTLING;
+    status = wait(bus->context, 50u) ? PJ5682S_BUS_ERROR : verify_device(bus);
+    if (status != PJ5682S_OK) goto failed;
+    state->phase = PJ5682S_COLD_RESET;
+    state->reset_attempted = 1;
+    status = cold_op(bus, &cold_reset, wait);
+    if (status != PJ5682S_OK) goto failed;
+    status = verify_device(bus);
+    if (status != PJ5682S_OK) goto failed;
+    state->phase = PJ5682S_COLD_PATCH;
+    status = cold_batch(bus, wait, cold_patch, COLD_COUNT(cold_patch));
+    if (status != PJ5682S_OK) goto failed;
+    state->phase = PJ5682S_COLD_PREPARE;
+    status = cold_batch(bus, wait, cold_prepare, COLD_COUNT(cold_prepare));
+    if (status != PJ5682S_OK) goto failed;
+    status = read_register(bus, 0x01ea, &sample);
+    if (status != PJ5682S_OK) goto failed;
+    if (sample & 0x8000u) { status = PJ5682S_VERIFY_FAILED; goto failed; }
+
+    state->phase = PJ5682S_COLD_CALIBRATING;
+    status = cold_op(bus, &cold_trigger, wait);
+    if (status != PJ5682S_OK) goto failed;
+    while (state->polls < 60u) {
+        ++state->polls;
+        status = read_register(bus, 0x01ea, &sample);
+        if (status != PJ5682S_OK) goto failed;
+        if (sample & 0x8000u) state->busy_seen = 1;
+        else if (state->busy_seen) break;
+        if (state->polls == 60u) { status = PJ5682S_VERIFY_FAILED; goto failed; }
+        if (wait(bus->context, 10u)) { status = PJ5682S_BUS_ERROR; goto failed; }
+    }
+
+    state->phase = PJ5682S_COLD_RESTORE;
+    status = cold_batch(bus, wait, cold_restore, COLD_COUNT(cold_restore));
+    if (status != PJ5682S_OK) goto failed;
+    status = verify_device(bus);
+    if (status != PJ5682S_OK) goto failed;
+    state->phase = PJ5682S_COLD_READY;
+    return PJ5682S_OK;
+
+failed:
+    state->failed_at = state->phase;
+    state->phase = PJ5682S_COLD_FAILED;
+    /* A transfer can fail after changing the chip. Do not retry calibration,
+     * or try to restore arbitrary pre-reset state. Keep external isolation
+     * asserted and attempt a reset only after re-verifying identity. */
+    if (state->reset_attempted) {
+        state->recovery_status = verify_device(bus);
+        if (state->recovery_status == PJ5682S_OK) {
+            state->recovery_status = cold_op(bus, &cold_reset, wait);
+            /* A successful bus write is not evidence that reset restored
+             * the expected codec. Keep the original failure latched and
+             * report recovery success only after a fresh identity read. */
+            if (state->recovery_status == PJ5682S_OK)
+                state->recovery_status = verify_device(bus);
+        }
+    }
+    return status;
+}
+#undef COLD_COUNT
+
+/* Portable power-epoch guard. Never equate D0Entry with fresh calibration. */
+void pj5682s_cold_invalidate(pj5682s_cold_state *state)
+{
+    if (!state) return;
+    state->failed_at = state->phase;
+    state->phase = PJ5682S_COLD_FAILED;
+}
+
+int pj5682s_cold_is_ready(const pj5682s_cold_state *state)
+{
+    return state && state->phase == PJ5682S_COLD_READY;
+}

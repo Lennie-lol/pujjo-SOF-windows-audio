@@ -75,6 +75,14 @@ int main(void) {
  emulate_codec=1;
  codec_registers[0xff]=PJ5682S_EXPECTED_DEVICE_ID;
  assert(Pj5682sSpbOpen(&owner,1,0,&spb)==0 && Pj5682sSpbSetPower(&spb,TRUE)==0);
+ /* D0 does not establish cold calibration: no control bus writes allowed. */
+ before=sends;
+ assert(!pj5682s_cold_is_ready(&spb.Cold));
+ assert(Pj5682sSpbStartControl(&spb,&codec_profile,&codec_program)==STATUS_DEVICE_NOT_READY);
+ assert(sends==before);
+ /* Host mock ONLY: stand in for an independently qualified cold sequence.
+  * Production must never set this phase directly or infer it from D0. */
+ spb.Cold.phase=PJ5682S_COLD_READY;
  codec_program.steps[0].mask=1;
  before=sends;
  assert(Pj5682sSpbStartControl(&spb,&codec_profile,&codec_program)==STATUS_ACCESS_DENIED);
@@ -90,6 +98,12 @@ int main(void) {
  assert(codec_registers[0x63]==0 && codec_registers[0x61]==0 && delays==2);
  assert(Pj5682sSpbGetJack(&spb,Pj5682sJackPresence,&jack)==STATUS_DEVICE_NOT_READY);
  assert(Pj5682sSpbSetPower(&spb,TRUE)==0);
+ before=sends;
+ assert(!pj5682s_cold_is_ready(&spb.Cold));
+ assert(Pj5682sSpbStartControl(&spb,&codec_profile,&codec_program)==STATUS_DEVICE_NOT_READY);
+ assert(sends==before);
+ /* Host-only model of another fully qualified cold initialization. */
+ spb.Cold.phase=PJ5682S_COLD_READY;
  /* Exercise the new clocked path through the actual SPB transport code. */
  pj5682s_control_profile pll_profile=codec_profile;
  pll_profile.mclk_hz=19200000;
@@ -113,6 +127,107 @@ int main(void) {
  assert(spb.Control.faulted);
  spb_written_count=4;
  assert(Pj5682sSpbClose(&spb)==0 && !live_targets);
+ /* A register-write failure during D0 exit must not cause stale rollback
+  * when the next power epoch begins. No I2C transaction may occur on reentry. */
+ {
+  PJ5682S_SPB_WINDOWS stale={0};
+  memset(codec_registers,0,sizeof(codec_registers));
+  codec_registers[0xff]=PJ5682S_EXPECTED_DEVICE_ID;
+  assert(Pj5682sSpbInitialize(&owner,&stale)==0);
+  assert(Pj5682sSpbOpen(&owner,1,0,&stale)==0);
+  assert(Pj5682sSpbSetPower(&stale,TRUE)==0);
+  stale.Cold.phase=PJ5682S_COLD_READY; /* mock-qualified only */
+  assert(Pj5682sSpbStartControl(&stale,&codec_profile,&codec_program)==0);
+  spb_written_count=3; /* simulated partial I2C write during rollback */
+  assert(Pj5682sSpbSetPower(&stale,FALSE)==STATUS_IO_DEVICE_ERROR);
+  assert(!stale.Powered && stale.Control.count && stale.Control.faulted);
+  assert(!pj5682s_cold_is_ready(&stale.Cold));
+  before=sends;
+  assert(Pj5682sSpbSetPower(&stale,TRUE)==STATUS_DEVICE_NOT_READY);
+  assert(sends==before && !stale.Powered);
+  spb_written_count=4;
+  assert(Pj5682sSpbClose(&stale)==STATUS_DEVICE_NOT_READY && !live_targets);
+  destroy_lock(stale.Lock);
+ }
+ /* The cold transport is denied by default, and in lab builds it requires
+  * independent rail ownership, isolation, and exactly one attempt per D0. */
+ {
+  PJ5682S_SPB_WINDOWS cold={0};
+  const pj5682s_cold_profile qualified={1,1,1,1};
+  pj5682s_cold_profile denied=qualified;
+  assert(Pj5682sSpbInitialize(&owner,&cold)==0);
+  assert(Pj5682sSpbOpen(&owner,1,0,&cold)==0);
+  before=sends;
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,TRUE)==STATUS_ACCESS_DENIED);
+  assert(sends==before); /* Even qualified flags never bypass D0. */
+  assert(Pj5682sSpbSetPower(&cold,TRUE)==0);
+  denied.outputs_isolated=0;
+  before=sends;
+  assert(Pj5682sSpbColdInitialize(&cold,&denied,TRUE)==STATUS_ACCESS_DENIED);
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,FALSE)==STATUS_ACCESS_DENIED);
+  assert(sends==before);
+#ifdef PJ5682S_ENABLE_LAB_COLD_INIT
+  emulate_cold_calibration=1;
+  transferred=4;
+  codec_registers[0xff]=PJ5682S_EXPECTED_DEVICE_ID;
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,TRUE)==STATUS_SUCCESS);
+  assert(pj5682s_cold_is_ready(&cold.Cold) && cold.ColdAttempted);
+  assert(cold_status_reads==3 && !cold.ColdTransactionActive);
+  before=sends;
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,TRUE)==STATUS_ACCESS_DENIED);
+  assert(sends==before);
+  assert(Pj5682sSpbSetPower(&cold,FALSE)==0);
+  assert(!pj5682s_cold_is_ready(&cold.Cold));
+  assert(Pj5682sSpbSetPower(&cold,TRUE)==0);
+  fail_send=1;
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,TRUE)==STATUS_IO_DEVICE_ERROR);
+  fail_send=0;
+  assert(!pj5682s_cold_is_ready(&cold.Cold) && cold.Control.faulted);
+  before=sends;
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,TRUE)==STATUS_ACCESS_DENIED);
+  assert(sends==before); /* Fault and retry forbidden within power epoch. */
+  emulate_cold_calibration=0;
+#else
+  before=sends;
+  assert(Pj5682sSpbColdInitialize(&cold,&qualified,TRUE)==STATUS_ACCESS_DENIED);
+  assert(!pj5682s_cold_is_ready(&cold.Cold) && sends==before);
+#endif
+  assert(Pj5682sSpbClose(&cold)==STATUS_SUCCESS);
+  destroy_lock(cold.Lock);
+ }
+#ifdef PJ5682S_ENABLE_LAB_COLD_INIT
+ /* Fault injection at the actual Windows SPB bridge: wrong identity,
+  * truncated read and truncated reset write must all fail closed.
+  * These are host mocks, never permission for real cold writes. */
+ for (unsigned fault=0; fault<3; ++fault) {
+  PJ5682S_SPB_WINDOWS rejected={0};
+  const pj5682s_cold_profile qualified={1,1,1,1};
+  assert(Pj5682sSpbInitialize(&owner,&rejected)==STATUS_SUCCESS);
+  assert(Pj5682sSpbOpen(&owner,1,0,&rejected)==STATUS_SUCCESS);
+  assert(Pj5682sSpbSetPower(&rejected,TRUE)==STATUS_SUCCESS);
+  memset(codec_registers,0,sizeof(codec_registers));
+  codec_registers[0xff]=fault==0 ? 0 : PJ5682S_EXPECTED_DEVICE_ID;
+  emulate_cold_calibration=1;
+  cold_triggered=0;
+  cold_status_reads=0;
+  transferred=fault==1 ? 3 : 4;
+  spb_written_count=fault==2 ? 3 : 4;
+  const NTSTATUS expected=fault==0 ? STATUS_DEVICE_CONFIGURATION_ERROR : STATUS_IO_DEVICE_ERROR;
+  assert(Pj5682sSpbColdInitialize(&rejected,&qualified,TRUE)==expected);
+  assert(rejected.ColdAttempted && rejected.Control.faulted);
+  assert(!rejected.ColdTransactionActive);
+  assert(!pj5682s_cold_is_ready(&rejected.Cold));
+  assert(rejected.Cold.phase==PJ5682S_COLD_FAILED);
+  before=sends;
+  assert(Pj5682sSpbColdInitialize(&rejected,&qualified,TRUE)==STATUS_ACCESS_DENIED);
+  assert(sends==before); /* A failed transfer cannot be retried in D0. */
+  transferred=4;
+  spb_written_count=4;
+  emulate_cold_calibration=0;
+  assert(Pj5682sSpbClose(&rejected)==STATUS_SUCCESS);
+  destroy_lock(rejected.Lock);
+ }
+#endif
  emulate_codec=0;
  delays=0;
  assert(Pj1019GpioInitialize(&owner,&gpio)==0);

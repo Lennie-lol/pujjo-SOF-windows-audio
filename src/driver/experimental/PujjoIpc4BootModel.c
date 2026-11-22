@@ -1,9 +1,12 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "PujjoIpc4BootModel.h"
 #include <limits.h>
+/* Fail at the feature boundary before kernel-specific transitive includes:
+ * the mock must never be permitted in a Windows kernel build. */
 #if defined(PJ_IPC4_HOST_TEST) && (defined(_KERNEL_MODE) || defined(_NTDDK_) || defined(_WDF_H_))
 #error "PJ_IPC4_HOST_TEST must never be enabled in a kernel build"
 #endif
+#include "../PujjoIpc4Protocol.h"
 
 void pj_boot_init(pj_boot_model *b)
 {
@@ -37,8 +40,9 @@ pj_boot_result pj_boot_stage(pj_boot_model *b, const pj_boot_evidence *e)
 }
 pj_boot_result pj_boot_request(pj_boot_model *b, uint32_t timeout_ms, uint32_t *epoch)
 {
-    if (!b || !epoch || !timeout_ms || timeout_ms > 60000u) return PJ_BOOT_BAD_ARG;
-    *epoch = 0u; /* A failure never returns a usable generation. */
+    if (!epoch) return PJ_BOOT_BAD_ARG;
+    *epoch = 0u; /* Even invalid requests must not leak a prior usable token. */
+    if (!b || !timeout_ms || timeout_ms > 60000u) return PJ_BOOT_BAD_ARG;
     if (b->state == PJ_BOOT_FAULT) return PJ_BOOT_FAULT_LATCHED;
     if (b->state != PJ_BOOT_STAGED) return PJ_BOOT_WRONG_STATE;
 #ifndef PJ_IPC4_HOST_TEST
@@ -69,6 +73,35 @@ pj_boot_result pj_boot_notify(pj_boot_model *b, uint32_t epoch, pj_boot_event ev
         b->state = PJ_BOOT_FAULT;
         return PJ_BOOT_TIMEOUT;
     }
+    b->state = PJ_BOOT_WAIT_CAPS; /* Real firmware also requires FW_CONFIG. */
+    return PJ_BOOT_OK;
+#endif
+}
+/* Host-only model of the real boot-admission FW_CONFIG parser.
+ * Token is a host-side epoch and is not sent over the IPC4 wire. */
+pj_boot_result pj_boot_confirm_caps(pj_boot_model *b, uint32_t epoch,
+                                    const uint8_t *fw_config, size_t bytes)
+{
+    if (!b) return PJ_BOOT_BAD_ARG;
+    if (b->state == PJ_BOOT_FAULT) return PJ_BOOT_FAULT_LATCHED;
+    if (b->state != PJ_BOOT_WAIT_CAPS) return PJ_BOOT_WRONG_STATE;
+    if (!epoch || epoch != b->epoch) return PJ_BOOT_STALE_EVENT;
+#ifndef PJ_IPC4_HOST_TEST
+    (void)fw_config;
+    (void)bytes;
+    return PJ_BOOT_LOCKED;
+#else
+    pj_ipc4_boot_caps caps;
+    if (!b->remaining_ms) {
+        b->state = PJ_BOOT_FAULT;
+        return PJ_BOOT_TIMEOUT;
+    }
+    if (pj_ipc4_fw_boot_caps(fw_config, bytes, 4096u, 2u, &caps) != PJ_IPC4_VALID) {
+        b->state = PJ_BOOT_FAULT;
+        b->remaining_ms = 0u;
+        return PJ_BOOT_UNVERIFIED;
+    }
+    b->remaining_ms = 0u;
     b->state = PJ_BOOT_READY;
     return PJ_BOOT_OK;
 #endif
@@ -77,7 +110,8 @@ pj_boot_result pj_boot_advance_time(pj_boot_model *b, uint32_t elapsed_ms)
 {
     if (!b) return PJ_BOOT_BAD_ARG;
     if (b->state == PJ_BOOT_FAULT) return PJ_BOOT_FAULT_LATCHED;
-    if (b->state != PJ_BOOT_WAIT_READY) return PJ_BOOT_WRONG_STATE;
+    if (b->state != PJ_BOOT_WAIT_READY && b->state != PJ_BOOT_WAIT_CAPS)
+        return PJ_BOOT_WRONG_STATE;
 #ifndef PJ_IPC4_HOST_TEST
     (void)elapsed_ms;
     return PJ_BOOT_LOCKED;
@@ -122,5 +156,12 @@ pj_boot_result pj_boot_reset_epoch(pj_boot_model *b)
 }
 int pj_boot_is_ready(const pj_boot_model *b)
 {
+#ifndef PJ_IPC4_HOST_TEST
+    /* No production boot transport is connected. A caller-provided or
+     * corrupted state value must never authorize a hardware audio route. */
+    (void)b;
+    return 0;
+#else
     return b && b->state == PJ_BOOT_READY;
+#endif
 }
