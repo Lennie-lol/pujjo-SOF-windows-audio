@@ -381,7 +381,6 @@ SofEvtDeviceAdd(
     WDF_OBJECT_ATTRIBUTES deviceAttributes;
     WDFDEVICE device;
     PSOF_DEVICE_CONTEXT deviceContext;
-    WDF_INTERRUPT_CONFIG interruptConfig;
     char msg[128];
 
     UNREFERENCED_PARAMETER(Driver);
@@ -413,6 +412,7 @@ SofEvtDeviceAdd(
     WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpPowerCallbacks);
     pnpPowerCallbacks.EvtDevicePrepareHardware = SofEvtDevicePrepareHardware;
     pnpPowerCallbacks.EvtDeviceReleaseHardware = SofEvtDeviceReleaseHardware;
+    pnpPowerCallbacks.EvtDeviceSurpriseRemoval = SofEvtDeviceSurpriseRemoval;
     /* FW_READY and stream shutdown require live WDF IRQ delivery. */
     pnpPowerCallbacks.EvtDeviceD0EntryPostInterruptsEnabled = SofEvtDeviceD0Entry;
     pnpPowerCallbacks.EvtDeviceD0ExitPreInterruptsDisabled  = SofEvtDeviceD0Exit;
@@ -439,17 +439,6 @@ SofEvtDeviceAdd(
     KeInitializeMutex(&deviceContext->AudioMutex, 0);
     KeInitializeSpinLock(&deviceContext->AudioPositionLock);
     deviceContext->CurrentPowerState = PowerDeviceD3;
-
-    /* Create Interrupt Object */
-    WDF_INTERRUPT_CONFIG_INIT(&interruptConfig, SofEvtInterruptIsr, SofEvtInterruptDpc);
-    interruptConfig.AutomaticSerialization = FALSE;
-
-    status = WdfInterruptCreate(device, &interruptConfig, WDF_NO_OBJECT_ATTRIBUTES, &deviceContext->WdfInterrupt);
-    if (!NT_SUCCESS(status)) {
-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
-                   "[SOF] WdfInterruptCreate failed with status 0x%08x\n", status);
-        return status;
-    }
 
     /* Create KMDF DMA Enabler for IOMMU / VT-d Common Buffer mapping & Bus Mastering */
     {

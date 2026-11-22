@@ -213,14 +213,13 @@ typedef struct _SOF_DEVICE_CONTEXT {
     /** @brief Kernel virtual address mapping BAR4 DSP registers and mailboxes. */
     PVOID               Bar4VirtualAddress;
 
-    /* Interrupt Resource */
-    /** @brief Assigned interrupt vector. */
-    ULONG               InterruptVector;
-    /** @brief Assigned interrupt IRQL. */
-    KIRQL               InterruptIrql;
-    /** @brief Processor affinity mask for interrupt delivery. */
-    KAFFINITY           InterruptAffinity;
-    /** @brief TRUE if interrupt is Message Signaled (MSI/MSI-X); FALSE for Line. */
+    /* Protected by the framework interrupt lock while connected. */
+    BOOLEAN             IrqConnected;
+    BOOLEAN             IrqArmed;
+    BOOLEAN             IrqPending;
+    BOOLEAN             IrqMaskNeeded;
+    BOOLEAN             IrqMaskFailed;
+    volatile LONG       SurpriseRemoved;
     BOOLEAN             IsMsi;
 
     /* IPC Synchronization and State */
@@ -338,6 +337,7 @@ typedef struct _SOF_DEVICE_CONTEXT {
 #endif
 #endif
 #ifdef _KERNEL_MODE
+    BOOLEAN             IpcRundownClosed; /* PnP callbacks serialize closure. */
     EX_RUNDOWN_REF      IpcRundown;
 #endif
     /** @brief Delayed passive WDF timer to confirm healthy boot and reset watchdog. */
@@ -423,7 +423,16 @@ EVT_WDF_DEVICE_D0_ENTRY_POST_INTERRUPTS_ENABLED SofEvtDeviceD0Entry;
 EVT_WDF_DEVICE_D0_EXIT_PRE_INTERRUPTS_DISABLED SofEvtDeviceD0Exit;
 
 /** @brief High-IRQL Interrupt Service Routine (ISR) identifying doorbell events. */
+EVT_WDF_DEVICE_SURPRISE_REMOVAL SofEvtDeviceSurpriseRemoval;
+
+static inline BOOLEAN SofDeviceRemoved(_In_ PSOF_DEVICE_CONTEXT Ctx)
+{
+    return InterlockedCompareExchange(&Ctx->SurpriseRemoved, 0, 0) != 0;
+}
+
 EVT_WDF_INTERRUPT_ISR SofEvtInterruptIsr;
+EVT_WDF_INTERRUPT_ENABLE SofEvtInterruptEnable;
+EVT_WDF_INTERRUPT_DISABLE SofEvtInterruptDisable;
 
 /** @brief Deferred Procedure Call (DPC) processing IPC messages at DISPATCH_LEVEL. */
 EVT_WDF_INTERRUPT_DPC SofEvtInterruptDpc;

@@ -5,8 +5,8 @@ root=Path(__file__).resolve().parents[1]
 ipc=(root/"src/driver/Ipc.c").read_text()
 loader=(root/"src/driver/Loader.c").read_text()
 isr=ipc.split("BOOLEAN\nSofIpcIsrCheck(",1)[1].split("\n/**",1)[0]
-dpc=ipc.split("VOID\nSofIpcDpcHandler(",1)[1].split("\n/**",1)[0]
-assert "if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc)" in isr
+dpc=ipc.split("BOOLEAN\nSofIpcDpcHandler(",1)[1].split("\n/**",1)[0]
+assert "if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc || SofDeviceRemoved(Ctx))" in isr
 assert isr.count("pj_ipc4_mmio_span_valid(") >= 5
 assert isr.index("pj_ipc4_mmio_span_valid(") < isr.index("SofDspRead32(")
 assert "ptr > Ctx->Bar4Length" in isr
@@ -18,20 +18,20 @@ assert loader.index("Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS") < loader.index("ct
 assert "-community.ri" not in loader and "Falling back to community firmware" not in loader
 assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)" in loader
 assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)" in (root/"src/driver/Device.c").read_text()
-# Check both interrupt control paths, not just runtime dispatch.
-for name in ("SofIpcEnableInterrupts", "SofIpcDisableInterrupts"):
-    body=ipc.split("VOID\n"+name+"(",1)[1].split("\n/**",1)[0]
-    assert "if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||" in body
-    assert body.index("HipcCtl, 4u") < body.index("SofDspUpdateBits(")
-    assert body.index("MTL_HFINTIPPTR, 4u") < body.index("rawPtr = SofDspRead32")
-    assert body.index("MTL_DSP_REG_HfHIPCIE, 4u") < body.index("rawPtr = SofDspRead32")
-    assert body.index("rawPtr == 0xFFFFFFFFu") < body.index("hfintipptr = rawPtr &")
-    assert body.index("hfintipptr, 4u") < body.index("                         hfintipptr,")
+# IRQ control is serialized with DIRQL dispatch and uses posted-write readback.
+control=ipc.split("static BOOLEAN SofIpcSetIrqBits(",1)[1].split("\n}",1)[0]
+assert control.index("SofDeviceRemoved(Ctx)") < control.index("SofDspRead32(")
+assert control.index("pj_ipc4_mmio_span_valid(") < control.index("SofDspRead32(")
+assert control.index("if (value == MAXULONG)") < control.index("SofDspWrite32(") < control.rindex("SofDspRead32(")
+disable=ipc.split("BOOLEAN\nSofIpcDisableInterrupts(",1)[1].split("\n}",1)[0]
+assert disable.index("WdfInterruptAcquireLock") < disable.index("Ctx->IrqArmed = FALSE")
+assert disable.index("Ctx->IrqPending = FALSE") < disable.index("SofIpcMaskInterrupt(Ctx)")
+assert disable.index("WdfInterruptReleaseLock") < disable.index("KeFlushQueuedDpcs")
 # The ISR must validate all registers its DPC will need before masking.
 for body in (isr, dpc):
     for register in ("HipcIda", "HipcTdr", "HipcTdd", "HipcTda", "HipcCtl"):
         assert body.index(register+", 4u") < body.index("SofDspRead32(")
-    assert body.index("tdr == 0xFFFFFFFFu || ida == 0xFFFFFFFFu") < body.index("SofDspUpdateBits(")
+    assert body.index("tdr == 0xFFFFFFFFu || ida == 0xFFFFFFFFu") < body.index("Ctx->IrqMaskFailed = !SofIpcSetIrqBits(" if body == isr else "SofDspWrite32(")
 assert isr.index("ptr == 0xFFFFFFFFu") < isr.index("ptr &= MTL_HFINTIPPTR_PTR_MASK")
 print("PASS: bounded interrupt control and dispatch, unavailable-device doorbells, gated FW_READY and no unreviewed firmware retry")
 
@@ -49,14 +49,15 @@ assert "bootReady && !Ctx->IpcFaulted" in publish
 assert "else if (bootFault)" in publish
 assert "Ctx->FwState = SOF_FW_BOOT_COMPLETE" not in dpc
 assert "KeSetEvent(&Ctx->FwReadyEvent" in publish.split("else if (bootFault)",1)[1]
-assert "Restore DONE even for a BUSY-only IRQ" in dpc
+assert "SofIpcRearmInterrupt(" not in dpc
+assert dpc.index("SofDspWrite32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTda") < dpc.index("/* Flush the posted ACKs") < dpc.index("KeSetEvent(&Ctx->FwReadyEvent")
 print("PASS: single DPC consumer, acknowledged readiness, fault wakeup and bounded boot wait")
 
 device=(root/"src/driver/Device.c").read_text()
 driver=(root/"src/driver/Driver.c").read_text()
 assert "EvtDeviceD0EntryPostInterruptsEnabled = SofEvtDeviceD0Entry;" in driver
 assert "EvtDeviceD0ExitPreInterruptsDisabled  = SofEvtDeviceD0Exit;" in driver
-assert "interruptConfig.AutomaticSerialization = FALSE;" in driver
+assert "interruptConfig.AutomaticSerialization = FALSE;" in device
 d0=device.split("NTSTATUS\nSofEvtDeviceD0Entry(",1)[1].split("\n/**",1)[0]
 assert d0.index("if (ipcFaulted ||") < d0.index("SofStartFirmwareBoot(ctx, NULL)")
 assert d0.index("return bootStatus;") < d0.index("SofPublishAudioChild(") < d0.index("WdfTimerStart(")
@@ -101,8 +102,11 @@ assert "writel(readl(" not in spib_stop
 print("PASS: confirmed DMA stop precedes SPIB teardown; inaccessible SPIB fails closed")
 
 # ROM ACK polling and runtime interrupt handling have distinct ownership.
-for body in (isr, dpc):
-    assert body.index("Ctx->FwState == SOF_FW_BOOT_NOT_STARTED") < body.index("SofDspRead32(")
+isr_wrapper=device.split("BOOLEAN\nSofEvtInterruptIsr(",1)[1].split("\n}",1)[0]
+dpc_wrapper=device.split("VOID\nSofEvtInterruptDpc(",1)[1].split("\n}",1)[0]
+assert isr_wrapper.index("!ctx->IrqArmed") < isr_wrapper.index("SofIpcIsrCheck(ctx)")
+assert dpc_wrapper.index("ctx->IrqArmed && ctx->IrqPending") < dpc_wrapper.index("SofIpcDpcHandler(ctx)")
+assert dpc_wrapper.index("SofIpcDpcHandler(ctx)") < dpc_wrapper.index("SofIpcRearmInterrupt(ctx)")
 assert "SofIpcEnableInterrupts(ctx)" not in d0
 assert boot.index("SofIpcDisableInterrupts(Ctx)") < boot.index("SofDspWrite32(bar4, Ctx->HwDesc->HipcIdr, ipcHdr)")
 assert boot.index("/* Acknowledge ROM */") < boot.index("Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS") < boot.index("SofIpcEnableInterrupts(Ctx)") < boot.index("ctlVal |= SOF_HDA_SD_CTL_DMA_START")
@@ -111,7 +115,7 @@ assert "incoming & Ctx->HwDesc->HipcTdrBusy" in boot
 assert "doorbell & Ctx->HwDesc->HipcIdrBusy" in boot
 exit_body=device.split("NTSTATUS\nSofEvtDeviceD0Exit(",1)[1].split("\n/**",1)[0]
 assert "SofHdaSetD0i3(" not in device
-assert exit_body.index("Ctx->IpcFaulted = TRUE;".replace("Ctx", "ctx")) < exit_body.index("SofIpcDisableInterrupts(ctx)") < exit_body.index("powerStatus = SofPowerDownDsp(ctx)")
+assert exit_body.index("SofIpcDisableInterrupts(ctx)") < exit_body.index("SofIpcQuiesce(ctx)") < exit_body.index("powerStatus = SofPowerDownDsp(ctx)")
 print("PASS: ROM polling exclusive ownership and D0 session invalidation")
 
 # Compile and execute the real core-transition helper with a fake register.

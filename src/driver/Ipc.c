@@ -62,6 +62,7 @@ SofIpcInitialize(
 {
     /* Initialize spinlock protecting IPC transmitter state and pending reply buffer */
     ExInitializeRundownProtection(&Ctx->IpcRundown);
+    Ctx->IpcRundownClosed = FALSE;
     KeInitializeSpinLock(&Ctx->IpcLock);
 
     /* Notification events: manually cleared before dispatch, signaled by DPC on completion */
@@ -93,14 +94,12 @@ SofIpcInitialize(
 }
 
 /**
- * @brief Releases IPC subsystem resources during driver unload or tear-down.
- *
- * Frees the allocated non-paged reply buffer and zeros out tracking fields.
+ * @brief Cancels IPC waiters and drains callers before the DSP loses power.
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
  */
 VOID
-SofIpcCleanup(
+SofIpcQuiesce(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
 {
@@ -108,10 +107,20 @@ SofIpcCleanup(
     if (!Ctx->ReplyBuffer) return;
     KeAcquireSpinLock(&Ctx->IpcLock, &irql);
     Ctx->IpcFaulted = TRUE;
+    Ctx->FwState = SOF_FW_BOOT_FAILED;
     KeSetEvent(&Ctx->IpcReplyEvent, IO_NO_INCREMENT, FALSE);
     KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
     KeReleaseSpinLock(&Ctx->IpcLock, irql);
-    ExWaitForRundownProtectionRelease(&Ctx->IpcRundown);
+    if (!Ctx->IpcRundownClosed) {
+        ExWaitForRundownProtectionRelease(&Ctx->IpcRundown);
+        Ctx->IpcRundownClosed = TRUE;
+    }
+}
+
+VOID
+SofIpcCleanup(_In_ PSOF_DEVICE_CONTEXT Ctx)
+{
+    SofIpcQuiesce(Ctx);
     if (Ctx->ReplyBuffer) {
         ExFreePoolWithTag(Ctx->ReplyBuffer, SOF_DEVICE_TAG);
         Ctx->ReplyBuffer = NULL;
@@ -119,142 +128,73 @@ SofIpcCleanup(
     }
 }
 
-/**
- * @brief Enables host-directed IPC interrupts in the DSP hardware registers.
- *
- * Programs the multi-level interrupt hierarchy on Intel hardware:
- *  1. Top-Level: Reads MTL_HFINTIPPTR to find the IRQINTEN register offset and enables HOST_IPC.
- *  2. Second-Level: Sets MTL_DSP_REG_HfHIPCIE_IE_MASK in HfHIPCIE.
- *  3. Channel-Level: Unmasks BUSY and DONE interrupts in HIPCCTL.
- *
- * @param[in] Ctx Pointer to the SOF device context.
- */
-VOID
-SofIpcEnableInterrupts(
-    _In_ PSOF_DEVICE_CONTEXT Ctx
-)
+/* 54C8 uses cAVS. IRQ control RMWs run under the WDF interrupt lock. */
+static BOOLEAN SofIpcSetIrqBits(PSOF_DEVICE_CONTEXT Ctx, ULONG Offset,
+                               ULONG Mask, BOOLEAN Enable)
 {
-    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
-        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u))
-        return;
-
-    if (Ctx->HwDesc->IsAce) {
-        /*
-         * ACE Interrupt Architecture Level 1:
-         * Read Interrupt IP Pointer (MTL_HFINTIPPTR) to determine the base offset
-         * of the top-level interrupt controller block within DSP BAR4 MMIO space.
-         */
-        ULONG rawPtr;
-        ULONG hfintipptr;
-        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_HFINTIPPTR, 4u) ||
-            !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_DSP_REG_HfHIPCIE, 4u))
-            return;
-        rawPtr = SofDspRead32(Ctx->Bar4VirtualAddress, MTL_HFINTIPPTR);
-        if (rawPtr == 0xFFFFFFFFu)
-            return;
-        hfintipptr = rawPtr & MTL_HFINTIPPTR_PTR_MASK;
-        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, hfintipptr, 4u))
-            return;
-
-        /*
-         * ACE Interrupt Architecture Level 1 Enable:
-         * Unmask Host IPC interrupt generation in the primary IRQINTEN register.
-         */
-        SofDspUpdateBits(Ctx->Bar4VirtualAddress,
-                         hfintipptr,
-                         MTL_IRQ_INTEN_L_HOST_IPC_MASK,
-                         MTL_IRQ_INTEN_L_HOST_IPC_MASK);
-
-        /*
-         * ACE Interrupt Architecture Level 2 Enable:
-         * Unmask the host-facing IPC interrupt in the intermediate HfHIPCIE register.
-         */
-        SofDspUpdateBits(Ctx->Bar4VirtualAddress,
-                         MTL_DSP_REG_HfHIPCIE,
-                         MTL_DSP_REG_HfHIPCIE_IE_MASK,
-                         MTL_DSP_REG_HfHIPCIE_IE_MASK);
-    }
-
-    /*
-     * Channel-Level IPC Interrupt Enable (cAVS and ACE):
-     * Program HIPCCTL to enable interrupt generation on:
-     *  - BUSY: DSP raised an incoming message or notification in HIPCTDR.
-     *  - DONE: DSP acknowledged host-transmitted command in HIPCIDA.
-     */
-    SofDspUpdateBits(Ctx->Bar4VirtualAddress,
-                     Ctx->HwDesc->HipcCtl,
-                     Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone,
-                     Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone);
-
-    if (!Ctx->HwDesc->IsAce && pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPIC, 4u))
-        SofDspUpdateBits(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPIC,
-                         HDA_DSP_IPC_INTERRUPT, HDA_DSP_IPC_INTERRUPT);
-
-    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-               "[SOF] IPC interrupts enabled (IsAce=%d, CTL offset 0x%x).\n",
-               Ctx->HwDesc->IsAce, Ctx->HwDesc->HipcCtl);
+    ULONG value;
+    if (SofDeviceRemoved(Ctx) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Offset, sizeof(ULONG)))
+        return FALSE;
+    value = SofDspRead32(Ctx->Bar4VirtualAddress, Offset);
+    if (value == MAXULONG)
+        return FALSE;
+    SofDspWrite32(Ctx->Bar4VirtualAddress, Offset, Enable ? value | Mask : value & ~Mask);
+    value = SofDspRead32(Ctx->Bar4VirtualAddress, Offset);
+    return value != MAXULONG && (value & Mask) == (Enable ? Mask : 0u);
 }
 
-/**
- * @brief Disables host-directed IPC interrupts in the DSP hardware registers.
- *
- * Masks BUSY and DONE interrupts in HIPCCTL, and disables intermediate and top-level
- * interrupt registers on ACE platforms to guarantee quiet hardware before power transition.
- *
- * @param[in] Ctx Pointer to the SOF device context.
- */
-VOID
-SofIpcDisableInterrupts(
-    _In_ PSOF_DEVICE_CONTEXT Ctx
-)
+BOOLEAN SofIpcRearmInterrupt(PSOF_DEVICE_CONTEXT Ctx)
 {
-    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc ||
-        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u))
-        return;
+    return SofIpcSetIrqBits(Ctx, Ctx->HwDesc->HipcCtl,
+                           Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone, TRUE);
+}
 
-    if (!Ctx->HwDesc->IsAce && pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPIC, 4u))
-        SofDspUpdateBits(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPIC,
-                         HDA_DSP_IPC_INTERRUPT, 0);
+BOOLEAN SofIpcMaskInterrupt(PSOF_DEVICE_CONTEXT Ctx)
+{
+    BOOLEAN routeMasked = SofIpcSetIrqBits(Ctx, HDA_DSP_REG_ADSPIC, HDA_DSP_IPC_INTERRUPT, FALSE);
+    BOOLEAN channelMasked = SofIpcSetIrqBits(Ctx, Ctx->HwDesc->HipcCtl,
+        Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone, FALSE);
 
-    /*
-     * Channel-Level IPC Interrupt Disable:
-     * Mask both BUSY and DONE interrupts in the channel control register (HIPCCTL).
-     */
-    SofDspUpdateBits(Ctx->Bar4VirtualAddress,
-                     Ctx->HwDesc->HipcCtl,
-                     Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone,
-                     0);
+    Ctx->IrqMaskNeeded = !routeMasked || !channelMasked;
+    return !Ctx->IrqMaskNeeded;
+}
 
-    if (Ctx->HwDesc->IsAce) {
-        /* Read Interrupt IP Pointer to locate top-level IRQ block */
-        ULONG rawPtr;
-        ULONG hfintipptr;
-        /* Keep channel interrupts masked even if the ACE hierarchy is invalid. */
-        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_HFINTIPPTR, 4u) ||
-            !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, MTL_DSP_REG_HfHIPCIE, 4u))
-            return;
-        rawPtr = SofDspRead32(Ctx->Bar4VirtualAddress, MTL_HFINTIPPTR);
-        if (rawPtr == 0xFFFFFFFFu)
-            return;
-        hfintipptr = rawPtr & MTL_HFINTIPPTR_PTR_MASK;
-        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, hfintipptr, 4u))
-            return;
+BOOLEAN
+SofIpcEnableInterrupts(_In_ PSOF_DEVICE_CONTEXT Ctx)
+{
+    if (!Ctx->IrqConnected || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc || Ctx->HwDesc->IsAce)
+        return FALSE;
 
-        /* Disable Host IPC interrupt in second-level HfHIPCIE */
-        SofDspUpdateBits(Ctx->Bar4VirtualAddress,
-                         MTL_DSP_REG_HfHIPCIE,
-                         MTL_DSP_REG_HfHIPCIE_IE_MASK,
-                         0);
+    WdfInterruptAcquireLock(Ctx->WdfInterrupt);
+    Ctx->IrqMaskNeeded = TRUE;
+    Ctx->IrqArmed = SofIpcRearmInterrupt(Ctx) &&
+        SofIpcSetIrqBits(Ctx, HDA_DSP_REG_ADSPIC, HDA_DSP_IPC_INTERRUPT, TRUE);
+    if (!Ctx->IrqArmed)
+        SofIpcMaskInterrupt(Ctx);
+    BOOLEAN armed = Ctx->IrqArmed;
+    WdfInterruptReleaseLock(Ctx->WdfInterrupt);
+    return armed;
+}
 
-        /* Disable Host IPC in top-level IRQINTEN */
-        SofDspUpdateBits(Ctx->Bar4VirtualAddress,
-                         hfintipptr,
-                         MTL_IRQ_INTEN_L_HOST_IPC_MASK,
-                         0);
-    }
+BOOLEAN
+SofIpcDisableInterrupts(_In_ PSOF_DEVICE_CONTEXT Ctx)
+{
+    BOOLEAN masked;
+    if (!Ctx->IrqConnected)
+        return FALSE;
 
-    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-               "[SOF] IPC interrupts disabled.\n");
+    WdfInterruptAcquireLock(Ctx->WdfInterrupt);
+    Ctx->IrqArmed = FALSE;
+    Ctx->IrqPending = FALSE;
+    Ctx->IrqMaskFailed = FALSE;
+    masked = SofIpcMaskInterrupt(Ctx);
+    WdfInterruptReleaseLock(Ctx->WdfInterrupt);
+
+    /* No ISR can queue more work, and a running DPC cannot unmask.
+     * Drain outside the interrupt lock, before power-down or BAR unmapping. */
+    KeFlushQueuedDpcs();
+    return masked;
 }
 
 /**
@@ -592,7 +532,7 @@ SofDspDumpCore(
  * eliminate line-based IRQ storms, then returns TRUE to schedule the DPC.
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
- * @return TRUE if an IPC interrupt was acknowledged and DPC is needed; FALSE otherwise.
+ * @return TRUE if an owned interrupt needs deferred handling.
  */
 BOOLEAN
 SofIpcIsrCheck(
@@ -601,11 +541,9 @@ SofIpcIsrCheck(
 {
     ULONG tdr;
     ULONG ida;
+    ULONG control;
 
-    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
-        return FALSE;
-    /* The initial ROM ACK is exclusively consumed by the passive loader. */
-    if (Ctx->FwState == SOF_FW_BOOT_NOT_STARTED)
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc || SofDeviceRemoved(Ctx))
         return FALSE;
 
     /* Shared IRQs must never probe outside the mapped BAR. A malformed
@@ -641,11 +579,14 @@ SofIpcIsrCheck(
         if (irqSts == 0xFFFFFFFF || !(irqSts & MTL_DSP_IRQSTS_IPC))
             return FALSE;
     } else if (!Ctx->HwDesc->IsAce) {
-        ULONG irqSts;
-        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPIS, 4u))
+        ULONG irqSts, route;
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPIS, 4u) ||
+            !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPIC, 4u))
             return FALSE;
         irqSts = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPIS);
-        if (irqSts == MAXULONG || !(irqSts & HDA_DSP_IPC_INTERRUPT))
+        route = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPIC);
+        if (irqSts == MAXULONG || route == MAXULONG ||
+            !(irqSts & route & HDA_DSP_IPC_INTERRUPT))
             return FALSE;
     }
 
@@ -656,37 +597,40 @@ SofIpcIsrCheck(
     if (tdr == 0xFFFFFFFFu || ida == 0xFFFFFFFFu)
         return FALSE;
 
-    if ((tdr & Ctx->HwDesc->HipcTdrBusy) || (ida & Ctx->HwDesc->HipcIdaDone)) {
-        /*
-         * CRITICAL: Mask IPC interrupts immediately in ISR to avoid an interrupt storm
-         * on shared line-based interrupts before the DPC can run.
-         */
-        SofDspUpdateBits(Ctx->Bar4VirtualAddress,
-                         Ctx->HwDesc->HipcCtl,
-                         Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone,
-                         0);
-        return TRUE;
-    }
+    control = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcCtl);
+    if (control == MAXULONG ||
+        !(((control & Ctx->HwDesc->HipcCtlBusy) && (tdr & Ctx->HwDesc->HipcTdrBusy)) ||
+          ((control & Ctx->HwDesc->HipcCtlDone) && (ida & Ctx->HwDesc->HipcIdaDone))))
+        return FALSE;
 
-    return FALSE;
+    /* Mask both channel sources and flush the posted write before returning.
+     * If that fails after confirming ownership, gate the route and let the
+     * DPC fault the session without consuming either unmasked doorbell. */
+    Ctx->IrqMaskFailed = !SofIpcSetIrqBits(Ctx, Ctx->HwDesc->HipcCtl,
+        Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone, FALSE);
+    if (Ctx->IrqMaskFailed)
+        SofIpcMaskInterrupt(Ctx);
+    return TRUE;
 }
 
 /**
  * @brief Deferred Procedure Call (DPC) worker for dispatching IPC replies and notifications.
  *
  * Evaluates pending hardware status:
- *  1. Host TX ACK: DSP set DONE in HIPCIDA. Acknowledges DONE in HIPCIDA, re-enables HIPCCTL.
+ *  1. Host TX ACK: DSP set DONE in HIPCIDA. Acknowledge DONE in HIPCIDA.
  *  2. DSP Incoming Message: DSP set BUSY in HIPCTDR.
  *     - If message direction bit (SOF_IPC4_MSG_DIR_MASK) is 1, this is a command reply.
  *       Reads payload from Uplink Mailbox, unlocks transmitter, and signals IpcReplyEvent.
  *     - If message direction bit is 0, this is an unsolicited notification.
  *       Handles SOF_IPC4_NOTIFY_FW_READY (signals FwReadyEvent) or
  *       SOF_IPC4_NOTIFY_EXCEPTION_CAUGHT (triggers SofDspDumpCore).
- *  3. Doorbell Acknowledgment: Clears BUSY in HIPCTDR and HIPCTDA to acknowledge receipt to DSP.
+ *  3. Doorbell acknowledgment: clear BUSY in HIPCTDR, then signal DSP in HIPCTDA.
+ * The interrupt callback owns rearming after this handler returns.
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
+ * @return TRUE if the MMIO path remained usable.
  */
-VOID
+BOOLEAN
 SofIpcDpcHandler(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 )
@@ -697,33 +641,24 @@ SofIpcDpcHandler(
     BOOLEAN bootReady = FALSE;
     BOOLEAN bootFault = FALSE;
 
-    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
-        return;
-    /* A stale queued DPC cannot consume the initial ROM ACK. */
-    if (Ctx->FwState == SOF_FW_BOOT_NOT_STARTED)
-        return;
+    if (!Ctx->Bar4VirtualAddress || !Ctx->HwDesc || SofDeviceRemoved(Ctx))
+        return FALSE;
     /* Bounds check register windows actually used by this handler. */
     if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIda, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdr, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdd, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTda, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcCtl, 4u))
-        return;
+        return FALSE;
 
     /*
      * 1. Check if DSP completed our previous host-initiated request (ACK / DONE in IDA)
      */
     ida = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcIda);
     tdr = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTdr);
-    if (tdr == 0xFFFFFFFFu || ida == 0xFFFFFFFFu)
-        return;
+    if (tdr == 0xFFFFFFFFu || ida == 0xFFFFFFFFu || SofDeviceRemoved(Ctx))
+        return FALSE;
     if (ida & Ctx->HwDesc->HipcIdaDone) {
-        /* Mask DONE in HipcCtl */
-        SofDspUpdateBits(Ctx->Bar4VirtualAddress,
-                         Ctx->HwDesc->HipcCtl,
-                         Ctx->HwDesc->HipcCtlDone,
-                         0);
-
         if (Ctx->HwDesc->IsAce) {
             /* Set DONE bit in IDA to acknowledge receipt to DSP on ACE */
             SofDspUpdateBits(Ctx->Bar4VirtualAddress,
@@ -736,12 +671,6 @@ SofIpcDpcHandler(
                           Ctx->HwDesc->HipcIda,
                           Ctx->HwDesc->HipcIdaDone);
         }
-
-        /* Unmask DONE in HipcCtl */
-        SofDspUpdateBits(Ctx->Bar4VirtualAddress,
-                         Ctx->HwDesc->HipcCtl,
-                         Ctx->HwDesc->HipcCtlDone,
-                         Ctx->HwDesc->HipcCtlDone);
 
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                    "[SOF] IPC Host TX ACK received from DSP (IDA=0x%08x).\n",
@@ -756,6 +685,8 @@ SofIpcDpcHandler(
         ULONG tdd = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTdd);
         ULONG primary = tdr & 0x7FFFFFFF;
         ULONG extension = tdd & 0x7FFFFFFF;
+        if (tdd == MAXULONG || SofDeviceRemoved(Ctx))
+            return FALSE;
 
         /* Is this a reply to our request or an unsolicited notification? */
         if (primary & SOF_IPC4_MSG_DIR_MASK) {
@@ -773,9 +704,7 @@ SofIpcDpcHandler(
                 Ctx->PendingReply.Extension = extension;
                 Ctx->PendingReply.Payload = NULL;
                 Ctx->PendingReply.PayloadSize = 0;
-                if (tdd == MAXULONG) {
-                    Ctx->IpcFaulted = TRUE;
-                } else if (Ctx->IpcReplyCapacity && !(primary & SOF_IPC4_REPLY_STATUS)) {
+                if (Ctx->IpcReplyCapacity && !(primary & SOF_IPC4_REPLY_STATUS)) {
                     PJ_DWORD bytes = 0;
                     if (pj_ipc4_large_reply_size(Ctx->IpcRequestExtension, tdd,
                             Ctx->IpcReplyCapacity, &bytes) != PJ_IPC4_VALID) {
@@ -855,6 +784,8 @@ SofIpcDpcHandler(
          * On cAVS:
          *  - Write busy bit to TDR and done bit to TDA.
          */
+        if (SofDeviceRemoved(Ctx))
+            return FALSE;
         if (Ctx->HwDesc->IsAce) {
             SofDspUpdateBits(Ctx->Bar4VirtualAddress,
                              Ctx->HwDesc->HipcTdr,
@@ -870,23 +801,11 @@ SofIpcDpcHandler(
             SofDspWrite32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTda, Ctx->HwDesc->HipcTdaDone);
         }
 
-        /* Unmask Busy interrupt in HipcCtl */
-        SofDspUpdateBits(Ctx->Bar4VirtualAddress,
-                         Ctx->HwDesc->HipcCtl,
-                         Ctx->HwDesc->HipcCtlBusy,
-                         Ctx->HwDesc->HipcCtlBusy);
-    } else {
-        /* Ensure BUSY interrupt remains unmasked */
-        SofDspUpdateBits(Ctx->Bar4VirtualAddress,
-                         Ctx->HwDesc->HipcCtl,
-                         Ctx->HwDesc->HipcCtlBusy,
-                         Ctx->HwDesc->HipcCtlBusy);
     }
-    /* The ISR masks both sources. Restore DONE even for a BUSY-only IRQ. */
-    SofDspUpdateBits(Ctx->Bar4VirtualAddress,
-                     Ctx->HwDesc->HipcCtl,
-                     Ctx->HwDesc->HipcCtlDone,
-                     Ctx->HwDesc->HipcCtlDone);
+
+    /* Flush the posted ACKs before waking the loader or a sender. */
+    if (SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcCtl) == MAXULONG)
+        return FALSE;
 
     /* Acknowledge device notification before publishing boot/reply completion. */
     if (bootReady || bootFault) {
@@ -909,6 +828,7 @@ SofIpcDpcHandler(
             KeSetEvent(&Ctx->IpcReplyEvent, IO_NO_INCREMENT, FALSE);
         KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
     }
+    return TRUE;
 }
 
 /**
@@ -920,9 +840,8 @@ SofIpcDpcHandler(
  *  3. Writes Extension header to HIPCIDD.
  *  4. Rings the Doorbell: Writes Primary header with BUSY bit asserted to HIPCIDR.
  *  5. Releases spinlock and enters a wait loop on IpcReplyEvent.
- *  6. Polling Fallback: Checks every 25ms and manually calls SofIpcDpcHandler in case a line-based
- *     interrupt was delayed or lost under heavy system load.
- *  7. On completion, validates the IPC4 reply status code (bits 0..23). On timeout, triggers SofDspDumpCore.
+ *  6. The interrupt DPC delivers the reply. A timeout faults the session.
+ *  7. On completion, validate the IPC4 reply status code (bits 0..23).
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
  * @param[in]     Msg Pointer to the IPC message struct to send.
@@ -989,7 +908,7 @@ SofIpcSendWhilePowered(
 
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
 
-    if (Ctx->IpcFaulted || Ctx->FwState != RequiredState) {
+    if (Ctx->IpcFaulted || Ctx->FwState != RequiredState || SofDeviceRemoved(Ctx)) {
         KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
         return STATUS_DEVICE_NOT_READY;
     }

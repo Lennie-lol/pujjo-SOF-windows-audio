@@ -50,19 +50,32 @@ static BOOLEAN SofHardwareDevelopmentAllowed(VOID)
 #endif
 }
 
-/* For a failed PrepareHardware, WDF may not call ReleaseHardware. */
-static VOID SofUnmapFailedPreparedBars(_Inout_ PSOF_DEVICE_CONTEXT Ctx)
+static VOID SofUnmapPreparedBars(_Inout_ PSOF_DEVICE_CONTEXT Ctx)
 {
     if (Ctx->Bar4VirtualAddress) {
         MmUnmapIoSpace(Ctx->Bar4VirtualAddress, Ctx->Bar4Length);
         Ctx->Bar4VirtualAddress = NULL;
-        Ctx->Bar4Length = 0;
     }
     if (Ctx->Bar0VirtualAddress) {
         MmUnmapIoSpace(Ctx->Bar0VirtualAddress, Ctx->Bar0Length);
         Ctx->Bar0VirtualAddress = NULL;
-        Ctx->Bar0Length = 0;
     }
+    Ctx->Bar0Length = Ctx->Bar4Length = 0;
+    Ctx->Bar0PhysicalAddress.QuadPart = Ctx->Bar4PhysicalAddress.QuadPart = 0;
+}
+
+static NTSTATUS SofMapPreparedBars(PSOF_DEVICE_CONTEXT ctx,
+                                    PCM_PARTIAL_RESOURCE_DESCRIPTOR bars[2])
+{
+    ctx->Bar0PhysicalAddress = bars[0]->u.Memory.Start;
+    ctx->Bar0Length = bars[0]->u.Memory.Length;
+    ctx->Bar4PhysicalAddress = bars[1]->u.Memory.Start;
+    ctx->Bar4Length = bars[1]->u.Memory.Length;
+    ctx->Bar0VirtualAddress = MmMapIoSpace(ctx->Bar0PhysicalAddress, ctx->Bar0Length, MmNonCached);
+    if (!ctx->Bar0VirtualAddress) return STATUS_INSUFFICIENT_RESOURCES;
+    ctx->Bar4VirtualAddress = MmMapIoSpace(ctx->Bar4PhysicalAddress, ctx->Bar4Length, MmNonCached);
+    if (!ctx->Bar4VirtualAddress) return STATUS_INSUFFICIENT_RESOURCES;
+    return STATUS_SUCCESS;
 }
 
 /**
@@ -142,6 +155,104 @@ static NTSTATUS SofDiscoverHdaCaps(
     return STATUS_SUCCESS;
 }
 
+/** Check assigned PCI MMIO ranges before testing for overlap or mapping. */
+static BOOLEAN SofMemoryRangeValid(PHYSICAL_ADDRESS Start, ULONG Length)
+{
+    return Start.QuadPart > 0 && Length != 0 &&
+           (ULONGLONG)(Length - 1u) <= (ULONGLONG)(MAXLONGLONG - Start.QuadPart);
+}
+
+static BOOLEAN SofMemoryOverlaps(PCM_PARTIAL_RESOURCE_DESCRIPTOR First,
+                                 PCM_PARTIAL_RESOURCE_DESCRIPTOR Second)
+{
+    LONGLONG a = First->u.Memory.Start.QuadPart;
+    LONGLONG b = Second->u.Memory.Start.QuadPart;
+
+    /* Callers have already validated both inclusive ranges. */
+    return a <= b ? b - a < First->u.Memory.Length : a - b < Second->u.Memory.Length;
+}
+
+static BOOLEAN SofBarResourceValid(PCM_PARTIAL_RESOURCE_DESCRIPTOR Raw,
+                                    PCM_PARTIAL_RESOURCE_DESCRIPTOR Translated,
+                                    ULONG MinimumLength)
+{
+    ULONG length = Raw->u.Memory.Length;
+
+    return length >= MinimumLength && (length & (length - 1u)) == 0 &&
+           (Raw->u.Memory.Start.QuadPart & (length - 1u)) == 0 &&
+           (Translated->u.Memory.Start.QuadPart & (PAGE_SIZE - 1u)) == 0 &&
+           !((Raw->Flags | Translated->Flags) &
+             (CM_RESOURCE_MEMORY_READ_ONLY | CM_RESOURCE_MEMORY_WRITE_ONLY));
+}
+
+static NTSTATUS SofSelectPciResources(
+    WDFCMRESLIST RawList, WDFCMRESLIST TranslatedList,
+    PHYSICAL_ADDRESS Bar0, PHYSICAL_ADDRESS Bar4,
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR Bars[2],
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR *InterruptRaw,
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR *InterruptTranslated)
+{
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR rawBars[2] = { NULL, NULL };
+    ULONG count = WdfCmResourceListGetCount(TranslatedList);
+
+    if (count != WdfCmResourceListGetCount(RawList) ||
+        Bar0.QuadPart == Bar4.QuadPart)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+
+    for (ULONG i = 0; i < count; ++i) {
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR raw = WdfCmResourceListGetDescriptor(RawList, i);
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR translated = WdfCmResourceListGetDescriptor(TranslatedList, i);
+        if (!raw || !translated)
+            return STATUS_DEVICE_CONFIGURATION_ERROR;
+
+        if (raw->Type == CmResourceTypeInterrupt || translated->Type == CmResourceTypeInterrupt) {
+            if (raw->Type != translated->Type || *InterruptRaw ||
+                ((raw->Flags ^ translated->Flags) &
+                 (CM_RESOURCE_INTERRUPT_MESSAGE | CM_RESOURCE_INTERRUPT_LATCHED)) ||
+                ((raw->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) &&
+                 raw->u.MessageInterrupt.Raw.MessageCount != 1))
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+            *InterruptRaw = raw;
+            *InterruptTranslated = translated;
+        } else if (raw->Type == CmResourceTypeMemoryLarge ||
+                   translated->Type == CmResourceTypeMemoryLarge) {
+            return STATUS_DEVICE_CONFIGURATION_ERROR;
+        } else if (raw->Type == CmResourceTypeMemory || translated->Type == CmResourceTypeMemory) {
+            if (raw->Type != translated->Type || raw->u.Memory.Length != translated->u.Memory.Length ||
+                !SofMemoryRangeValid(raw->u.Memory.Start, raw->u.Memory.Length) ||
+                !SofMemoryRangeValid(translated->u.Memory.Start, translated->u.Memory.Length))
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+
+            if (raw->u.Memory.Start.QuadPart == Bar0.QuadPart ||
+                raw->u.Memory.Start.QuadPart == Bar4.QuadPart) {
+                ULONG bar = raw->u.Memory.Start.QuadPart == Bar0.QuadPart ? 0u : 1u;
+                if (rawBars[bar] || !SofBarResourceValid(raw, translated, bar ? 0x100000u : 0x4000u))
+                    return STATUS_DEVICE_CONFIGURATION_ERROR;
+                rawBars[bar] = raw;
+                Bars[bar] = translated;
+            }
+        }
+    }
+
+    if (!Bars[0] || !Bars[1] || !*InterruptRaw)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+
+    /* Also reject aliases from non-BAR descriptors, in either address space. */
+    for (ULONG i = 0; i < count; ++i) {
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR raw = WdfCmResourceListGetDescriptor(RawList, i);
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR translated = WdfCmResourceListGetDescriptor(TranslatedList, i);
+        if (raw->Type != CmResourceTypeMemory)
+            continue;
+        for (ULONG bar = 0; bar < 2; ++bar) {
+            if (raw != rawBars[bar] &&
+                (SofMemoryOverlaps(raw, rawBars[bar]) ||
+                 SofMemoryOverlaps(translated, Bars[bar])))
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+        }
+    }
+    return STATUS_SUCCESS;
+}
+
 /**
  * @brief KMDF EvtDevicePrepareHardware callback.
  *
@@ -163,10 +274,10 @@ SofEvtDevicePrepareHardware(
 {
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
     NTSTATUS status;
-    ULONG resourceCount;
     PHYSICAL_ADDRESS bar0Bus = {0}, bar4Bus = {0};
-    PCM_PARTIAL_RESOURCE_DESCRIPTOR bar0Resource = NULL, bar4Resource = NULL;
-    ULONG i;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR bars[2] = { NULL, NULL };
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR interruptRaw = NULL, interruptTranslated = NULL;
+    WDF_INTERRUPT_CONFIG interruptConfig;
     BUS_INTERFACE_STANDARD busInterface;
     PCI_COMMON_CONFIG pciConfig = {0};
     char msg[256];
@@ -198,8 +309,9 @@ SofEvtDevicePrepareHardware(
     ULONG bytesRead = busInterface.GetBusData(busInterface.Context, PCI_WHICHSPACE_CONFIG,
         &pciConfig, 0, sizeof(pciConfig));
     busInterface.InterfaceDereference(busInterface.Context);
-    if (bytesRead < FIELD_OFFSET(PCI_COMMON_CONFIG, u.type0.BaseAddresses) +
-                    sizeof(pciConfig.u.type0.BaseAddresses))
+    if ((pciConfig.HeaderType & 0x7fu) != 0 ||
+        bytesRead < FIELD_OFFSET(PCI_COMMON_CONFIG, u.type0.SubSystemID) +
+                    sizeof(pciConfig.u.type0.SubSystemID))
         return STATUS_DEVICE_CONFIGURATION_ERROR;
 
     ctx->VendorId = pciConfig.VendorID;
@@ -241,66 +353,27 @@ SofEvtDevicePrepareHardware(
     /* Correlate PCI BAR bus addresses with the raw resource list. Use
      * each raw descriptor's translated counterpart for host MMIO. */
     ULONG high0, high4;
-    if ((pciConfig.HeaderType & 0x7fu) != 0 ||
-        !PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 0, &bar0Bus.LowPart, &high0) ||
+    if (!PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 0, &bar0Bus.LowPart, &high0) ||
         !PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 4, &bar4Bus.LowPart, &high4))
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     bar0Bus.HighPart = (LONG)high0;
     bar4Bus.HighPart = (LONG)high4;
-    if (bar0Bus.QuadPart == bar4Bus.QuadPart)
-        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    status = SofSelectPciResources(ResourcesRaw, ResourcesTranslated, bar0Bus, bar4Bus,
+                                  bars, &interruptRaw, &interruptTranslated);
+    if (!NT_SUCCESS(status)) return status;
 
-    resourceCount = WdfCmResourceListGetCount(ResourcesTranslated);
-    if (resourceCount != WdfCmResourceListGetCount(ResourcesRaw))
-        return STATUS_DEVICE_CONFIGURATION_ERROR;
-    for (i = 0; i < resourceCount; i++) {
-        PCM_PARTIAL_RESOURCE_DESCRIPTOR raw = WdfCmResourceListGetDescriptor(ResourcesRaw, i);
-        PCM_PARTIAL_RESOURCE_DESCRIPTOR desc = WdfCmResourceListGetDescriptor(ResourcesTranslated, i);
-        if (!desc || !raw) return STATUS_DEVICE_CONFIGURATION_ERROR;
+    status = SofMapPreparedBars(ctx, bars);
+    if (!NT_SUCCESS(status)) goto PreparationFailed;
 
-        if (raw->Type == CmResourceTypeMemory) {
-            PCM_PARTIAL_RESOURCE_DESCRIPTOR *target;
-            if (raw->u.Memory.Start.QuadPart == bar0Bus.QuadPart)
-                target = &bar0Resource;
-            else if (raw->u.Memory.Start.QuadPart == bar4Bus.QuadPart)
-                target = &bar4Resource;
-            else
-                continue;
-            if (*target || desc->Type != CmResourceTypeMemory || !desc->u.Memory.Length ||
-                raw->u.Memory.Length != desc->u.Memory.Length)
-                return STATUS_DEVICE_CONFIGURATION_ERROR;
-            *target = desc;
-        } else if (desc->Type == CmResourceTypeInterrupt) {
-            ctx->InterruptVector = desc->u.Interrupt.Vector;
-            ctx->InterruptIrql = (KIRQL)desc->u.Interrupt.Level;
-            ctx->InterruptAffinity = desc->u.Interrupt.Affinity;
-            ctx->IsMsi = (desc->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) ? TRUE : FALSE;
-
-            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                       "[SOF] Interrupt Resource: Vector 0x%x, Level %u, MSI: %s\n",
-                       ctx->InterruptVector,
-                       ctx->InterruptIrql,
-                       ctx->IsMsi ? "Yes" : "No");
-        }
-    }
-
-    if (!bar0Resource || !bar4Resource ||
-        bar0Resource->u.Memory.Start.QuadPart == bar4Resource->u.Memory.Start.QuadPart)
-        return STATUS_DEVICE_CONFIGURATION_ERROR;
-    ctx->Bar0PhysicalAddress = bar0Resource->u.Memory.Start;
-    ctx->Bar0Length = bar0Resource->u.Memory.Length;
-    ctx->Bar4PhysicalAddress = bar4Resource->u.Memory.Start;
-    ctx->Bar4Length = bar4Resource->u.Memory.Length;
-    ctx->Bar0VirtualAddress = MmMapIoSpace(ctx->Bar0PhysicalAddress, ctx->Bar0Length, MmNonCached);
-    ctx->Bar4VirtualAddress = MmMapIoSpace(ctx->Bar4PhysicalAddress, ctx->Bar4Length, MmNonCached);
-
-    /* Require both mapped BAR windows before any register reads. Never
-     * continue with half-initialized resources after MmMapIoSpace failure. */
-    if (!ctx->Bar0VirtualAddress || !ctx->Bar4VirtualAddress ||
-        ctx->Bar0Length < 0x80u || ctx->Bar4Length < sizeof(ULONG)) {
-        status = STATUS_DEVICE_CONFIGURATION_ERROR;
-        goto PreparationFailed;
-    }
+    WDF_INTERRUPT_CONFIG_INIT(&interruptConfig, SofEvtInterruptIsr, SofEvtInterruptDpc);
+    interruptConfig.AutomaticSerialization = FALSE;
+    interruptConfig.InterruptRaw = interruptRaw;
+    interruptConfig.InterruptTranslated = interruptTranslated;
+    interruptConfig.EvtInterruptEnable = SofEvtInterruptEnable;
+    interruptConfig.EvtInterruptDisable = SofEvtInterruptDisable;
+    status = WdfInterruptCreate(Device, &interruptConfig, WDF_NO_OBJECT_ATTRIBUTES, &ctx->WdfInterrupt);
+    if (!NT_SUCCESS(status)) goto PreparationFailed;
+    ctx->IsMsi = (interruptTranslated->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) != 0;
 
     /* Discover HD-A controller capabilities without activating DSP processing */
     status = SofDiscoverHdaCaps(ctx);
@@ -317,13 +390,12 @@ SofEvtDevicePrepareHardware(
 
     {
         ULONG romSts = (ctx->Bar4VirtualAddress && ctx->HwDesc) ? SofReadRomStatus(ctx) : 0;
-        ULONG fwSts = (ctx->Bar4VirtualAddress && ctx->HwDesc) ? SofReadFwStatus(ctx) : 0;
 
         RtlStringCbPrintfA(msg, sizeof(msg),
-            "[9] Resources mapped: BAR0=%p (len 0x%x), BAR4=%p (len 0x%x), IRQ=0x%x (MSI=%s) | DSP ROM_STS=0x%08X (PP=0x%x, SPIB=0x%x, Streams: C%u/P%u)\n",
+            "[9] Resources mapped: BAR0=%p (len 0x%x), BAR4=%p (len 0x%x), MSI=%s | DSP ROM_STS=0x%08X (PP=0x%x, SPIB=0x%x, Streams: C%u/P%u)\n",
             ctx->Bar0VirtualAddress, ctx->Bar0Length,
             ctx->Bar4VirtualAddress, ctx->Bar4Length,
-            ctx->InterruptVector, ctx->IsMsi ? "Yes" : "No",
+            ctx->IsMsi ? "Yes" : "No",
             romSts, ctx->PpCapOffset, ctx->SpbCapOffset,
             ctx->NumCaptureStreams, ctx->NumPlaybackStreams);
         SofLogBreadcrumb(msg);
@@ -402,9 +474,9 @@ SofEvtDevicePrepareHardware(
     return STATUS_SUCCESS;
 
 PreparationFailed:
-    /* Only BARs were acquired before these failure points; never leak them
-     * if WDF does not deliver ReleaseHardware for failed preparation. */
-    SofUnmapFailedPreparedBars(ctx);
+    /* KMDF retires any interrupt created in this PrepareHardware pass
+     * after ReleaseHardware. It was never enabled on this failure path. */
+    SofUnmapPreparedBars(ctx);
     return status;
 }
 
@@ -437,8 +509,8 @@ static NTSTATUS SofQuiesceDeviceStreams(PSOF_DEVICE_CONTEXT Ctx, BOOLEAN Release
 /**
  * @brief KMDF EvtDeviceReleaseHardware callback.
  *
- * Unregisters PortCls audio interfaces, stops active streams, cleans up IPC,
- * powers down the DSP cores, and unmaps BAR0 and BAR4 MMIO spaces.
+ * Disconnects remaining audio interfaces, drains interrupt work, releases IPC
+ * state, and unmaps BAR0 and BAR4 after the framework disconnects the IRQ.
  *
  * @param[in] Device Handle to WDFDEVICE.
  * @param[in] ResourcesTranslated List of translated hardware resources.
@@ -462,33 +534,20 @@ SofEvtDeviceReleaseHardware(
     NTSTATUS status = SofDisconnectAudioChild(ctx);
     NTSTATUS streamStatus = SofQuiesceDeviceStreams(ctx, TRUE);
     if (NT_SUCCESS(status)) status = streamStatus;
-    if (ctx->DspNeedsPowerDown) {
-        SofIpcDisableInterrupts(ctx);
+    /* KMDF has disconnected the ISR. Drain any deferred work even on a
+     * failed D0 transition where the normal pre-disable callback was skipped. */
+    if (ctx->WdfInterrupt)
         KeFlushQueuedDpcs();
-        NTSTATUS powerStatus = SofPowerDownDsp(ctx);
-        if (NT_SUCCESS(status)) status = powerStatus;
-    }
     SofIpcCleanup(ctx);
     SofNhltFreeAcpiTable(ctx->NhltTable);
     ctx->NhltTable = NULL;
     ctx->NhltTableSize = 0;
     RtlZeroMemory(&ctx->NhltInfo, sizeof(ctx->NhltInfo));
 
-    if (ctx->Bar0VirtualAddress) {
-        MmUnmapIoSpace(ctx->Bar0VirtualAddress, ctx->Bar0Length);
-        ctx->Bar0VirtualAddress = NULL;
-        ctx->Bar0Length = 0;
-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                   "[SOF] BAR0 unmapped.\n");
-    }
-
-    if (ctx->Bar4VirtualAddress) {
-        MmUnmapIoSpace(ctx->Bar4VirtualAddress, ctx->Bar4Length);
-        ctx->Bar4VirtualAddress = NULL;
-        ctx->Bar4Length = 0;
-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-                   "[SOF] BAR4 unmapped.\n");
-    }
+    ctx->WdfInterrupt = NULL; /* KMDF owns deletion after this callback. */
+    ctx->IsMsi = FALSE;
+    ctx->IrqMaskNeeded = FALSE;
+    SofUnmapPreparedBars(ctx);
 
     ctx->HardwarePrepared = FALSE;
     return status;
@@ -570,6 +629,11 @@ SofEvtDeviceD0Entry(
     KeReleaseSpinLock(&ctx->IpcLock, ipcIrql);
     if (ipcFaulted) {
         SofIpcDisableInterrupts(ctx);
+        SofIpcQuiesce(ctx);
+        if (ctx->DspNeedsPowerDown && !SofDeviceRemoved(ctx)) {
+            NTSTATUS powerStatus = SofPowerDownDsp(ctx);
+            if (!NT_SUCCESS(powerStatus)) return powerStatus;
+        }
         return STATUS_DEVICE_NOT_READY;
     }
 
@@ -580,7 +644,9 @@ SofEvtDeviceD0Entry(
         } else if (!NT_SUCCESS(portStatus)) {
             SofLogBreadcrumb("[Power] Requested PortCls registration failed.\n");
             SofIpcDisableInterrupts(ctx);
-            NTSTATUS powerStatus = SofPowerDownDsp(ctx);
+            SofIpcQuiesce(ctx);
+            NTSTATUS powerStatus = SofDeviceRemoved(ctx) ?
+                STATUS_DEVICE_REMOVED : SofPowerDownDsp(ctx);
             return NT_SUCCESS(powerStatus) ? portStatus : powerStatus;
         }
     }
@@ -641,7 +707,7 @@ SofEvtDeviceD0Exit(
 )
 {
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
-    if (!SofHardwareDevelopmentAllowed() || !ctx->DspNeedsPowerDown) return STATUS_SUCCESS;
+    if (!SofHardwareDevelopmentAllowed() || !ctx->HardwarePrepared) return STATUS_SUCCESS;
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] EvtDeviceD0Exit: Transitioning from D0 to Target State %d\n",
@@ -674,25 +740,14 @@ SofEvtDeviceD0Exit(
     NTSTATUS otherStatus = SofQuiesceDeviceStreams(ctx, FALSE);
     if (NT_SUCCESS(streamStatus)) streamStatus = otherStatus;
 
-    /* Do not access the inherited Meteor Lake D0i3 register on Pujjo.
-     * Invalidate the firmware session and wake waiters before power loss. */
-    {
-        KIRQL irql;
-        NTSTATUS powerStatus;
-        KeAcquireSpinLock(&ctx->IpcLock, &irql);
-        ctx->IpcFaulted = TRUE;
-        ctx->FwState = SOF_FW_BOOT_FAILED;
-        KeSetEvent(&ctx->IpcReplyEvent, IO_NO_INCREMENT, FALSE);
-        KeSetEvent(&ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
-        KeReleaseSpinLock(&ctx->IpcLock, irql);
-        ctx->CurrentPowerState = PowerDeviceUnspecified;
-        SofIpcDisableInterrupts(ctx);
-        KeFlushQueuedDpcs();
-        powerStatus = SofPowerDownDsp(ctx);
+    /* Stop device IRQs and drain the DPC and IPC senders before core reset. */
+    ctx->CurrentPowerState = PowerDeviceUnspecified;
+    SofIpcDisableInterrupts(ctx);
+    SofIpcQuiesce(ctx);
+    if (ctx->DspNeedsPowerDown && !SofDeviceRemoved(ctx)) {
+        NTSTATUS powerStatus = SofPowerDownDsp(ctx);
         if (!NT_SUCCESS(powerStatus)) return powerStatus;
     }
-    /* WDF_POWER_DEVICE_STATE is not DEVICE_POWER_STATE. Resume remains locked. */
-    ctx->CurrentPowerState = PowerDeviceUnspecified;
     return streamStatus;
 }
 
@@ -726,11 +781,50 @@ SofEvtWatchdogHealthTimer(
     }
 }
 
+VOID
+SofEvtDeviceSurpriseRemoval(_In_ WDFDEVICE Device)
+{
+    PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
+
+    /* The device can already be absent. Close the software IRQ gate without
+     * touching registers, and release any outstanding IPC waiters. */
+    InterlockedExchange(&ctx->SurpriseRemoved, 1);
+    SofIpcDisableInterrupts(ctx);
+    SofIpcQuiesce(ctx);
+}
+
+NTSTATUS
+SofEvtInterruptEnable(_In_ WDFINTERRUPT Interrupt, _In_ WDFDEVICE Device)
+{
+    PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
+    UNREFERENCED_PARAMETER(Interrupt);
+
+    ctx->IrqConnected = TRUE;
+    /* ROM polling initially owns the doorbells. The guarded loader arms IPC. */
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+SofEvtInterruptDisable(_In_ WDFINTERRUPT Interrupt, _In_ WDFDEVICE Device)
+{
+    PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
+    UNREFERENCED_PARAMETER(Interrupt);
+
+    /* The pre-disable power callback masks and drains at PASSIVE_LEVEL.
+     * This also closes the software gate on failed power transitions. */
+    if (ctx->IrqMaskNeeded)
+        SofIpcMaskInterrupt(ctx);
+    ctx->IrqConnected = FALSE;
+    ctx->IrqArmed = FALSE;
+    ctx->IrqPending = FALSE;
+    ctx->IrqMaskFailed = FALSE;
+    return STATUS_SUCCESS;
+}
+
 /**
  * @brief High-IRQL Interrupt Service Routine (ISR) for SOF Audio DSP.
  *
- * Checks if the interrupt was generated by the DSP doorbell registers. If so,
- * clears the edge and queues the DPC for deferred message processing.
+ * Checks DSP interrupt ownership, masks the source, and queues the DPC.
  *
  * @param[in] Interrupt Handle to WDFINTERRUPT.
  * @param[in] MessageID MSI message index (unused for line-based IRQs).
@@ -744,17 +838,13 @@ SofEvtInterruptIsr(
 {
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(WdfInterruptGetDevice(Interrupt));
 
-    UNREFERENCED_PARAMETER(MessageID);
-    if (!SofHardwareDevelopmentAllowed()) return FALSE;
+    if (!ctx->IrqArmed || ctx->IrqPending || SofDeviceRemoved(ctx) ||
+        (ctx->IsMsi && MessageID != 0) || !SofIpcIsrCheck(ctx))
+        return FALSE;
 
-    /* Check if this interrupt was asserted by the DSP */
-    if (SofIpcIsrCheck(ctx)) {
-        /* Queue DPC for deferred IPC packet processing */
-        WdfInterruptQueueDpcForIsr(Interrupt);
-        return TRUE;
-    }
-
-    return FALSE;
+    ctx->IrqPending = TRUE;
+    WdfInterruptQueueDpcForIsr(Interrupt);
+    return TRUE;
 }
 
 /**
@@ -771,9 +861,39 @@ SofEvtInterruptDpc(
 {
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(WdfInterruptGetDevice(Interrupt));
 
-    UNREFERENCED_PARAMETER(AssociatedObject);
-    if (!SofHardwareDevelopmentAllowed()) return;
+    BOOLEAN pending;
+    BOOLEAN handled;
+    KIRQL oldIrql;
 
-    /* Process DSP IPC Mailbox reply or notification */
-    SofIpcDpcHandler(ctx);
+    UNREFERENCED_PARAMETER(AssociatedObject);
+    WdfInterruptAcquireLock(Interrupt);
+    pending = ctx->IrqArmed && ctx->IrqPending && !SofDeviceRemoved(ctx);
+    handled = !ctx->IrqMaskFailed;
+    WdfInterruptReleaseLock(Interrupt);
+    if (!pending)
+        return;
+
+    handled = handled && SofIpcDpcHandler(ctx);
+    KeAcquireSpinLock(&ctx->IpcLock, &oldIrql);
+    handled = handled && !ctx->IpcFaulted;
+    KeReleaseSpinLock(&ctx->IpcLock, oldIrql);
+
+    WdfInterruptAcquireLock(Interrupt);
+    ctx->IrqPending = FALSE;
+    ctx->IrqMaskFailed = FALSE;
+    if (ctx->IrqArmed && (!handled || !SofIpcRearmInterrupt(ctx))) {
+        ctx->IrqArmed = FALSE;
+        SofIpcMaskInterrupt(ctx);
+        handled = FALSE;
+    }
+    WdfInterruptReleaseLock(Interrupt);
+
+    if (!handled) {
+        KeAcquireSpinLock(&ctx->IpcLock, &oldIrql);
+        ctx->IpcFaulted = TRUE;
+        ctx->FwState = SOF_FW_BOOT_FAILED;
+        KeSetEvent(&ctx->IpcReplyEvent, IO_NO_INCREMENT, FALSE);
+        KeSetEvent(&ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
+        KeReleaseSpinLock(&ctx->IpcLock, oldIrql);
+    }
 }

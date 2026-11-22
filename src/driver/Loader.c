@@ -412,7 +412,7 @@ SofPowerDownDsp(
     ULONG timeout;
     char bmsg[128];
 
-    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc)
+    if (!Ctx || !Ctx->Bar4VirtualAddress || !Ctx->HwDesc || SofDeviceRemoved(Ctx))
         return STATUS_DEVICE_NOT_READY;
 
     bar4 = (PUCHAR)Ctx->Bar4VirtualAddress;
@@ -1161,13 +1161,9 @@ SofStartFirmwareBoot(
 
     /* ROM ACK is polled by this loader, never by the normal IPC DPC.
      * Disable channel interrupts only after the firmware image is accepted. */
-    SofIpcDisableInterrupts(Ctx);
-    {
-        ULONG control = SofDspRead32(bar4, Ctx->HwDesc->HipcCtl);
-        if (control == 0xFFFFFFFFu || (control & (Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone))) {
-            status = STATUS_DEVICE_NOT_READY;
-            goto boot_failed;
-        }
+    if (!SofIpcDisableInterrupts(Ctx)) {
+        status = STATUS_DEVICE_NOT_READY;
+        goto boot_failed;
     }
 
     /* 0. Ensure DSP is powered down and reset before configuring DMA */
@@ -1378,16 +1374,9 @@ SofStartFirmwareBoot(
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
     Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS;
     KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
-    SofIpcEnableInterrupts(Ctx);
-    {
-        ULONG control = SofDspRead32(bar4, Ctx->HwDesc->HipcCtl);
-        ULONG route = SofDspRead32(bar4, HDA_DSP_REG_ADSPIC);
-        ULONG required = Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone;
-        if (control == MAXULONG || (control & required) != required ||
-            route == MAXULONG || !(route & HDA_DSP_IPC_INTERRUPT)) {
-            status = STATUS_DEVICE_NOT_READY;
-            goto boot_failed;
-        }
+    if (!SofIpcEnableInterrupts(Ctx)) {
+        status = STATUS_DEVICE_NOT_READY;
+        goto boot_failed;
     }
     {
         ULONG ctlReadback = SofCodeLoaderReadControl(streamRegs);
@@ -1662,7 +1651,6 @@ dma_unconfirmed:
     if (Ctx->DspNeedsPowerDown) {
         NTSTATUS rollbackStatus;
         SofIpcDisableInterrupts(Ctx);
-        KeFlushQueuedDpcs();
         rollbackStatus = SofPowerDownDsp(Ctx);
         if (!NT_SUCCESS(rollbackStatus))
             SofLogBreadcrumb("[Power] DSP rollback could not be confirmed.\n");
