@@ -4,7 +4,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 ipc = (root / "src/driver/Ipc.c").read_text()
 send = ipc.split("NTSTATUS\nSofIpcSendWhilePowered(", 1)[1].split("\n/**", 1)[0]
-dpc = ipc.split("VOID\nSofIpcDpcHandler(", 1)[1].split("\n/**", 1)[0]
+dpc = ipc.split("BOOLEAN\nSofIpcDpcHandler(", 1)[1].split("\n/**", 1)[0]
 assert "Reply && ((capacity != 0) != (Reply->Payload != NULL))" in send
 assert send.index("PJ_IPC4_MODULE_LARGE_GET") < send.index("MailboxUplinkSize") < send.index("WRITE_REGISTER_ULONG")
 assert send.index("MailboxUplinkOffset") < send.index("RtlCopyMemory(Reply->Payload")

@@ -93,6 +93,8 @@ NTSTATUS SofIpcInitialize(
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
  */
+VOID SofIpcQuiesce(_In_ PSOF_DEVICE_CONTEXT Ctx);
+
 VOID SofIpcCleanup(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 );
@@ -105,7 +107,9 @@ VOID SofIpcCleanup(
  *
  * @param[in] Ctx Pointer to the SOF device context.
  */
-VOID SofIpcEnableInterrupts(
+BOOLEAN SofIpcRearmInterrupt(_In_ PSOF_DEVICE_CONTEXT Ctx);
+
+BOOLEAN SofIpcEnableInterrupts(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 );
 
@@ -117,7 +121,9 @@ VOID SofIpcEnableInterrupts(
  *
  * @param[in] Ctx Pointer to the SOF device context.
  */
-VOID SofIpcDisableInterrupts(
+BOOLEAN SofIpcMaskInterrupt(_In_ PSOF_DEVICE_CONTEXT Ctx);
+
+BOOLEAN SofIpcDisableInterrupts(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 );
 
@@ -146,7 +152,7 @@ BOOLEAN SofIpcIsrCheck(
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
  */
-VOID SofIpcDpcHandler(
+BOOLEAN SofIpcDpcHandler(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 );
 

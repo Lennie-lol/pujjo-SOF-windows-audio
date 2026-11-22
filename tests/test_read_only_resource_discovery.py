@@ -13,7 +13,7 @@ assert prep.index("!SofHardwareDevelopmentAllowed()") < prep.index("WdfFdoQueryF
 assert "status = SofDiscoverHdaCaps(ctx);\n    if (!NT_SUCCESS(status)) goto PreparationFailed;" in prep
 assert "PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 0" in prep
 assert "PujjoReadMemoryBar(pciConfig.u.type0.BaseAddresses, 4" in prep
-assert prep.index("WdfCmResourceListGetDescriptor(ResourcesRaw, i)") < prep.index("bar0Resource->u.Memory.Start")
+assert prep.index("SofSelectPciResources(ResourcesRaw, ResourcesTranslated") < prep.index("SofMapPreparedBars(ctx, bars)")
 assert "memoryBarIndex" not in prep
 assert "SofIpcInitialize(ctx)" in prep
 assert "without CRST writes" in prep
