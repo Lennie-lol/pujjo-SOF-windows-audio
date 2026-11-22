@@ -156,5 +156,12 @@ pj_boot_result pj_boot_reset_epoch(pj_boot_model *b)
 }
 int pj_boot_is_ready(const pj_boot_model *b)
 {
+#ifndef PJ_IPC4_HOST_TEST
+    /* No production boot transport is connected. A caller-provided or
+     * corrupted state value must never authorize a hardware audio route. */
+    (void)b;
+    return 0;
+#else
     return b && b->state == PJ_BOOT_READY;
+#endif
 }
