@@ -29,6 +29,13 @@ int main(void)
     pj_boot_evidence e = good();
     pj_boot_init(&b);
     assert(b.state == PJ_BOOT_RESET && !pj_boot_is_ready(&b));
+    assert(!pj_boot_is_ready(NULL));
+#ifndef PJ_IPC4_HOST_TEST
+    /* Production readiness must remain false even if memory is forged. */
+    b.state = PJ_BOOT_READY;
+    assert(!pj_boot_is_ready(&b));
+    pj_boot_init(&b);
+#endif
     assert(!pj_boot_evidence_complete(NULL));
     assert(pj_boot_stage(NULL, &e) == PJ_BOOT_BAD_ARG);
     assert(pj_boot_stage(&b, NULL) == PJ_BOOT_BAD_ARG);
