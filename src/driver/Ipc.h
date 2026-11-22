@@ -86,46 +86,17 @@ NTSTATUS SofIpcInitialize(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 );
 
-/**
- * @brief Cleans up IPC subsystem resources during driver teardown.
- *
- * Frees non-paged reply buffers and resets state flags.
- *
- * @param[in,out] Ctx Pointer to the SOF device context.
- */
+/* PASSIVE_LEVEL, after stopping new device interrupts. */
 VOID SofIpcQuiesce(_In_ PSOF_DEVICE_CONTEXT Ctx);
+VOID SofIpcCleanup(_In_ PSOF_DEVICE_CONTEXT Ctx);
 
-VOID SofIpcCleanup(
-    _In_ PSOF_DEVICE_CONTEXT Ctx
-);
+/* Control the assigned cAVS interrupt from the passive loader/power path. */
+BOOLEAN SofIpcEnableInterrupts(_In_ PSOF_DEVICE_CONTEXT Ctx);
+BOOLEAN SofIpcDisableInterrupts(_In_ PSOF_DEVICE_CONTEXT Ctx);
 
-/**
- * @brief Unmasks and enables IPC interrupts in DSP SHIM and hardware control registers.
- *
- * Programs top-level IRQINTEN, second-level HfHIPCIE (on ACE platforms), and channel-level
- * HIPCCTL to enable BUSY and DONE interrupt notifications from the DSP.
- *
- * @param[in] Ctx Pointer to the SOF device context.
- */
+/* Device register updates performed with the framework interrupt lock held. */
 BOOLEAN SofIpcRearmInterrupt(_In_ PSOF_DEVICE_CONTEXT Ctx);
-
-BOOLEAN SofIpcEnableInterrupts(
-    _In_ PSOF_DEVICE_CONTEXT Ctx
-);
-
-/**
- * @brief Masks and disables all IPC interrupts in DSP hardware.
- *
- * Clears BUSY and DONE interrupt enable bits in HIPCCTL and upstream interrupt mask
- * registers to prevent interrupt generation during power-down or reset.
- *
- * @param[in] Ctx Pointer to the SOF device context.
- */
 BOOLEAN SofIpcMaskInterrupt(_In_ PSOF_DEVICE_CONTEXT Ctx);
-
-BOOLEAN SofIpcDisableInterrupts(
-    _In_ PSOF_DEVICE_CONTEXT Ctx
-);
 
 /* ISR / DPC Handlers */
 
@@ -137,7 +108,7 @@ BOOLEAN SofIpcDisableInterrupts(
  * interrupt storms before returning TRUE to request DPC scheduling.
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
- * @return TRUE if an IPC interrupt was acknowledged and DPC is required; FALSE otherwise.
+ * @return TRUE if an IPC source belongs to the device and requires deferred work.
  */
 BOOLEAN SofIpcIsrCheck(
     _In_ PSOF_DEVICE_CONTEXT Ctx
@@ -151,6 +122,7 @@ BOOLEAN SofIpcIsrCheck(
  * Reads payload data from the Uplink mailbox and signals waiting threads.
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
+ * @return TRUE if the MMIO path remained usable.
  */
 BOOLEAN SofIpcDpcHandler(
     _In_ PSOF_DEVICE_CONTEXT Ctx

@@ -42,7 +42,7 @@ typedef struct {
     ULONG *Bar4VirtualAddress;
     ULONG Bar4Length;
     void *WdfInterrupt;
-    BOOLEAN IrqConnected, IrqArmed, IrqPending, IrqMaskNeeded;
+    BOOLEAN IrqConnected, IrqArmed, IrqPending, IrqMaskNeeded, IrqMaskFailed;
     BOOLEAN IsMsi, Removed, IpcFaulted;
     int IpcLock, FwState, IpcReplyEvent, FwReadyEvent;
 } CTX, *PSOF_DEVICE_CONTEXT;
@@ -120,6 +120,9 @@ int main(void)
     ULONG before = writes;
     assert(!interrupt(0) && writes == before);
     regs[HDA_DSP_REG_ADSPIS / 4] = HDA_DSP_IPC_INTERRUPT;
+    regs[HDA_DSP_REG_ADSPIC / 4] = 0;
+    assert(!interrupt(0));
+    regs[HDA_DSP_REG_ADSPIC / 4] = HDA_DSP_IPC_INTERRUPT;
     ctx.IsMsi = TRUE;
     assert(!interrupt(1) && !queued);
     regs[IDA / 4] = MAXULONG;
@@ -157,6 +160,16 @@ int main(void)
     assert(!ctx.IrqArmed && !regs[CONTROL / 4] && ctx.IpcFaulted);
     assert(ctx.FwReadyEvent == 1 && ctx.IpcReplyEvent == 1 && !interrupt(0));
     assert(!SofIpcDisableInterrupts(&ctx) && drained == 1);
+
+    init();
+    assert(SofIpcEnableInterrupts(&ctx));
+    regs[HDA_DSP_REG_ADSPIS / 4] = HDA_DSP_IPC_INTERRUPT;
+    regs[TDR / 4] = 0x80000000u;
+    lost_control_write = 1;
+    assert(interrupt(0) && ctx.IrqMaskFailed && !regs[HDA_DSP_REG_ADSPIC / 4]);
+    SofEvtInterruptDpc(&ctx, NULL);
+    assert(!handled && ctx.IpcFaulted && !ctx.IrqArmed && !interrupt(0));
+    assert(ctx.FwReadyEvent == 1 && ctx.IpcReplyEvent == 1);
 
     init();
     assert(SofIpcEnableInterrupts(&ctx));

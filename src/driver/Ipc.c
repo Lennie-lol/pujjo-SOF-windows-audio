@@ -94,9 +94,7 @@ SofIpcInitialize(
 }
 
 /**
- * @brief Releases IPC subsystem resources during driver unload or tear-down.
- *
- * Frees the allocated non-paged reply buffer and zeros out tracking fields.
+ * @brief Cancels IPC waiters and drains callers before the DSP loses power.
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
  */
@@ -189,6 +187,7 @@ SofIpcDisableInterrupts(_In_ PSOF_DEVICE_CONTEXT Ctx)
     WdfInterruptAcquireLock(Ctx->WdfInterrupt);
     Ctx->IrqArmed = FALSE;
     Ctx->IrqPending = FALSE;
+    Ctx->IrqMaskFailed = FALSE;
     masked = SofIpcMaskInterrupt(Ctx);
     WdfInterruptReleaseLock(Ctx->WdfInterrupt);
 
@@ -533,7 +532,7 @@ SofDspDumpCore(
  * eliminate line-based IRQ storms, then returns TRUE to schedule the DPC.
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
- * @return TRUE if an IPC interrupt was acknowledged and DPC is needed; FALSE otherwise.
+ * @return TRUE if an owned interrupt needs deferred handling.
  */
 BOOLEAN
 SofIpcIsrCheck(
@@ -580,11 +579,14 @@ SofIpcIsrCheck(
         if (irqSts == 0xFFFFFFFF || !(irqSts & MTL_DSP_IRQSTS_IPC))
             return FALSE;
     } else if (!Ctx->HwDesc->IsAce) {
-        ULONG irqSts;
-        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPIS, 4u))
+        ULONG irqSts, route;
+        if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPIS, 4u) ||
+            !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPIC, 4u))
             return FALSE;
         irqSts = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPIS);
-        if (irqSts == MAXULONG || !(irqSts & HDA_DSP_IPC_INTERRUPT))
+        route = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPIC);
+        if (irqSts == MAXULONG || route == MAXULONG ||
+            !(irqSts & route & HDA_DSP_IPC_INTERRUPT))
             return FALSE;
     }
 
@@ -601,25 +603,32 @@ SofIpcIsrCheck(
           ((control & Ctx->HwDesc->HipcCtlDone) && (ida & Ctx->HwDesc->HipcIdaDone))))
         return FALSE;
 
-    /* Mask both channel sources and flush the posted write before returning. */
-    return SofIpcSetIrqBits(Ctx, Ctx->HwDesc->HipcCtl,
-                           Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone, FALSE);
+    /* Mask both channel sources and flush the posted write before returning.
+     * If that fails after confirming ownership, gate the route and let the
+     * DPC fault the session without consuming either unmasked doorbell. */
+    Ctx->IrqMaskFailed = !SofIpcSetIrqBits(Ctx, Ctx->HwDesc->HipcCtl,
+        Ctx->HwDesc->HipcCtlBusy | Ctx->HwDesc->HipcCtlDone, FALSE);
+    if (Ctx->IrqMaskFailed)
+        SofIpcMaskInterrupt(Ctx);
+    return TRUE;
 }
 
 /**
  * @brief Deferred Procedure Call (DPC) worker for dispatching IPC replies and notifications.
  *
  * Evaluates pending hardware status:
- *  1. Host TX ACK: DSP set DONE in HIPCIDA. Acknowledges DONE in HIPCIDA, re-enables HIPCCTL.
+ *  1. Host TX ACK: DSP set DONE in HIPCIDA. Acknowledge DONE in HIPCIDA.
  *  2. DSP Incoming Message: DSP set BUSY in HIPCTDR.
  *     - If message direction bit (SOF_IPC4_MSG_DIR_MASK) is 1, this is a command reply.
  *       Reads payload from Uplink Mailbox, unlocks transmitter, and signals IpcReplyEvent.
  *     - If message direction bit is 0, this is an unsolicited notification.
  *       Handles SOF_IPC4_NOTIFY_FW_READY (signals FwReadyEvent) or
  *       SOF_IPC4_NOTIFY_EXCEPTION_CAUGHT (triggers SofDspDumpCore).
- *  3. Doorbell Acknowledgment: Clears BUSY in HIPCTDR and HIPCTDA to acknowledge receipt to DSP.
+ *  3. Doorbell acknowledgment: clear BUSY in HIPCTDR, then signal DSP in HIPCTDA.
+ * The interrupt callback owns rearming after this handler returns.
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
+ * @return TRUE if the MMIO path remained usable.
  */
 BOOLEAN
 SofIpcDpcHandler(
@@ -831,9 +840,8 @@ SofIpcDpcHandler(
  *  3. Writes Extension header to HIPCIDD.
  *  4. Rings the Doorbell: Writes Primary header with BUSY bit asserted to HIPCIDR.
  *  5. Releases spinlock and enters a wait loop on IpcReplyEvent.
- *  6. Polling Fallback: Checks every 25ms and manually calls SofIpcDpcHandler in case a line-based
- *     interrupt was delayed or lost under heavy system load.
- *  7. On completion, validates the IPC4 reply status code (bits 0..23). On timeout, triggers SofDspDumpCore.
+ *  6. The interrupt DPC delivers the reply. A timeout faults the session.
+ *  7. On completion, validate the IPC4 reply status code (bits 0..23).
  *
  * @param[in,out] Ctx Pointer to the SOF device context.
  * @param[in]     Msg Pointer to the IPC message struct to send.
@@ -900,7 +908,7 @@ SofIpcSendWhilePowered(
 
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
 
-    if (Ctx->IpcFaulted || Ctx->FwState != RequiredState) {
+    if (Ctx->IpcFaulted || Ctx->FwState != RequiredState || SofDeviceRemoved(Ctx)) {
         KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
         return STATUS_DEVICE_NOT_READY;
     }

@@ -218,6 +218,7 @@ typedef struct _SOF_DEVICE_CONTEXT {
     BOOLEAN             IrqArmed;
     BOOLEAN             IrqPending;
     BOOLEAN             IrqMaskNeeded;
+    BOOLEAN             IrqMaskFailed;
     volatile LONG       SurpriseRemoved;
     BOOLEAN             IsMsi;
 

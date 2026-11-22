@@ -31,7 +31,7 @@ assert disable.index("WdfInterruptReleaseLock") < disable.index("KeFlushQueuedDp
 for body in (isr, dpc):
     for register in ("HipcIda", "HipcTdr", "HipcTdd", "HipcTda", "HipcCtl"):
         assert body.index(register+", 4u") < body.index("SofDspRead32(")
-    assert body.index("tdr == 0xFFFFFFFFu || ida == 0xFFFFFFFFu") < body.index("return SofIpcSetIrqBits(" if body == isr else "SofDspWrite32(")
+    assert body.index("tdr == 0xFFFFFFFFu || ida == 0xFFFFFFFFu") < body.index("Ctx->IrqMaskFailed = !SofIpcSetIrqBits(" if body == isr else "SofDspWrite32(")
 assert isr.index("ptr == 0xFFFFFFFFu") < isr.index("ptr &= MTL_HFINTIPPTR_PTR_MASK")
 print("PASS: bounded interrupt control and dispatch, unavailable-device doorbells, gated FW_READY and no unreviewed firmware retry")
 
