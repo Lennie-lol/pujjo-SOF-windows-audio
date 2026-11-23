@@ -1343,6 +1343,17 @@ SofStartFirmwareBoot(
             status = STATUS_DEVICE_NOT_READY;
             goto boot_failed;
         }
+        /* ROM HALTED is a terminal fault, not a slow INIT_DONE transition.
+         * Fail before starting the code-loader DMA on a halted DSP. */
+        if (statusReg & SOF_FSR_HALTED_MASK) {
+            ULONG romError = SofDspRead32(bar4, Ctx->HwDesc->RomErrorReg);
+            RtlStringCbPrintfA(bmsg, sizeof(bmsg),
+                "[12-ROM] ROM halted before INIT_DONE: FSR=0x%08x ROM_ERR=0x%08x\n",
+                statusReg, romError);
+            SofLogBreadcrumb(bmsg);
+            status = STATUS_IO_DEVICE_ERROR;
+            goto boot_failed;
+        }
         if (FSR_TO_STATE_CODE(statusReg) == FSR_STATE_INIT_DONE)
             break;
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
@@ -1442,6 +1453,17 @@ SofStartFirmwareBoot(
         KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
         bootState = Ctx->FwState;
         KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        /* A halted ROM cannot be promoted to success, even if an IPC
+         * FW_READY notification raced with the final DMA poll. */
+        if (statusReg != 0xFFFFFFFFu && (statusReg & SOF_FSR_HALTED_MASK)) {
+            ULONG romError = SofDspRead32(bar4, Ctx->HwDesc->RomErrorReg);
+            RtlStringCbPrintfA(bmsg, sizeof(bmsg),
+                "[12-ROM] ROM halted during firmware DMA: FSR=0x%08x ROM_ERR=0x%08x\n",
+                statusReg, romError);
+            SofLogBreadcrumb(bmsg);
+            status = STATUS_IO_DEVICE_ERROR;
+            goto stop_dma;
+        }
         if (bootState == SOF_FW_BOOT_FAILED || statusReg == 0xFFFFFFFFu)
             break;
         if (FSR_TO_STATE_CODE(statusReg) == FSR_STATE_FW_ENTERED ||
@@ -1579,7 +1601,10 @@ stop_dma:
                    "[SOF] Firmware boot timed out (ROM Status: 0x%08x, ERR: 0x%08x, LPIB: 0x%x, SD_STS: 0x%02x)\n",
                    statusReg, romErr, lpib, sdsts);
 
-        status = statusReg == MAXULONG ? STATUS_DEVICE_NOT_READY : STATUS_IO_TIMEOUT;
+        /* Keep an explicit IPC4 boot fault distinct from a plain ROM
+         * timeout so a future on-device trace can identify the stage. */
+        status = statusReg == MAXULONG ? STATUS_DEVICE_NOT_READY :
+            (bootState == SOF_FW_BOOT_FAILED ? STATUS_DEVICE_PROTOCOL_ERROR : STATUS_IO_TIMEOUT);
         goto boot_failed;
     }
 
