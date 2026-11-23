@@ -19,6 +19,16 @@ The signed v0.0.2.0 KMDF-only package is the recovery driver. The recorded devic
 3. Confirm Google / Pujjo / rev3, the recorded Windows and UEFI environment, preserved signed fallback and recovery access. Reconcile differences in INF, problem code, resource assignment or identity before proposing a test. The verifier can additionally check a separately signed catalog and its INF/SYS membership using `-SignedPackageDirectory` and `-SignToolPath`.
 4. Review the assigned memory and interrupt resources and the platform DMA-remapping configuration. The guarded loader requires working BAR0/BAR4, PCI memory decode and bus mastering, a controller already out of reset, a free playback slot and capture slot, PP/SPIB, and a connected interrupt. Windows resource enumeration alone cannot verify register readback or interrupt delivery. Obtain explicit approval for a single physical attempt after signing and recovery rehearsal.
 
+The post-DMA check now re-reads the cAVS Firmware Status Register after
+both playback code-loader DMA and ICCMAX stop, rather than reusing the
+earlier FW_ENTERED sample. If BAR4 disappears, ROM reports HALTED, the
+state no longer equals FW_ENTERED, or the IPC boot session is faulted,
+the loader rejects the boot before waiting for FW_READY and records
+the before/after FSR samples plus ROM_ERR. This path remains behind the
+existing experimental boot flags and one-shot authorization. Host-side
+tests exercise the admission helper against synthetic register samples,
+not the physical DSP.
+
 ## Evidence from an authorized attempt
 
 Record UTC start/end times, exact device instance, package hashes, firmware hash and Windows build. Preserve the pre-attempt length of `C:\sof_entry.txt` so older messages cannot satisfy this run. Collect its appended bytes, SetupAPI.dev.log and the Windows System / Kernel-PnP events for the same interval. If a kernel-debug capture is already available, record raw IPC notification and reply headers there. The file logger skips DPC-level calls.
