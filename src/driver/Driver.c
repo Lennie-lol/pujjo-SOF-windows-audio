@@ -73,7 +73,12 @@ NTSYSAPI NTSTATUS NTAPI ZwFlushKey(_In_ HANDLE KeyHandle);
 BOOLEAN g_CanaryArmed = FALSE;
 
 /** @brief Active safe boot policy governing driver recovery behavior. */
+/* Boot-only diagnostics fail closed even if the Parameters key is missing. */
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+ULONG g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
+#else
 ULONG g_SafeBootPolicy = SOF_SAFE_BOOT_PRODUCTION;
+#endif
 
 /**
  * @brief Reads a 32-bit DWORD value from an open registry key.
@@ -217,8 +222,19 @@ DriverEntry(
     ULONG crashCount = 0;
     ULONG crashMax = 1;
 
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    /*
+     * Missing or unexpected diagnostic policy is never a production watchdog
+     * authorization. Only the explicit SINGLE_SHOT path can arm DSP boot.
+     */
+    if (paramsKey != NULL) {
+        g_SafeBootPolicy = SofReadRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE);
+        if (g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT)
+            g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
+#else
     if (paramsKey != NULL) {
         g_SafeBootPolicy = SofReadRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_PRODUCTION);
+#endif
         bootSafetyToken = SofReadRegistryDword(paramsKey, L"BootSafetyToken", 0);
         crashCount = SofReadRegistryDword(paramsKey, L"ConsecutiveCrashCount", 0);
         crashMax = SofReadRegistryDword(paramsKey, L"CrashWatchdogMax", 1);
@@ -407,6 +423,34 @@ SofEvtDeviceAdd(
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] SofEvtDeviceAdd: Found matching SOF DSP device!\n");
+
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    /*
+     * Forced-safe PnP-only diagnostic. Do not register ANY driver PnP/power
+     * callbacks or allocate a device context, DMA enabler, interrupt, timer,
+     * PortCls endpoint or mapped PCI BAR. KMDF owns the default PnP/power
+     * transitions, so Windows can report the FDO as started without ever
+     * executing PrepareHardware or D0Entry. There is NO DSP boot and no audio.
+     *
+     * This cannot be reached by SINGLE_SHOT/canary-armed configurations.
+     * The guarded hardware startup implementation below stays unchanged.
+     */
+    if (g_SafeBootPolicy == SOF_SAFE_BOOT_FORCED_SAFE && !g_CanaryArmed) {
+        SofLogBreadcrumb("[5-SafeStub] Forced-safe KMDF-only device creation; no DSP callbacks.\n");
+        status = WdfDeviceCreate(&DeviceInit, WDF_NO_OBJECT_ATTRIBUTES, &device);
+        if (!NT_SUCCESS(status)) {
+            SofLogBreadcrumb("[5-SafeStub] WdfDeviceCreate failed.\n");
+            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
+                       "[PUJJO] Forced-safe KMDF-only WdfDeviceCreate failed: 0x%08x\n",
+                       status);
+        } else {
+            SofLogBreadcrumb("[5-SafeStub] KMDF device created without DMA, IRQ or firmware boot.\n");
+            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
+                       "[PUJJO] Forced-safe KMDF-only device started; DSP not accessed.\n");
+        }
+        return status;
+    }
+#endif
 
     /* Register PnP and Power Event Callbacks */
     WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpPowerCallbacks);

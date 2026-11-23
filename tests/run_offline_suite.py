@@ -23,6 +23,7 @@ SUITES=[
  'tests/test_v16_static.py','tests/run_dma_tests.py','tests/run_nhlt_bounds_tests.py',
  'tests/test_windows_ci_v017.py','tests/run_kernel_mock_abi_tests.py',
  'tests/test_preinstall_guards.py','tests/test_dsp_submission_preflight_static.py',
+ 'tests/test_forced_safe_kmdf_stub.py',
  'tests/run_ipc4_boot_model_tests.py',
  'tests/run_boot_speaker_integration_tests.py',
  'tests/run_ipc4_protocol_tests.py','tests/test_ipc4_protocol_static.py',

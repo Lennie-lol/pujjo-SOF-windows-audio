@@ -48,12 +48,20 @@ Use the resource diagnostic first and record its translated I2C, GPIO, and inter
 
 A separate guarded x64 build defines PUJJO_DSP_BOOT_DIAGNOSTIC alongside
 the DSP boot and reviewed firmware compile flags, never the audio/analog
-or replacement NHLT flags. Its INF uses forced-safe defaults. PrepareHardware
+or replacement NHLT flags. Its INF uses forced-safe defaults. In the updated
+diagnostic, SafeBootPolicy=0 (or a missing/invalid diagnostic policy) creates
+only a KMDF PnP stub: it registers no driver PnP or power callbacks, DMA
+enabler, ISR, timers, BAR mapping, firmware loader or audio endpoint. An
+apparently healthy Device Manager entry here is NOT FW_READY or working audio.
+The actual guarded hardware path remains separate: PrepareHardware
 requires a successfully consumed one-shot persistent canary; D0Entry consumes
 the in-memory authorization before invoking the loader. Failed canary file
 disposition, failed token write or failed registry flush does not arm the
 single-shot path. Existing hardware identity checks and loader digest gates
-remain in place. No package changes hardware state during CI.
+remain in place. No package changes hardware state during CI. The safe PnP
+stub still binds to the PCI device, so an installer must retain a tested
+rollback procedure and must not infer hardware safety from Code 10 disappearing.
+Do not change boot policy or create an arming token to test the safe stub.
 
 The Release artifact contains INF, SYS, unsigned catalog and hashes. It
 does not contain a firmware binary, installation/arming script, or approved
