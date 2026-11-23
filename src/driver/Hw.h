@@ -552,6 +552,9 @@ typedef struct _SOF_INTEL_DSP_BDL {
 /** @brief Helper macro to extract state code from raw FSR register value. */
 #define FSR_TO_STATE_CODE(x)                ((x) & FSR_STATE_MASK)
 
+/** @brief Intel cAVS FSR bit 31: ROM has halted after an error. */
+#define SOF_FSR_HALTED_MASK               0x80000000u
+
 /** @brief Firmware status: Initializing ROM hardware. */
 #define FSR_STATE_INIT                      0x0
 
