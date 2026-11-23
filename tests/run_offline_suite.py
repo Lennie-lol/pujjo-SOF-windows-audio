@@ -25,6 +25,7 @@ SUITES=[
  'tests/test_preinstall_guards.py','tests/test_dsp_submission_preflight_static.py',
  'tests/test_forced_safe_kmdf_stub.py',
  'tests/test_rom_halt_fail_closed.py',
+ 'tests/run_post_dma_rom_tests.py',
  'tests/test_iccmax_transport.py',
  'tests/test_cold_boot_dpc.py',
  'tests/run_ipc4_boot_model_tests.py',

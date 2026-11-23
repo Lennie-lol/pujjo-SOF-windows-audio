@@ -50,11 +50,16 @@ assert halt_dma.index("ROM halted during firmware DMA") < halt_dma.index(
 assert "RomErrorReg" in transfer
 assert "SOF_FW_BOOT_READY_RECEIVED" not in transfer
 
-fault = boot.split("/* Check if FW entered successfully; a fault must never become success. */", 1)[1]
-assert "bootState == SOF_FW_BOOT_FAILED ? STATUS_DEVICE_PROTOCOL_ERROR : STATUS_IO_TIMEOUT" in fault
-before_wait = fault.split("KeWaitForSingleObject", 1)[0]
-assert "FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED" in before_wait
-assert "SOF_FW_BOOT_READY_RECEIVED" not in before_wait
+# Require a fresh BAR4 ROM read after both DMA channels have stopped and
+# before a previously-seen FW_READY can be accepted.
+post_dma = boot.split("status = SofStopIccmaxDma(Ctx, &iccmax);", 1)[1].split(
+    "KeWaitForSingleObject", 1)[0]
+assert post_dma.index("statusReg = SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg);") < (
+    post_dma.index("SofCheckPostDmaRomState(statusReg, bootState)"))
+admission = post_dma.split("status = SofCheckPostDmaRomState(statusReg, bootState);", 1)[1]
+assert admission.index("if (!NT_SUCCESS(status))") < admission.index("goto boot_failed;")
+assert "Post-DMA ROM rejected" in post_dma
+assert "SofQueryBootedFirmwareVersion" not in post_dma
 
 # The known-good forced-safe KMDF entry remains the first PnP creation path.
 add = driver.split("SofEvtDeviceAdd(", 1)[1]
