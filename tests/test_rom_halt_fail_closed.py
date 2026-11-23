@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-3-Clause
+"""Read-only source contracts for experimental Pujjo ROM HALTED handling.
+
+Not an on-device ROM test: never maps PCI BARs, DMA, or arms the canary.
+"""
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[1]
+hw = (root / "src/driver/Hw.h").read_text(encoding="utf-8")
+loader = (root / "src/driver/Loader.c").read_text(encoding="utf-8")
+driver = (root / "src/driver/Driver.c").read_text(encoding="utf-8")
+assert "#define SOF_FSR_HALTED_MASK               0x80000000u" in hw
+for raw, halted in ((0, False), (1, False), (5, False),
+                    (0x80000000, True), (0x80000001, True),
+                    (0x80000005, True), (0xffffffff, True)):
+    assert bool(raw & 0x80000000) == halted
+
+boot = loader.split("NTSTATUS\nSofStartFirmwareBoot(", 1)[1]
+initial = boot.split("/* Wait for ROM status FSR_STATE_INIT_DONE", 1)[1].split(
+    "/* ROM ACK belongs to the loader", 1)[0]
+assert initial.index("statusReg == 0xFFFFFFFFu") < initial.index(
+    "statusReg & SOF_FSR_HALTED_MASK") < initial.index(
+    "FSR_TO_STATE_CODE(statusReg) == FSR_STATE_INIT_DONE")
+assert "ROM halted before INIT_DONE" in initial
+assert initial.index("status = STATUS_IO_DEVICE_ERROR;") < initial.index("goto boot_failed;")
+assert "RomErrorReg" in initial
+
+transfer = boot.split("timeout = 4000; /* 4 seconds */", 1)[1].split(
+    "\nstop_dma:", 1)[0]
+assert transfer.index("statusReg & SOF_FSR_HALTED_MASK") < transfer.index(
+    "bootState == SOF_FW_BOOT_FAILED") < transfer.index(
+    "FSR_TO_STATE_CODE(statusReg) == FSR_STATE_FW_ENTERED")
+assert transfer.index("ROM halted during firmware DMA") < transfer.index(
+    "status = STATUS_IO_DEVICE_ERROR;") < transfer.index("goto stop_dma;")
+assert "RomErrorReg" in transfer
+
+fault = boot.split("/* Check if FW entered successfully; a fault must never become success. */", 1)[1]
+assert "bootState == SOF_FW_BOOT_FAILED ? STATUS_DEVICE_PROTOCOL_ERROR : STATUS_IO_TIMEOUT" in fault
+
+# The known-good forced-safe KMDF entry remains the first PnP creation path.
+add = driver.split("SofEvtDeviceAdd(", 1)[1]
+stub = add.split("#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC", 1)[1].split("#endif", 1)[0]
+assert "g_SafeBootPolicy == SOF_SAFE_BOOT_FORCED_SAFE && !g_CanaryArmed" in stub
+assert "WdfDeviceCreate(&DeviceInit, WDF_NO_OBJECT_ATTRIBUTES, &device)" in stub
+assert "SofStartFirmwareBoot" not in stub
+assert add.index("WdfDeviceCreate(&DeviceInit, WDF_NO_OBJECT_ATTRIBUTES, &device)") < (
+    add.index("WdfDeviceInitSetPnpPowerEventCallbacks"))
+print("PASS: halted ROM aborts before DMA start or FW_ENTERED acceptance; safe stub unchanged")
