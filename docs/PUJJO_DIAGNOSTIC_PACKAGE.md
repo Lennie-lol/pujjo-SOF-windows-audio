@@ -63,6 +63,21 @@ stub still binds to the PCI device, so an installer must retain a tested
 rollback procedure and must not infer hardware safety from Code 10 disappearing.
 Do not change boot policy or create an arming token to test the safe stub.
 
+A physical Google Pujjo rev3 test of the test-signed v0.0.2.0 safe-stub
+reported Device Manager Status OK / ProblemCode 0 after replacement of a
+stale unsigned Driver Store catalog. This validates the KMDF-only device
+start, **not** ROM access, firmware authentication, FW_READY, DMA or sound.
+Preserve the signed v0.0.2.0 package as the known working rollback baseline.
+
+Future guarded ROM/DMA startup: the experimental loader now checks the
+Intel cAVS FSR HALTED flag (bit 31) while awaiting ROM INIT_DONE and while
+polling firmware transfer. A halted ROM produces a tagged FSR/ROM_ERR log
+and takes the existing failure/cleanup path without accepting FW_ENTERED
+or an early FW_READY as success. An explicit IPC boot failure is classified
+separately from an ordinary ROM polling timeout. Host-only regression tests
+cover source ordering; neither change is exercised by the safe stub.
+No DSP hardware-boot authorization is implied by these tests.
+
 The Release artifact contains INF, SYS, unsigned catalog and hashes. It
 does not contain a firmware binary, installation/arming script, or approved
 replacement topology. The exact pinned ADL-N firmware is a separate
