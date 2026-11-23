@@ -56,8 +56,8 @@ post_dma = boot.split("status = SofStopIccmaxDma(Ctx, &iccmax);", 1)[1].split(
     "KeWaitForSingleObject", 1)[0]
 assert post_dma.index("statusReg = SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg);") < (
     post_dma.index("SofCheckPostDmaRomState(statusReg, bootState)"))
-assert post_dma.index("SofCheckPostDmaRomState(statusReg, bootState)") < (
-    post_dma.index("goto boot_failed;"))
+admission = post_dma.split("status = SofCheckPostDmaRomState(statusReg, bootState);", 1)[1]
+assert admission.index("if (!NT_SUCCESS(status))") < admission.index("goto boot_failed;")
 assert "Post-DMA ROM rejected" in post_dma
 assert "SofQueryBootedFirmwareVersion" not in post_dma
 
