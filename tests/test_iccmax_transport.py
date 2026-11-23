@@ -28,6 +28,13 @@ typedef int NTSTATUS;
 #define STATUS_IO_TIMEOUT -5
 #define STATUS_IO_DEVICE_ERROR -6
 #define NT_SUCCESS(s) ((s) >= 0)
+#define _In_
+#define RTL_NUMBER_OF(a) (sizeof(a)/sizeof((a)[0]))
+#define SOF_HDA_GCTL 8u
+#define SOF_HDA_GCTL_RESET 1u
+#define SOF_HDA_INTCTL 32u
+#define SOF_HDA_PPCTL_GPROCEN (1u<<30)
+#define SofLogBreadcrumb(s) ((void)(s))
 #define PAGE_SIZE 4096u
 #define SOF_HDA_ADSP_LOADER_BASE 0x80u
 #define SOF_HDA_ADSP_SD_ENTRY_SIZE 32u
@@ -44,7 +51,13 @@ typedef int NTSTATUS;
 typedef struct { ULONG AddrLow, AddrHigh, Size, Ioc; } BDL, *PSOF_INTEL_DSP_BDL;
 typedef struct { void *VirtualAddress; struct {ULONG LowPart, HighPart;} PhysicalAddress; } SOF_DMA_BUFFER;
 typedef struct { PUCHAR Bar0VirtualAddress; ULONG Bar0Length, NumCaptureStreams,
-    NumPlaybackStreams, PpCapOffset; } CTX, *PSOF_DEVICE_CONTEXT;
+    NumPlaybackStreams, PpCapOffset, BootPpBitsAdded, BootIntBitsAdded;
+    BOOLEAN Removed, DspNeedsPowerDown, BootDmaStopUnconfirmed, IrqMaskNeeded;
+} CTX, *PSOF_DEVICE_CONTEXT;
+static int SofDeviceRemoved(CTX *c) { return c->Removed; }
+static int pj_ipc4_mmio_span_valid(ULONG length, ULONG offset, ULONG bytes) {
+    return offset<=length && bytes<=length-offset;
+}
 static UCHAR bar[8192];
 static BDL storage[2][PAGE_SIZE/sizeof(BDL)];
 static unsigned allocs, frees, starts;
@@ -85,7 +98,24 @@ int main(void) {
         {0x83,0,-6}, /* late descriptor error */
         {0x80,0,-5}, {0x98,0,-1} /* stuck RUN or attached BDL */
     };
-    CTX c={bar,sizeof(bar),1,1,0x200};
+    CTX c={.Bar0VirtualAddress=bar,.Bar0Length=sizeof(bar),.NumCaptureStreams=1,
+           .NumPlaybackStreams=1,.PpCapOffset=0x200};
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_NOT_READY); /* controller held in reset */
+    writel(1,bar+SOF_HDA_GCTL);
+    writel(8,bar+0x204);
+    assert(SofAcquireBootProcessing(&c)==0 && c.BootPpBitsAdded==SOF_HDA_PPCTL_GPROCEN);
+    assert(readl(bar+0x204)==(8|SOF_HDA_PPCTL_GPROCEN));
+    c.BootIntBitsAdded=1u<<31; writel(c.BootIntBitsAdded|2,bar+SOF_HDA_INTCTL);
+    c.BootDmaStopUnconfirmed=1;
+    assert(SofRestoreBootController(&c)==STATUS_DEVICE_NOT_READY && c.BootIntBitsAdded);
+    c.BootDmaStopUnconfirmed=0; drop=bar+0x204;
+    assert(SofRestoreBootController(&c)==STATUS_DEVICE_NOT_READY && c.BootPpBitsAdded);
+    assert(!c.BootIntBitsAdded && readl(bar+SOF_HDA_INTCTL)==2);
+    drop=NULL;
+    assert(SofRestoreBootController(&c)==0 && readl(bar+0x204)==8);
+    writel(SOF_HDA_PPCTL_GPROCEN,bar+0x204);
+    assert(SofAcquireBootProcessing(&c)==0 && !c.BootPpBitsAdded);
+    assert(SofRestoreBootController(&c)==0 && readl(bar+0x204)==SOF_HDA_PPCTL_GPROCEN);
     for (unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);++i) {
         SOF_ICCMAX_DMA d={0};
         memset(bar,0,sizeof(bar)); drop=NULL; allocs=frees=starts=0;
@@ -117,7 +147,11 @@ int main(void) {
 with tempfile.TemporaryDirectory() as temp:
     src = Path(temp) / "iccmax.c"
     exe = Path(temp) / ("iccmax.exe" if os.name == "nt" else "iccmax")
-    src.write_text(shim + functions + cases)
+    restore = loader[loader.index("NTSTATUS SofRestoreBootController("):
+                     loader.index("#ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT\nstatic NTSTATUS SofAcquireBootProcessing")]
+    acquire = loader[loader.index("static NTSTATUS SofAcquireBootProcessing("):
+                     loader.index("/* Confirm both halves of the descriptor address")]
+    src.write_text(shim + restore + acquire + functions + cases)
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra",
                     "-Werror", *shlex.split(os.environ.get("CFLAGS", "")),
                     "-I", str(driver), str(src), str(driver / "PujjoDmaPlan.c"),

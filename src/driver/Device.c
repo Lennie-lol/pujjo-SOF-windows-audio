@@ -317,8 +317,10 @@ SofEvtDevicePrepareHardware(
     ctx->VendorId = pciConfig.VendorID;
     ctx->DeviceId = pciConfig.DeviceID;
     ctx->RevisionId = pciConfig.RevisionID;
-    if ((pciConfig.Command & 0x0006u) != 0x0006u)
-        SofLogBreadcrumb("[PCI] Memory decode or bus mastering is disabled.\n");
+    if (pciConfig.Command == 0xffffu || !(pciConfig.Command & PCI_ENABLE_MEMORY_SPACE)) {
+        SofLogBreadcrumb("[PCI] Memory decode unavailable before BAR discovery.\n");
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
 
     /* Only the Intel Alder Lake-N 54C8 controller is in scope.
      * Never silently default to another Intel DSP when PCI config access fails. */
@@ -618,6 +620,21 @@ SofEvtDeviceD0Entry(
      * DriverEntry already consumed persistent authorization. */
     g_CanaryArmed = FALSE;
 #endif
+    /* Re-read at D0 entry. The bus owns these PCI command bits and their
+     * state during PrepareHardware need not be their state at DMA start. */
+    BUS_INTERFACE_STANDARD busInterface;
+    USHORT command = 0;
+    bootStatus = WdfFdoQueryForInterface(Device, &GUID_BUS_INTERFACE_STANDARD,
+        (PINTERFACE)&busInterface, sizeof(busInterface), 1, NULL);
+    if (!NT_SUCCESS(bootStatus)) return bootStatus;
+    ULONG bytesRead = busInterface.GetBusData(busInterface.Context, PCI_WHICHSPACE_CONFIG,
+        &command, FIELD_OFFSET(PCI_COMMON_CONFIG, Command), sizeof(command));
+    busInterface.InterfaceDereference(busInterface.Context);
+    const USHORT required = PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_BUS_MASTER;
+    if (bytesRead != sizeof(command) || command == 0xffffu || (command & required) != required) {
+        SofLogBreadcrumb("[PCI] D0 requires memory decode and bus mastering.\n");
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
     bootStatus = SofStartFirmwareBoot(ctx, NULL);
     if (!NT_SUCCESS(bootStatus)) {
         SofLogBreadcrumb("[Power] D0 entry aborted: firmware boot failed.\n");
@@ -634,6 +651,8 @@ SofEvtDeviceD0Entry(
             NTSTATUS powerStatus = SofPowerDownDsp(ctx);
             if (!NT_SUCCESS(powerStatus)) return powerStatus;
         }
+        if (!NT_SUCCESS(SofRestoreBootController(ctx)))
+            SofLogBreadcrumb("[HDA] Controller rollback could not be confirmed.\n");
         return STATUS_DEVICE_NOT_READY;
     }
 
@@ -647,7 +666,9 @@ SofEvtDeviceD0Entry(
             SofIpcQuiesce(ctx);
             NTSTATUS powerStatus = SofDeviceRemoved(ctx) ?
                 STATUS_DEVICE_REMOVED : SofPowerDownDsp(ctx);
-            return NT_SUCCESS(powerStatus) ? portStatus : powerStatus;
+            if (!NT_SUCCESS(powerStatus)) return powerStatus;
+            NTSTATUS restoreStatus = SofRestoreBootController(ctx);
+            return NT_SUCCESS(restoreStatus) ? portStatus : restoreStatus;
         }
     }
     ctx->CurrentPowerState = PowerDeviceD0;
@@ -748,7 +769,8 @@ SofEvtDeviceD0Exit(
         NTSTATUS powerStatus = SofPowerDownDsp(ctx);
         if (!NT_SUCCESS(powerStatus)) return powerStatus;
     }
-    return streamStatus;
+    if (!NT_SUCCESS(streamStatus)) return streamStatus;
+    return SofRestoreBootController(ctx);
 }
 
 /**

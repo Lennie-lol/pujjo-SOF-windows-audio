@@ -62,7 +62,7 @@ assert "interruptConfig.AutomaticSerialization = FALSE;" in device
 d0=device.split("NTSTATUS\nSofEvtDeviceD0Entry(",1)[1].split("\n/**",1)[0]
 assert d0.index("if (ipcFaulted ||") < d0.index("SofStartFirmwareBoot(ctx, NULL)")
 assert d0.index("return bootStatus;") < d0.index("SofPublishAudioChild(") < d0.index("WdfTimerStart(")
-assert d0.index("if (!NT_SUCCESS(portStatus))") < d0.index("return NT_SUCCESS(powerStatus) ? portStatus : powerStatus;")
+assert d0.index("if (!NT_SUCCESS(portStatus))") < d0.index("NTSTATUS restoreStatus = SofRestoreBootController(ctx)") < d0.index("return NT_SUCCESS(restoreStatus) ? portStatus : restoreStatus;")
 assert "SofSdwEnumerateChildren(" not in device and "SofHdaSendVerb(" not in device
 assert "SofVerifyAdlNIpc4Candidate(rawFw, rawFwSize)" in boot
 assert boot.index("SofVerifyAdlNIpc4Candidate(rawFw, rawFwSize)") < boot.index("SofAllocateDmaBuffer(")

@@ -628,11 +628,6 @@ SofConfigureCodeLoaderDma(
      */
     gctl = readl(bar0 + SOF_HDA_GCTL);
     if (gctl == 0xFFFFFFFFu) return STATUS_DEVICE_NOT_READY;
-    if (!(gctl & SOF_HDA_GCTL_RESET)) {
-        writel(gctl | SOF_HDA_GCTL_RESET, bar0 + SOF_HDA_GCTL);
-        KeStallExecutionProcessor(1000);
-        gctl = readl(bar0 + SOF_HDA_GCTL);
-    }
     if (gctl == 0xFFFFFFFFu || !(gctl & SOF_HDA_GCTL_RESET))
         return STATUS_DEVICE_NOT_READY;
 
@@ -727,11 +722,14 @@ SofConfigureCodeLoaderDma(
         spbfcctl = readl(bar0 + Ctx->SpbCapOffset + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL);
     if (intctl == 0xFFFFFFFFu || ppctl == 0xFFFFFFFFu || spbfcctl == 0xFFFFFFFFu)
         return STATUS_DEVICE_NOT_READY;
+    if (Ctx->PpCapOffset && !(ppctl & SOF_HDA_PPCTL_GPROCEN))
+        return STATUS_DEVICE_NOT_READY;
     if ((ppctl | spbfcctl | intctl) & (1u << streamIndex))
         return STATUS_DEVICE_BUSY;
 
     /* Only decouple a stream after the controller acknowledged its reset. */
     if (Ctx->PpCapOffset) {
+        Ctx->BootPpBitsAdded |= ~ppctl & SOF_HDA_PPCTL_PIE;
         writel(ppctl | (1u << streamIndex) | SOF_HDA_PPCTL_GPROCEN | SOF_HDA_PPCTL_PIE,
                bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL);
     }
@@ -759,6 +757,7 @@ SofConfigureCodeLoaderDma(
     SofCodeLoaderWriteControl(streamRegs, ctl);
 
     /* Keep the controller/DSP IRQ route enabled and mask this stream. */
+    Ctx->BootIntBitsAdded |= ~intctl & (SOF_HDA_INT_GLOBAL_EN | SOF_HDA_INT_CTRL_EN);
     writel((intctl & ~(1u << streamIndex)) | SOF_HDA_INT_GLOBAL_EN | SOF_HDA_INT_CTRL_EN,
            bar0 + SOF_HDA_INTCTL);
 
@@ -829,7 +828,61 @@ static NTSTATUS SofVerifyAdlNIpc4Candidate(PUCHAR Image, ULONG ImageBytes)
 }
 #endif
 
+/* Remove only bits raised by this boot, after IPC, the cores and both DMA
+ * engines are quiet. Preserve unrelated fields on the shared controller. */
+NTSTATUS SofRestoreBootController(_In_ PSOF_DEVICE_CONTEXT Ctx)
+{
+    if (Ctx->BootDmaStopUnconfirmed) return STATUS_DEVICE_NOT_READY;
+    if (!Ctx->BootIntBitsAdded && !Ctx->BootPpBitsAdded) return STATUS_SUCCESS;
+    if (Ctx->DspNeedsPowerDown || Ctx->IrqMaskNeeded ||
+        !Ctx->Bar0VirtualAddress || SofDeviceRemoved(Ctx))
+        return STATUS_DEVICE_NOT_READY;
+    PUCHAR bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
+    PUCHAR regs[] = {bar0 + SOF_HDA_INTCTL, bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL};
+    ULONG *owned[] = {&Ctx->BootIntBitsAdded, &Ctx->BootPpBitsAdded};
+    for (ULONG i = 0; i < RTL_NUMBER_OF(regs); ++i) {
+        ULONG mask = *owned[i];
+        if (mask) {
+            ULONG value = readl(regs[i]);
+            if (value == MAXULONG) return STATUS_DEVICE_NOT_READY;
+            writel(value & ~mask, regs[i]);
+            value = readl(regs[i]);
+            if (value == MAXULONG || (value & mask)) return STATUS_DEVICE_NOT_READY;
+            *owned[i] = 0;
+        }
+    }
+    return STATUS_SUCCESS;
+}
+
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT
+static NTSTATUS SofAcquireBootProcessing(PSOF_DEVICE_CONTEXT Ctx)
+{
+    PUCHAR bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
+    if (Ctx->BootDmaStopUnconfirmed || Ctx->BootIntBitsAdded || Ctx->BootPpBitsAdded ||
+        SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar0Length, SOF_HDA_GCTL, sizeof(ULONG)) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar0Length, SOF_HDA_INTCTL, sizeof(ULONG)) ||
+        !Ctx->PpCapOffset || Ctx->PpCapOffset > Ctx->Bar0Length ||
+        SOF_HDA_REG_PP_PPCTL + sizeof(ULONG) > Ctx->Bar0Length - Ctx->PpCapOffset)
+        return STATUS_INVALID_BUFFER_SIZE;
+    ULONG gctl = readl(bar0 + SOF_HDA_GCTL);
+    if (gctl == MAXULONG || !(gctl & SOF_HDA_GCTL_RESET)) {
+        SofLogBreadcrumb("[HDA] Controller unavailable or held in reset before DSP access.\n");
+        return STATUS_DEVICE_NOT_READY;
+    }
+    PUCHAR reg = bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL;
+    ULONG value = readl(reg);
+    if (value == MAXULONG) return STATUS_DEVICE_NOT_READY;
+    if (!(value & SOF_HDA_PPCTL_GPROCEN)) {
+        Ctx->BootPpBitsAdded = SOF_HDA_PPCTL_GPROCEN;
+        writel(value | SOF_HDA_PPCTL_GPROCEN, reg);
+        value = readl(reg);
+        if (value == MAXULONG || !(value & SOF_HDA_PPCTL_GPROCEN))
+            return STATUS_DEVICE_NOT_READY;
+    }
+    return STATUS_SUCCESS;
+}
+
 /* Confirm both halves of the descriptor address, failing closed on loss. */
 static NTSTATUS SofLoaderDmaAddressesMatch(PUCHAR registers, ULONG low, ULONG high)
 {
@@ -1181,6 +1234,8 @@ SofStartFirmwareBoot(
 
     /* ROM ACK is polled by this loader, never by the normal IPC DPC.
      * Disable channel interrupts only after the firmware image is accepted. */
+    status = SofAcquireBootProcessing(Ctx);
+    if (!NT_SUCCESS(status)) goto boot_failed;
     if (!SofIpcDisableInterrupts(Ctx)) {
         status = STATUS_DEVICE_NOT_READY;
         goto boot_failed;
@@ -1582,6 +1637,11 @@ stop_dma:
                 goto boot_failed;
             }
             writel(intctl & ~(1u << streamIndex), bar0 + SOF_HDA_INTCTL);
+            intctl = readl(bar0 + SOF_HDA_INTCTL);
+            if (intctl == MAXULONG || (intctl & (1u << streamIndex))) {
+                status = STATUS_DEVICE_NOT_READY;
+                goto boot_failed;
+            }
         }
 
         {
@@ -1613,7 +1673,8 @@ stop_dma:
             writel(spbControl & ~(1u << streamIndex),
                    spibBar + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL);
             spbControl = readl(spibBar + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL);
-            if (spbControl == MAXULONG || (spbControl & (1u << streamIndex))) {
+            if (spbControl == MAXULONG || (spbControl & (1u << streamIndex)) ||
+                readl(spibAddr) != 0) {
                 status = STATUS_DEVICE_NOT_READY;
                 goto boot_failed;
             }
@@ -1718,6 +1779,10 @@ dma_unconfirmed:
     /* ICCMAX must stop even when the code-loader descriptor was lost. */
     if (!NT_SUCCESS(SofStopIccmaxDma(Ctx, &iccmax)))
         SofLogBreadcrumb("[Power] ICCMAX rollback could not be confirmed.\n");
+    if (dmaConfigured || iccmax.Published) {
+        Ctx->BootDmaStopUnconfirmed = TRUE;
+        SofLogBreadcrumb("[DMA] Stop or BDL detach unconfirmed. Retaining common buffers.\n");
+    }
     if (Ctx->DspNeedsPowerDown) {
         NTSTATUS rollbackStatus;
         SofIpcDisableInterrupts(Ctx);
@@ -1725,6 +1790,8 @@ dma_unconfirmed:
         if (!NT_SUCCESS(rollbackStatus))
             SofLogBreadcrumb("[Power] DSP rollback could not be confirmed.\n");
     }
+    if (!NT_SUCCESS(SofRestoreBootController(Ctx)))
+        SofLogBreadcrumb("[HDA] Controller rollback could not be confirmed.\n");
     return status;
 #endif /* PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT */
 }

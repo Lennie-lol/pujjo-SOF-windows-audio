@@ -6,6 +6,12 @@ caps=src.split("static NTSTATUS SofDiscoverHdaCaps(",1)[1].split("\n/**",1)[0]
 prep=src.split("SofEvtDevicePrepareHardware(",1)[1].split("\n/**",1)[0]
 assert "writel(" not in caps and "WRITE_REGISTER_" not in caps
 assert "busInterface.SetBusData(" not in prep
+assert prep.index("pciConfig.Command & PCI_ENABLE_MEMORY_SPACE") < prep.index("SofMapPreparedBars")
+d0 = src.split("NTSTATUS\nSofEvtDeviceD0Entry(", 1)[1].split("\n/**", 1)[0]
+assert "PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_BUS_MASTER" in d0
+assert d0.index("busInterface.GetBusData(") < d0.index("busInterface.InterfaceDereference(")
+assert d0.index("bytesRead != sizeof(command)") < d0.index("SofStartFirmwareBoot(")
+assert "(command & required) != required" in d0 and "busInterface.SetBusData(" not in d0
 assert "PCI Command updated" not in prep
 assert "writel(" not in prep and "WRITE_REGISTER_" not in prep
 assert "SofHardwareDevelopmentAllowed()" in prep

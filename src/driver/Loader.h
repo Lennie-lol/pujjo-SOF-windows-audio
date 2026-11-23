@@ -279,6 +279,7 @@ NTSTATUS SofStartFirmwareBoot(
 NTSTATUS SofPowerDownDsp(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 );
+NTSTATUS SofRestoreBootController(_In_ PSOF_DEVICE_CONTEXT Ctx);
 
 #endif /* _KERNEL_MODE */
 

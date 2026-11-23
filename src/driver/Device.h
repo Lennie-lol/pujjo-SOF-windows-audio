@@ -250,6 +250,9 @@ typedef struct _SOF_DEVICE_CONTEXT {
     /** @brief TRUE if EvtDevicePrepareHardware has successfully executed. */
     BOOLEAN             HardwarePrepared;
     BOOLEAN             DspNeedsPowerDown;
+    ULONG               BootPpBitsAdded;
+    ULONG               BootIntBitsAdded;
+    BOOLEAN             BootDmaStopUnconfirmed;
     ULONG               StreamDescriptorMask;
     ULONG               StreamTagMask[2];
     /** @brief Current power state (PowerDeviceD0, PowerDeviceD3, etc.). */
