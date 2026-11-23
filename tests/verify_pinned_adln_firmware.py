@@ -33,7 +33,7 @@ def check(path, report_path):
     digest_body = re.search(r"static const UCHAR expected\[32\]\s*=\s*\{([^}]+)\}", loader)
     if not digest_body or bytes(int(x, 16) for x in re.findall(r"0x[0-9a-fA-F]{2}", digest_body[1])).hex() != SHA256:
         raise ValueError("kernel firmware pin differs from tested artifact")
-    if f"ImageBytes != {LENGTH}u" not in loader:
+    if f"#define SOF_ADLN_IPC4_IMAGE_BYTES {LENGTH}u" not in loader:
         raise ValueError("kernel firmware length differs from tested artifact")
     roles = []
     for name in ("copierUuid", "gainUuid"):

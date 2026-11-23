@@ -17,6 +17,11 @@ for raw, halted in ((0, False), (1, False), (5, False),
     assert bool(raw & 0x80000000) == halted
 
 boot = loader.split("NTSTATUS\nSofStartFirmwareBoot(", 1)[1]
+file_read = loader.split("NTSTATUS\nSofLoadFirmwareFile(", 1)[1].split("VOID\nSofFreeFirmwareBuffer(", 1)[0]
+length_check = file_read.index("fileInfo.EndOfFile.QuadPart != SOF_ADLN_IPC4_IMAGE_BYTES")
+assert length_check < file_read.index("return STATUS_FILE_INVALID;") < file_read.index("ExAllocatePool2(")
+assert "ioStatus.Information != fileSize" in file_read
+assert "ImageBytes != SOF_ADLN_IPC4_IMAGE_BYTES" in loader
 initial = boot.split("/* Wait for ROM status FSR_STATE_INIT_DONE", 1)[1].split(
     "/* ROM ACK belongs to the loader", 1)[0]
 assert initial.index("statusReg == 0xFFFFFFFFu") < initial.index(

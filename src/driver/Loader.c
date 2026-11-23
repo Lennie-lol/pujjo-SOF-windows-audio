@@ -168,6 +168,8 @@ SofParseFirmwareImage(
 
 #ifdef _KERNEL_MODE
 
+#define SOF_ADLN_IPC4_IMAGE_BYTES 707036u
+
 /**
  * @brief Reads a complete firmware file from the filesystem into non-paged kernel pool.
  *
@@ -233,11 +235,13 @@ SofLoadFirmwareFile(
         return status;
     }
 
-    fileSize = fileInfo.EndOfFile.LowPart;
-    if (fileSize == 0 || fileInfo.EndOfFile.HighPart != 0) {
+    /* The only bootable file is the pinned ADL-N image. Bound nonpaged
+     * pool use before allocating or reading an untrusted file length. */
+    if (fileInfo.EndOfFile.QuadPart != SOF_ADLN_IPC4_IMAGE_BYTES) {
         ZwClose(fileHandle);
         return STATUS_FILE_INVALID;
     }
+    fileSize = SOF_ADLN_IPC4_IMAGE_BYTES;
 
     rawBuffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, fileSize, SOF_POOL_TAG);
     if (!rawBuffer) {
@@ -814,7 +818,7 @@ static NTSTATUS SofVerifyAdlNIpc4Candidate(PUCHAR Image, ULONG ImageBytes)
     BCRYPT_ALG_HANDLE algorithm = NULL;
     NTSTATUS status;
 
-    if (ImageBytes != 707036u) return STATUS_INVALID_IMAGE_FORMAT;
+    if (ImageBytes != SOF_ADLN_IPC4_IMAGE_BYTES) return STATUS_INVALID_IMAGE_FORMAT;
     status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0);
     if (!NT_SUCCESS(status)) return status;
     status = BCryptHash(algorithm, NULL, 0, Image, ImageBytes, digest, sizeof(digest));
