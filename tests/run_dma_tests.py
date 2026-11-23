@@ -12,21 +12,25 @@ shim=r'''
 #include <stdlib.h>
 #include <assert.h>
 #include <stdio.h>
+#include "PujjoDmaPlan.h"
 typedef int NTSTATUS;
 typedef uint32_t ULONG;
-typedef struct {uint64_t QuadPart;} ADDRESS;
-typedef struct {void *DmaEnabler;} CONTEXT,*PSOF_DEVICE_CONTEXT;
+typedef union {uint64_t QuadPart; struct {uint32_t LowPart, HighPart;};} ADDRESS;
+typedef struct {void *DmaEnabler; int HdaDma64Bit;} CONTEXT,*PSOF_DEVICE_CONTEXT;
 typedef struct {ULONG Size;void *VirtualAddress;void *CommonBuffer;ADDRESS PhysicalAddress;} SOF_DMA_BUFFER,*PSOF_DMA_BUFFER;
 #define _In_
 #define _Out_
 #define STATUS_INVALID_PARAMETER -1
 #define STATUS_INVALID_DEVICE_STATE -2
+#define STATUS_DEVICE_CONFIGURATION_ERROR -3
 #define STATUS_SUCCESS 0
 #define NT_SUCCESS(s) ((s)>=0)
 #define WDF_NO_OBJECT_ATTRIBUTES NULL
 #define RtlZeroMemory(p,n) memset(p,0,n)
 static int allocation_status;
 static unsigned allocations;
+static unsigned deletions;
+static void WdfObjectDelete(void *buffer) { ++deletions; free(buffer); }
 static NTSTATUS WdfCommonBufferCreate(void *enabler,ULONG size,void *attrs,void **out) {
  assert(enabler);(void)attrs;++allocations;
  if(allocation_status)return allocation_status;
@@ -49,6 +53,9 @@ int main(void) {
  assert(SofAllocateDmaBuffer(&ctx,64,&b)==-100);
  assert(allocations==1 && !b.Size && !b.VirtualAddress && !b.CommonBuffer);
  allocation_status=0;
+ assert(SofAllocateDmaBuffer(&ctx,64,&b)==STATUS_DEVICE_CONFIGURATION_ERROR);
+ assert(deletions==1 && !b.Size && !b.VirtualAddress && !b.CommonBuffer);
+ ctx.HdaDma64Bit=1;
  assert(SofAllocateDmaBuffer(&ctx,64,&b)==STATUS_SUCCESS);
  assert(b.Size==64 && b.CommonBuffer==b.VirtualAddress);
  assert(b.PhysicalAddress.QuadPart==UINT64_C(0x12345678000));
@@ -59,5 +66,6 @@ int main(void) {
 '''
 with tempfile.TemporaryDirectory(prefix='pj_dma_') as d:
  src=Path(d)/'dma.c';exe=Path(d)/('dma.exe' if os.name=='nt' else 'dma');src.write_text(shim+body+main)
- cmd=[os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror',*shlex.split(os.environ.get('CFLAGS','')),str(src),'-o',str(exe)]
+ driver=root/'src/driver'
+ cmd=[os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror',*shlex.split(os.environ.get('CFLAGS','')),'-I',str(driver),str(src),str(driver/'PujjoDmaPlan.c'),'-o',str(exe)]
  print(' '.join(cmd),flush=True);subprocess.run(cmd,check=True,timeout=120);subprocess.run([str(exe)],check=True,timeout=30)

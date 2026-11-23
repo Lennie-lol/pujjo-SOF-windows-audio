@@ -105,6 +105,7 @@ static NTSTATUS SofDiscoverHdaCaps(
     /* Invalidate previous results even if the next mapping is unavailable. */
     Ctx->PpCapOffset = Ctx->SpbCapOffset = Ctx->MlCapOffset = 0;
     Ctx->NumCaptureStreams = Ctx->NumPlaybackStreams = 0;
+    Ctx->HdaDma64Bit = 0;
     if (!Ctx->Bar0VirtualAddress || Ctx->Bar0Length < 0x80u)
         return STATUS_DEVICE_CONFIGURATION_ERROR;
 
@@ -145,6 +146,7 @@ static NTSTATUS SofDiscoverHdaCaps(
         offset = cap & SOF_HDA_CAP_NEXT_MASK;
     }
     Ctx->NumCaptureStreams = (gcap >> 8) & 0x0Fu;
+    Ctx->HdaDma64Bit = (gcap & 1u) != 0; /* HDA GCAP.64OK */
     Ctx->NumPlaybackStreams = (gcap >> 12) & 0x0Fu;
     Ctx->PpCapOffset = pp;
     Ctx->SpbCapOffset = spb;

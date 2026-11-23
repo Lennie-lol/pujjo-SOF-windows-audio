@@ -222,7 +222,7 @@ VOID SofFreeDmaBuffer(
  *  2. Selection of Code Loader stream (first Playback stream index = NumCaptureStreams).
  *  3. Decoupling stream from HD-A link in Processing Pipe Control (PPCTL).
  *  4. Constructing a 2-entry Buffer Descriptor List (BDL) mapping the firmware payload.
- *  5. Flushing CPU caches via KeFlushIoBuffers to guarantee physical memory coherency.
+ *  5. Ordering coherent common-buffer writes before publishing the descriptor list.
  *  6. Resetting the stream engine and programming SD_CBL, SD_FORMAT (32-bit, 48kHz, 1ch),
  *     SD_LVI (index 1), and SD_BDLPL/PU.
  *  7. Programming Software Position in Buffer (SPIB) credit for decoupled transfer.

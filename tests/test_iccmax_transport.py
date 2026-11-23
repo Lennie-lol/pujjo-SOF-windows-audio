@@ -35,6 +35,7 @@ typedef int NTSTATUS;
 #define SOF_HDA_INTCTL 32u
 #define SOF_HDA_PPCTL_GPROCEN (1u<<30)
 #define SofLogBreadcrumb(s) ((void)(s))
+#define KeMemoryBarrier() ((void)0)
 #define PAGE_SIZE 4096u
 #define SOF_HDA_ADSP_LOADER_BASE 0x80u
 #define SOF_HDA_ADSP_SD_ENTRY_SIZE 32u

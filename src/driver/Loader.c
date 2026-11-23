@@ -9,9 +9,8 @@
  *  1. Image Parsing: Validates the extended manifest header ($AE1 magic), verifies
  *     bounds, strips the host manifest, and inspects module/version headers.
  *  2. DMA Memory Management: Allocates physical memory using KMDF Common Buffer
- *     (with full IOMMU / VT-d support) or contiguous physical memory fallback.
- *  3. CPU Cache Flushes: Flushes processor caches (KeFlushIoBuffers) to guarantee
- *     DRAM coherency before hardware DMA engines are triggered.
+ *     using the device-visible logical address and controller address width.
+ *  3. Orders coherent x64 common-buffer stores before publishing DMA descriptors.
  *  4. Decoupled Code Loader DMA: Programs Intel HD-A stream registers (SD_CTL, SD_CBL,
  *     SD_FORMAT, SD_BDLPL/PU, SD_LVI) and decouples the stream from the physical link
  *     via Processing Pipe Control (PPCTL) and Software Position in Buffer (SPIB).
@@ -335,6 +334,12 @@ SofAllocateDmaBuffer(
     }
     DmaBuf->VirtualAddress = WdfCommonBufferGetAlignedVirtualAddress(DmaBuf->CommonBuffer);
     DmaBuf->PhysicalAddress = WdfCommonBufferGetAlignedLogicalAddress(DmaBuf->CommonBuffer);
+    if (!pj_hda_dma_span_valid(DmaBuf->PhysicalAddress.LowPart,
+            (ULONG)DmaBuf->PhysicalAddress.HighPart, Size, Ctx->HdaDma64Bit)) {
+        WdfObjectDelete(DmaBuf->CommonBuffer);
+        RtlZeroMemory(DmaBuf, sizeof(*DmaBuf));
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
     RtlZeroMemory(DmaBuf->VirtualAddress, Size);
     return STATUS_SUCCESS;
 }
@@ -536,7 +541,7 @@ static VOID SofCodeLoaderWriteControl(_In_ PUCHAR StreamRegs, _In_ ULONG Value)
  *  3. Decouples the stream from the physical HD-A link in PPCTL.
  *  4. Builds a 2-entry Buffer Descriptor List (BDL) mapping the firmware payload into
  *     two halves (HD-A requires LVI >= 1). Leaves completion interrupts masked for polling.
- *  5. Flushes processor write caches (KeFlushIoBuffers) for staging payload and BDL.
+ *  5. Orders CPU stores to the x64 common buffers before publishing the BDL.
  *  6. Performs hardware stream engine reset cycle (assert SRST, poll, clear SRST, poll).
  *  7. Clears status flags (BCIS, FIFOE, DESE).
  *  8. Programs Cyclic Buffer Length (SD_CBL), Stream Format (SD_FORMAT = 0x40, 32-bit,
@@ -663,25 +668,9 @@ SofConfigureCodeLoaderDma(
     bdl[1].Size = plan.second.length;
     bdl[1].Ioc = 0;
 
-    /*
-     * Flush Processor Caches to System RAM:
-     * Guarantees that the CPU write buffers and L1/L2/L3 cache lines holding the
-     * payload and BDL table are written back to DRAM before the DMA engine reads them.
-     */
-    {
-        PMDL mdl = IoAllocateMdl(FwDmaBuf->VirtualAddress, FwDmaBuf->Size, FALSE, FALSE, NULL);
-        if (mdl) {
-            MmBuildMdlForNonPagedPool(mdl);
-            KeFlushIoBuffers(mdl, TRUE, TRUE);
-            IoFreeMdl(mdl);
-        }
-        PMDL bdlMdl = IoAllocateMdl(BdlDmaBuf->VirtualAddress, BdlDmaBuf->Size, FALSE, FALSE, NULL);
-        if (bdlMdl) {
-            MmBuildMdlForNonPagedPool(bdlMdl);
-            KeFlushIoBuffers(bdlMdl, TRUE, TRUE);
-            IoFreeMdl(bdlMdl);
-        }
-    }
+    /* The ADL-N/x64 WDF common buffers are coherent. Publish the completed
+     * payload and both descriptors before any MMIO exposes the BDL. */
+    KeMemoryBarrier();
 
     /*
      * 1. Reset Stream Engine:
@@ -963,6 +952,7 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     bdl[1].AddrHigh = plan.second.high;
     bdl[1].Size = plan.second.length;
 
+    KeMemoryBarrier();
     Dma->OriginalGuardband = ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK;
     Dma->OriginalDecoupled = (ppctl & 1u) != 0;
     Dma->Published = TRUE;

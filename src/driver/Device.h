@@ -196,6 +196,7 @@ typedef struct _SOF_DEVICE_CONTEXT {
     PVOID               Bar0VirtualAddress;
     /** @brief Number of capture streams reported in GCAP. */
     ULONG               NumCaptureStreams;
+    BOOLEAN             HdaDma64Bit;
     /** @brief Number of playback streams reported in GCAP. */
     ULONG               NumPlaybackStreams;
     /** @brief Offset in BAR0 to Processing Pipe (PP) Capability (0x3). */
