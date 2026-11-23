@@ -23,7 +23,9 @@ assert initial.index("statusReg == 0xFFFFFFFFu") < initial.index(
     "statusReg & SOF_FSR_HALTED_MASK") < initial.index(
     "FSR_TO_STATE_CODE(statusReg) == FSR_STATE_INIT_DONE")
 assert "ROM halted before INIT_DONE" in initial
-assert initial.index("status = STATUS_IO_DEVICE_ERROR;") < initial.index("goto boot_failed;")
+halt_init = initial.split("if (statusReg & SOF_FSR_HALTED_MASK)", 1)[1].split(
+    "if (FSR_TO_STATE_CODE(statusReg)", 1)[0]
+assert halt_init.index("status = STATUS_IO_DEVICE_ERROR;") < halt_init.index("goto boot_failed;")
 assert "RomErrorReg" in initial
 
 transfer = boot.split("timeout = 4000; /* 4 seconds */", 1)[1].split(
@@ -31,8 +33,10 @@ transfer = boot.split("timeout = 4000; /* 4 seconds */", 1)[1].split(
 assert transfer.index("statusReg & SOF_FSR_HALTED_MASK") < transfer.index(
     "bootState == SOF_FW_BOOT_FAILED") < transfer.index(
     "FSR_TO_STATE_CODE(statusReg) == FSR_STATE_FW_ENTERED")
-assert transfer.index("ROM halted during firmware DMA") < transfer.index(
-    "status = STATUS_IO_DEVICE_ERROR;") < transfer.index("goto stop_dma;")
+halt_dma = transfer.split("if (statusReg != 0xFFFFFFFFu && (statusReg & SOF_FSR_HALTED_MASK))", 1)[1].split(
+    "if (bootState == SOF_FW_BOOT_FAILED", 1)[0]
+assert halt_dma.index("ROM halted during firmware DMA") < halt_dma.index(
+    "status = STATUS_IO_DEVICE_ERROR;") < halt_dma.index("goto stop_dma;")
 assert "RomErrorReg" in transfer
 
 fault = boot.split("/* Check if FW entered successfully; a fault must never become success. */", 1)[1]
