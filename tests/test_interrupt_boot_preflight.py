@@ -46,9 +46,10 @@ publish=dpc.split("if (bootReady || bootFault)",1)[1]
 assert dpc.index("SofDspWrite32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTda") < dpc.index("Ctx->FwState = SOF_FW_BOOT_READY_RECEIVED")
 assert publish.index("KeAcquireSpinLock(&Ctx->IpcLock") < publish.index("Ctx->FwState = SOF_FW_BOOT_READY_RECEIVED") < publish.index("KeReleaseSpinLock(&Ctx->IpcLock")
 assert "bootReady && !Ctx->IpcFaulted" in publish
-assert "else if (bootFault)" in publish
+assert "Ctx->IpcFaulted = TRUE;" in publish
 assert "Ctx->FwState = SOF_FW_BOOT_COMPLETE" not in dpc
-assert "KeSetEvent(&Ctx->FwReadyEvent" in publish.split("else if (bootFault)",1)[1]
+fault = publish.split("} else {",1)[1]
+assert fault.index("Ctx->FwState = SOF_FW_BOOT_FAILED;") < fault.index("KeSetEvent(&Ctx->FwReadyEvent")
 assert "SofIpcRearmInterrupt(" not in dpc
 assert dpc.index("SofDspWrite32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTda") < dpc.index("/* Flush the posted ACKs") < dpc.index("KeSetEvent(&Ctx->FwReadyEvent")
 print("PASS: single DPC consumer, acknowledged readiness, fault wakeup and bounded boot wait")

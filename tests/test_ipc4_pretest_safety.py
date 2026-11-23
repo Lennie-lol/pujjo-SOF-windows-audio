@@ -14,6 +14,11 @@ assert "pj_ipc4_mmio_span_valid" in send and "pj_ipc4_mmio_span_valid" in dpc
 assert "Ctx->IpcTxBusy && !Ctx->IpcReplyReady && !Ctx->IpcFaulted" in dpc
 assert "pj_ipc4_reply_matches(Ctx->IpcRequestPrimary, primary)" in dpc
 assert "Ctx->IpcTxBusy = FALSE" not in dpc
+incoming = send.index("ULONG incoming = SofDspRead32(")
+assert send.index("KeAcquireSpinLock(&Ctx->IpcLock") < incoming < send.index("Ctx->IpcTxBusy = TRUE")
+assert "pj_ipc4_is_reply(incoming)" in send[incoming:send.index("Ctx->IpcTxBusy = TRUE")]
+orphan = dpc.split("Ctx->IpcReplyReady = !Ctx->IpcFaulted;", 1)[1].split("KeReleaseSpinLock", 1)[0]
+assert "Ctx->IpcFaulted = TRUE;" in orphan and "bootFault = TRUE;" in orphan
 assert dpc.index("SofDspWrite32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTda") < dpc.index("KeSetEvent(&Ctx->IpcReplyEvent")
 assert "Ctx->IpcFaulted = TRUE;" in send
 assert "SofIpcDpcHandler(Ctx)" not in send

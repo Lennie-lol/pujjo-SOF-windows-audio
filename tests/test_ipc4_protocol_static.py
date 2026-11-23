@@ -39,7 +39,7 @@ assert '#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)' in device
 print('PASS: IPC4 pure parsers linked into WDK; hardware boot and mocks remain locked')
 ipc=(root/'src/driver/Ipc.c').read_text()
 assert '#include "PujjoIpc4Protocol.h"' in ipc
-assert 'pj_ipc4_is_fw_ready(primary)' in ipc
+assert 'pj_ipc4_is_cold_fw_ready(primary, tdd)' in ipc
 assert 'pj_ipc4_is_notification(primary)' in ipc
 assert 'Msg->PayloadSize > Ctx->HwDesc->MailboxDownlinkSize' in ipc
 assert '((Msg->PayloadSize + 3u) & ~3u) > Ctx->HwDesc->MailboxDownlinkSize' in ipc
