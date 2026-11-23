@@ -884,6 +884,11 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
         readl(Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPL) != 0 ||
         readl(Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPU) != 0)
         return STATUS_DEVICE_BUSY;
+    /* This capture slot is reserved for the workaround. Refuse stale
+     * stream errors before publishing either common buffer. */
+    UCHAR dmaStatus = READ_REGISTER_UCHAR(Dma->Registers + SOF_HDA_ADSP_REG_SD_STS);
+    if (dmaStatus == 0xffu) return STATUS_DEVICE_NOT_READY;
+    if (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS) return STATUS_IO_DEVICE_ERROR;
 
     status = SofAllocateDmaBuffer(Ctx, PAGE_SIZE, &Dma->Data);
     if (!NT_SUCCESS(status)) return status;
@@ -915,7 +920,9 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     ltrp = READ_REGISTER_UCHAR(Dma->Ltrp);
     ppctl = readl(Dma->Ppctl);
     if (ltrp == 0xffu || (ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK) != SOF_ADLN_LTRP_BOOT_GUARDBAND ||
-        ppctl == MAXULONG || !(ppctl & 1u))
+        ppctl == MAXULONG || !(ppctl & 1u) ||
+        readl(Dma->Registers + SOF_HDA_ADSP_REG_SD_CBL) != PAGE_SIZE ||
+        readw(Dma->Registers + SOF_HDA_ADSP_REG_SD_LVI) != 1u)
         return STATUS_DEVICE_NOT_READY;
     status = SofLoaderDmaAddressesMatch(Dma->Registers,
         Dma->Bdl.PhysicalAddress.LowPart, (ULONG)Dma->Bdl.PhysicalAddress.HighPart);
@@ -936,7 +943,7 @@ static NTSTATUS SofStopIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     if (Dma->Published) {
         ULONG ctl = SofCodeLoaderReadControl(Dma->Registers), attempt;
         ULONG ppctl;
-        UCHAR ltrp;
+        UCHAR ltrp, dmaStatus;
         if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
         SofCodeLoaderWriteControl(Dma->Registers, 0);
         for (attempt = 0; attempt < 500u; ++attempt) {
@@ -951,15 +958,24 @@ static NTSTATUS SofStopIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
         status = SofLoaderDmaAddressesMatch(Dma->Registers, 0, 0);
         if (!NT_SUCCESS(status)) return status;
         Dma->Published = FALSE;
+        dmaStatus = READ_REGISTER_UCHAR(Dma->Registers + SOF_HDA_ADSP_REG_SD_STS);
+        if (dmaStatus == 0xffu) status = STATUS_DEVICE_NOT_READY;
+        else if (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS) status = STATUS_IO_DEVICE_ERROR;
         WRITE_REGISTER_UCHAR(Dma->Registers + SOF_HDA_ADSP_REG_SD_STS, SOF_HDA_CL_DMA_SD_INT_MASK);
         ppctl = readl(Dma->Ppctl);
-        if (ppctl != MAXULONG)
+        if (ppctl != MAXULONG) {
             writel((ppctl & ~1u) | (Dma->OriginalDecoupled ? 1u : 0u), Dma->Ppctl);
+            ppctl = readl(Dma->Ppctl);
+        }
         ltrp = READ_REGISTER_UCHAR(Dma->Ltrp);
-        if (ltrp != 0xffu)
+        if (ltrp != 0xffu) {
             WRITE_REGISTER_UCHAR(Dma->Ltrp,
                 (UCHAR)((ltrp & ~SOF_ADLN_LTRP_GUARDBAND_MASK) | Dma->OriginalGuardband));
-        if (ppctl == MAXULONG || ltrp == 0xffu) status = STATUS_DEVICE_NOT_READY;
+            ltrp = READ_REGISTER_UCHAR(Dma->Ltrp);
+        }
+        if (ppctl == MAXULONG || ((ppctl & 1u) != 0) != Dma->OriginalDecoupled ||
+            ltrp == 0xffu || (ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK) != Dma->OriginalGuardband)
+            status = STATUS_DEVICE_NOT_READY;
     }
     SofFreeDmaBuffer(Ctx, &Dma->Bdl);
     SofFreeDmaBuffer(Ctx, &Dma->Data);
