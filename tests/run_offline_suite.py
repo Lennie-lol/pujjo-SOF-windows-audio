@@ -31,6 +31,17 @@ SUITES=[
  'tests/test_read_only_resource_discovery.py',
  'tests/test_prepare_hardware_rollback.py','tests/test_portcls_child.py','tests/run_codec_control_tests.py',
 ]
+def classify_result(returncode, output):
+    """Never report a passing command as complete if it skipped subtests."""
+    skipped = re.search(r'OK \\(skipped=(\\d+)\\)', output)
+    skipped_cases = int(skipped.group(1)) if skipped else 0
+    if returncode != 0:
+        return 'FAIL', skipped_cases
+    if re.search(r'(?im)^SKIP:', output) or skipped_cases:
+        return 'SKIP', skipped_cases
+    return 'PASS', 0
+
+
 def main():
     p=argparse.ArgumentParser();p.add_argument('--logs',default='validation-v0.0.17/final')
     args=p.parse_args();logs=Path(args.logs).resolve();logs.mkdir(parents=True,exist_ok=True)
@@ -41,10 +52,9 @@ def main():
             run=subprocess.run(cmd,cwd=ROOT,text=True,encoding='utf-8',errors='replace',
                 stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=180)
             output=run.stdout;rc=run.returncode
-            status='FAIL' if rc else 'PASS'
-            if not rc and re.search(r'(?im)^SKIP:',output): status='SKIP'
+            status, skipped_cases = classify_result(rc, output)
         except (OSError,subprocess.TimeoutExpired) as e:
-            output=str(e);rc=None;status='FAIL'
+            output=str(e);rc=None;status='FAIL';skipped_cases=0
         (logs/(Path(script).stem+'.log')).write_text('COMMAND: '+ ' '.join(cmd)+'\n'+output,encoding='utf-8')
         skipped=re.search(r'OK \(skipped=(\d+)\)',output)
         results.append(dict(command=cmd,status=status,exit_code=rc,
