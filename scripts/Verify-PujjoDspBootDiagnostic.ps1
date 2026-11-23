@@ -37,7 +37,12 @@ if ($ExpectedRevision) {
 $names = @('sof_dsp.inf', 'sof_dsp.sys', 'sof_dsp.cat')
 $files = @(Get-ChildItem -LiteralPath $package -File -Force | Select-Object -ExpandProperty Name)
 Require ($files.Count -eq 3) 'Unexpected number of submission files'
-$records = @(Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json)
+# In Windows PowerShell 5.1, ConvertFrom-Json may emit a JSON array as one
+# pipeline object. A positional @(... | ConvertFrom-Json) then has Count=1.
+# Explicitly enumerate the parsed array, independent of shell version.
+$parsed = ConvertFrom-Json -InputObject (Get-Content -LiteralPath $manifest -Raw)
+$records = New-Object 'System.Collections.Generic.List[object]'
+foreach ($entry in $parsed) { [void]$records.Add($entry) }
 Require ($records.Count -eq 3) 'Manifest must have exactly three entries'
 foreach ($name in $names) {
     Require ($files -contains $name) "Missing $name"

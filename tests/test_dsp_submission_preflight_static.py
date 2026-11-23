@@ -15,6 +15,10 @@ for forbidden in ('pnputil /add-driver', 'pnputil /delete-driver', 'bcdedit /set
                   'Set-ItemProperty', 'New-ItemProperty', 'Set-ExecutionPolicy',
                   'New-SelfSignedCertificate', 'Start-Service', 'Enable-PnpDevice'):
     assert forbidden.lower() not in script.lower(), forbidden
+assert "New-Object 'System.Collections.Generic.List[object]'" in script
+assert 'foreach ($entry in $parsed)' in script
+assert "shell: powershell" in workflow
+assert 'Verify DSP submission with Windows PowerShell 5.1' in workflow
 assert 'Stage-PujjoDspBootDiagnostic.ps1' in workflow
 assert 'Verify-PujjoDspBootDiagnostic.ps1' in workflow
 assert workflow.index('Stage-PujjoDspBootDiagnostic.ps1') < workflow.index('Verify-PujjoDspBootDiagnostic.ps1') < workflow.index('Upload unsigned DSP boot-only submission input')

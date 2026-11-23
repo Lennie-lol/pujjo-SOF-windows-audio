@@ -208,6 +208,13 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $revision = (git rev-parse HEAD).Trim()
           ./scripts/Verify-PujjoDspBootDiagnostic.ps1 -SubmissionDirectory "$env:RUNNER_TEMP/pujjo-dsp-boot-only" -ExpectedRevision $revision
+      - name: Verify DSP submission with Windows PowerShell 5.1
+        if: matrix.configuration == 'Release'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $revision = (git rev-parse HEAD).Trim()
+          .\scripts\Verify-PujjoDspBootDiagnostic.ps1 -SubmissionDirectory "$env:RUNNER_TEMP/pujjo-dsp-boot-only" -ExpectedRevision $revision
       - name: Upload unsigned DSP boot-only submission input
         if: success() && matrix.configuration == 'Release'
         uses: actions/upload-artifact@v4
