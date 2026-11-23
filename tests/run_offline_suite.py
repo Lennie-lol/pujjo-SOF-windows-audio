@@ -56,9 +56,8 @@ def main():
         except (OSError,subprocess.TimeoutExpired) as e:
             output=str(e);rc=None;status='FAIL';skipped_cases=0
         (logs/(Path(script).stem+'.log')).write_text('COMMAND: '+ ' '.join(cmd)+'\n'+output,encoding='utf-8')
-        skipped=re.search(r'OK \(skipped=(\d+)\)',output)
         results.append(dict(command=cmd,status=status,exit_code=rc,
-                            skipped_cases=int(skipped.group(1)) if skipped else 0))
+                            skipped_cases=skipped_cases))
         print(status,script,flush=True)
     results += [
       dict(command=['python','tests/run_topology_evidence_tests.py'],status='SKIP',reason='External topology archive not bundled; test separately when available'),
