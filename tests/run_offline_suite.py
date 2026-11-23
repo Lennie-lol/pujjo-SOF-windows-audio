@@ -5,6 +5,7 @@ import argparse, json, os, re, subprocess, sys
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 SUITES=[
+ 'tests/test_offline_result_classification.py',
  'tests/test_topology_fallback.py','tests/test_ssp_profile_contract.py',
  'tests/test_ssp_clock_arithmetic.py',
  'tests/run_analog_route_tests.py','tests/run_dmic_route_tests.py',
@@ -33,7 +34,7 @@ SUITES=[
 ]
 def classify_result(returncode, output):
     """Never report a passing command as complete if it skipped subtests."""
-    skipped = re.search(r'OK \\(skipped=(\\d+)\\)', output)
+    skipped = re.search(r'OK \(skipped=(\d+)\)', output)
     skipped_cases = int(skipped.group(1)) if skipped else 0
     if returncode != 0:
         return 'FAIL', skipped_cases
