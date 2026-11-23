@@ -15,7 +15,7 @@ suite = (ROOT / "tests/run_offline_suite.py").read_text(encoding="utf-8")
 
 add = driver.split("SofEvtDeviceAdd(", 1)[1].split("SofEvtDriverUnload(", 1)[0]
 safe = re.search(
-    r"#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC\s+"
+    r"#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC.*?"
     r"(?P<block>if \(g_SafeBootPolicy == SOF_SAFE_BOOT_FORCED_SAFE && !g_CanaryArmed\)"
     r" \{.*?\n    \})\s*#endif",
     add,
