@@ -627,7 +627,6 @@ SofConfigureCodeLoaderDma(
      * If the controller is in reset, DMA engines cannot accept commands or cycle.
      */
     gctl = readl(bar0 + SOF_HDA_GCTL);
-    if (gctl == 0xFFFFFFFFu) return STATUS_DEVICE_NOT_READY;
     if (gctl == 0xFFFFFFFFu || !(gctl & SOF_HDA_GCTL_RESET))
         return STATUS_DEVICE_NOT_READY;
 
@@ -1757,11 +1756,12 @@ stop_dma:
         return STATUS_SUCCESS;
     } else {
         RtlStringCbPrintfA(bmsg, sizeof(bmsg),
-            "[12g] FW_READY notification not received within timeout, but FW_ENTERED verified (ROM_STS=0x%08x)\n",
-            statusReg);
+            "[12g] FW_READY wait failed: wait=0x%08x ROM_STS=0x%08x\n",
+            status, statusReg);
         SofLogBreadcrumb(bmsg);
         /* ROM entry is not IPC4 readiness. Never manufacture boot success. */
-        status = status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_DEVICE_NOT_READY;
+        status = status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT :
+            (status == STATUS_SUCCESS ? STATUS_DEVICE_PROTOCOL_ERROR : STATUS_DEVICE_NOT_READY);
         goto boot_failed;
     }
 boot_failed:

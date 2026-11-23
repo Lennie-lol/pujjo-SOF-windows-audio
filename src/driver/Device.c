@@ -637,7 +637,8 @@ SofEvtDeviceD0Entry(
     }
     bootStatus = SofStartFirmwareBoot(ctx, NULL);
     if (!NT_SUCCESS(bootStatus)) {
-        SofLogBreadcrumb("[Power] D0 entry aborted: firmware boot failed.\n");
+        RtlStringCbPrintfA(msg, sizeof(msg), "[Power] D0 entry aborted: firmware boot status=0x%08x\n", bootStatus);
+        SofLogBreadcrumb(msg);
         return bootStatus;
     }
 
