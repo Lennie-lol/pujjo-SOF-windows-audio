@@ -86,7 +86,7 @@ print("PASS: cold boot ownership and no speculative audio activation on D0 entry
 
 ack=boot[boot.index("/* Wait for ROM IPC ACK"):boot.index("/* Acknowledge ROM")]
 assert "ack == 0xFFFFFFFFu" in ack and "if (timeout == 2000u)" in ack
-stop=boot[boot.index("stop_dma:"):boot.index("/* Check if FW entered")]
+stop=boot[boot.index("stop_dma:"):boot.index("/* Re-read the ROM state AFTER")]
 assert stop.index("!(ctlVal & SOF_HDA_SD_CTL_DMA_START)") < stop.index("goto dma_unconfirmed;", stop.index("if (timeout == 500u)")) < stop.index("SofFreeDmaBuffer")
 assert "SofFreeDmaBuffer" not in boot.split("dma_unconfirmed:",1)[1]
 assert "ExWaitForRundownProtectionRelease" in ipc
