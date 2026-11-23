@@ -41,8 +41,12 @@ for name in ('Stage-PujjoDmicReview.ps1','Verify-PujjoDmicReview.ps1',
 assert 'InfVerif.exe' in stage and 'Inf2Cat.exe' in stage
 assert 'Get-FileHash' in stage and 'UNSIGNED-DMIC-REVIEW-ONLY.txt' in stage
 assert 'Source revision' in verify and 'Get-FileHash' in verify
-assert '$hashRecords=@(' in verify and '$matches=' not in verify.lower()
-assert '$entry.Algorithm' in verify
+assert '$hashRecords = @(' in verify and '$matches=' not in verify.lower()
+assert '[regex]::IsMatch' in verify and '$record.Algorithm' in verify
+assert verify.count("Write-Output 'PASS:") == 1
+assert verify.count("$inf = Get-Content") == 1
+assert verify.count("foreach ($name in $names)") == 2
+assert "Get-AuthenticodeSignature" in verify
 for command in ('pnputil','bcdedit','Set-ItemProperty','Import-Certificate','signtool sign'):
     assert command.lower() not in stage.lower()
     assert command.lower() not in verify.lower()
