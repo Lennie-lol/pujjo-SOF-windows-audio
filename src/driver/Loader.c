@@ -1380,15 +1380,6 @@ SofStartFirmwareBoot(
      * Set DMA_START (RUN bit) in SD_CTL. The HD-A engine begins reading descriptors
      * and pushing firmware binary data into the DSP memory window.
      */
-    /* FW_READY is meaningful only after we have explicitly initiated this
-     * boot attempt. Notification received earlier must not mark us ready. */
-    KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
-    Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS;
-    KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
-    if (!SofIpcEnableInterrupts(Ctx)) {
-        status = STATUS_DEVICE_NOT_READY;
-        goto boot_failed;
-    }
     {
         ULONG ctlReadback = SofCodeLoaderReadControl(streamRegs);
         ULONG route = readl(bar0 + SOF_HDA_INTCTL);
@@ -1418,6 +1409,14 @@ SofStartFirmwareBoot(
             status = STATUS_DEVICE_NOT_READY;
             goto dma_unconfirmed;
         }
+        /* IRQs are still masked. Reject an incoming doorbell that arrived
+         * during descriptor validation, before this image can execute. */
+        ULONG incoming = SofDspRead32(bar4, Ctx->HwDesc->HipcTdr);
+        if (incoming == MAXULONG || (incoming & Ctx->HwDesc->HipcTdrBusy) ||
+            SofDeviceRemoved(Ctx)) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto stop_dma;
+        }
         ctlVal |= SOF_HDA_SD_CTL_DMA_START;
         SofCodeLoaderWriteControl(streamRegs, ctlVal);
 
@@ -1425,6 +1424,21 @@ SofStartFirmwareBoot(
         ULONG ctlAfter = SofCodeLoaderReadControl(streamRegs);
 
         if (ctlAfter == 0xFFFFFFFFu || !(ctlAfter & SOF_HDA_SD_CTL_DMA_START)) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto stop_dma;
+        }
+
+        /* A fast response remains latched in HIPCTDR until acknowledged.
+         * Admit the DPC only after the stream has acknowledged RUN. */
+        KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+        if (Ctx->IpcFaulted || Ctx->FwState != SOF_FW_BOOT_NOT_STARTED) {
+            KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+            status = STATUS_DEVICE_NOT_READY;
+            goto stop_dma;
+        }
+        Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS;
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        if (!SofIpcEnableInterrupts(Ctx)) {
             status = STATUS_DEVICE_NOT_READY;
             goto stop_dma;
         }
@@ -1439,7 +1453,7 @@ SofStartFirmwareBoot(
     }
 
     /*
-     * 6. Wait for ROM status FSR_STATE_FW_ENTERED (0x5) or IPC FW_READY:
+     * 6. Wait for ROM status FSR_STATE_FW_ENTERED (0x5).
      * Polls ROM Status register (HFDSC) for up to 4 seconds.
      */
     timeout = 4000; /* 4 seconds */
@@ -1466,8 +1480,7 @@ SofStartFirmwareBoot(
         }
         if (bootState == SOF_FW_BOOT_FAILED || statusReg == 0xFFFFFFFFu)
             break;
-        if (FSR_TO_STATE_CODE(statusReg) == FSR_STATE_FW_ENTERED ||
-            bootState == SOF_FW_BOOT_READY_RECEIVED) {
+        if (FSR_TO_STATE_CODE(statusReg) == FSR_STATE_FW_ENTERED) {
             DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                        "[SOF] *** FIRMWARE SUCCESSFULLY ENTERED (ROM Status: 0x%08x) ***\n",
                        statusReg);
@@ -1588,8 +1601,7 @@ stop_dma:
     bootState = Ctx->FwState;
     KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
     if (bootState == SOF_FW_BOOT_FAILED || statusReg == 0xFFFFFFFFu ||
-        (FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED &&
-         bootState != SOF_FW_BOOT_READY_RECEIVED)) {
+        FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED) {
         ULONG lpib = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_LPIB));
         UCHAR sdsts = READ_REGISTER_UCHAR((PUCHAR)(streamRegs + SOF_HDA_ADSP_REG_SD_STS));
         ULONG romErr = SofDspRead32(bar4, Ctx->HwDesc->RomErrorReg);

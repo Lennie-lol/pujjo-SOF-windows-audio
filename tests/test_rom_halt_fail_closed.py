@@ -38,9 +38,13 @@ halt_dma = transfer.split("if (statusReg != 0xFFFFFFFFu && (statusReg & SOF_FSR_
 assert halt_dma.index("ROM halted during firmware DMA") < halt_dma.index(
     "status = STATUS_IO_DEVICE_ERROR;") < halt_dma.index("goto stop_dma;")
 assert "RomErrorReg" in transfer
+assert "SOF_FW_BOOT_READY_RECEIVED" not in transfer
 
 fault = boot.split("/* Check if FW entered successfully; a fault must never become success. */", 1)[1]
 assert "bootState == SOF_FW_BOOT_FAILED ? STATUS_DEVICE_PROTOCOL_ERROR : STATUS_IO_TIMEOUT" in fault
+before_wait = fault.split("KeWaitForSingleObject", 1)[0]
+assert "FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED" in before_wait
+assert "SOF_FW_BOOT_READY_RECEIVED" not in before_wait
 
 # The known-good forced-safe KMDF entry remains the first PnP creation path.
 add = driver.split("SofEvtDeviceAdd(", 1)[1]

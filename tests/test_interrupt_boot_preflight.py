@@ -14,7 +14,7 @@ assert "MTL_DSP_IRQSTS > Ctx->Bar4Length - ptr" in isr
 assert dpc.count("pj_ipc4_mmio_span_valid(") >= 5
 assert "Ctx->FwState == SOF_FW_BOOT_IN_PROGRESS" in dpc
 assert "Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS" in loader
-assert loader.index("Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS") < loader.index("ctlVal |= SOF_HDA_SD_CTL_DMA_START")
+assert loader.index("ctlVal |= SOF_HDA_SD_CTL_DMA_START") < loader.index("Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS")
 assert "-community.ri" not in loader and "Falling back to community firmware" not in loader
 assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)" in loader
 assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)" in (root/"src/driver/Device.c").read_text()
@@ -109,7 +109,9 @@ assert dpc_wrapper.index("ctx->IrqArmed && ctx->IrqPending") < dpc_wrapper.index
 assert dpc_wrapper.index("SofIpcDpcHandler(ctx)") < dpc_wrapper.index("SofIpcRearmInterrupt(ctx)")
 assert "SofIpcEnableInterrupts(ctx)" not in d0
 assert boot.index("SofIpcDisableInterrupts(Ctx)") < boot.index("SofDspWrite32(bar4, Ctx->HwDesc->HipcIdr, ipcHdr)")
-assert boot.index("/* Acknowledge ROM */") < boot.index("Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS") < boot.index("SofIpcEnableInterrupts(Ctx)") < boot.index("ctlVal |= SOF_HDA_SD_CTL_DMA_START")
+run = boot.index("ctlVal |= SOF_HDA_SD_CTL_DMA_START")
+assert boot.index("/* Acknowledge ROM */") < boot.rindex("incoming & Ctx->HwDesc->HipcTdrBusy", 0, run) < run
+assert run < boot.index("!(ctlAfter & SOF_HDA_SD_CTL_DMA_START)") < boot.index("Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS") < boot.index("SofIpcEnableInterrupts(Ctx)")
 assert boot.count("SofIpcEnableInterrupts(Ctx)")==1
 assert "incoming & Ctx->HwDesc->HipcTdrBusy" in boot
 assert "doorbell & Ctx->HwDesc->HipcIdrBusy" in boot
