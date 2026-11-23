@@ -1065,6 +1065,23 @@ static NTSTATUS SofQueryBootedFirmwareVersion(PSOF_DEVICE_CONTEXT Ctx,
         return STATUS_REVISION_MISMATCH;
     return STATUS_SUCCESS;
 }
+/* The ROM status sampled while DMA was running is not enough: stop and
+ * descriptor teardown can race a DSP halt or a disappearing MMIO window.
+ * This pure admission check is exercised with host-side register samples.
+ * It never authorizes a hardware boot without the existing canary gate. */
+static NTSTATUS SofCheckPostDmaRomState(ULONG RomStatus, SOF_FW_BOOT_STATE BootState)
+{
+    if (RomStatus == MAXULONG)
+        return STATUS_DEVICE_NOT_READY;
+    if (RomStatus & SOF_FSR_HALTED_MASK)
+        return STATUS_IO_DEVICE_ERROR;
+    if (BootState != SOF_FW_BOOT_IN_PROGRESS &&
+        BootState != SOF_FW_BOOT_READY_RECEIVED)
+        return STATUS_DEVICE_PROTOCOL_ERROR;
+    if (FSR_TO_STATE_CODE(RomStatus) != FSR_STATE_FW_ENTERED)
+        return STATUS_IO_TIMEOUT;
+    return STATUS_SUCCESS;
+}
 #endif
 
 /**
@@ -1704,28 +1721,33 @@ stop_dma:
     status = SofStopIccmaxDma(Ctx, &iccmax);
     if (!NT_SUCCESS(status)) goto boot_failed;
 
-    /* Check if FW entered successfully; a fault must never become success. */
-    KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
-    bootState = Ctx->FwState;
-    KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
-    if (bootState == SOF_FW_BOOT_FAILED || statusReg == 0xFFFFFFFFu ||
-        FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED) {
-        ULONG lpib = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_LPIB));
-        UCHAR sdsts = READ_REGISTER_UCHAR((PUCHAR)(streamRegs + SOF_HDA_ADSP_REG_SD_STS));
-        ULONG romErr = SofDspRead32(bar4, Ctx->HwDesc->RomErrorReg);
-        RtlStringCbPrintfA(bmsg, sizeof(bmsg),
-            "[12e] Firmware boot timed out: ROM_STS=0x%08x, ROM_ERR=0x%08x, LPIB=0x%x, SD_STS=0x%02x\n",
-            statusReg, romErr, lpib, sdsts);
-        SofLogBreadcrumb(bmsg);
-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL,
-                   "[SOF] Firmware boot timed out (ROM Status: 0x%08x, ERR: 0x%08x, LPIB: 0x%x, SD_STS: 0x%02x)\n",
-                   statusReg, romErr, lpib, sdsts);
+    /* Re-read the ROM state AFTER both playback DMA and ICCMAX are stopped.
+     * An earlier FW_ENTERED sample cannot attest to the state after teardown.
+     * Do not wait for IPC FW_READY if ROM halted or BAR4 vanished meanwhile. */
+    {
+        ULONG sampledDuringDma = statusReg;
+        ULONG romErr;
+        ULONG lpib;
+        UCHAR sdsts;
 
-        /* Keep an explicit IPC4 boot fault distinct from a plain ROM
-         * timeout so a future on-device trace can identify the stage. */
-        status = statusReg == MAXULONG ? STATUS_DEVICE_NOT_READY :
-            (bootState == SOF_FW_BOOT_FAILED ? STATUS_DEVICE_PROTOCOL_ERROR : STATUS_IO_TIMEOUT);
-        goto boot_failed;
+        statusReg = SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg);
+        KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+        bootState = Ctx->FwState;
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        status = SofCheckPostDmaRomState(statusReg, bootState);
+        if (!NT_SUCCESS(status)) {
+            romErr = SofDspRead32(bar4, Ctx->HwDesc->RomErrorReg);
+            lpib = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_LPIB));
+            sdsts = READ_REGISTER_UCHAR((PUCHAR)(streamRegs + SOF_HDA_ADSP_REG_SD_STS));
+            RtlStringCbPrintfA(bmsg, sizeof(bmsg),
+                "[12e] Post-DMA ROM rejected: before=0x%08x after=0x%08x ROM_ERR=0x%08x NTSTATUS=0x%08x\n",
+                sampledDuringDma, statusReg, romErr, (ULONG)status);
+            SofLogBreadcrumb(bmsg);
+            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL,
+                "[SOF] Post-DMA ROM failed: before=0x%08x after=0x%08x ROM_ERR=0x%08x LPIB=0x%x SD_STS=0x%02x NTSTATUS=0x%08x\n",
+                sampledDuringDma, statusReg, romErr, lpib, sdsts, (ULONG)status);
+            goto boot_failed;
+        }
     }
 
     RtlStringCbPrintfA(bmsg, sizeof(bmsg),
