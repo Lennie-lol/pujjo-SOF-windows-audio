@@ -17,6 +17,7 @@ assert prep.index("WdfInterruptCreate(") < prep.index("SofDiscoverHdaCaps(ctx)")
 assert "SofUnmapPreparedBars(ctx);" in prep.split("PreparationFailed:", 1)[1]
 assert release.index("KeFlushQueuedDpcs()") < release.index("SofIpcCleanup(ctx)") < release.index("SofUnmapPreparedBars(ctx)")
 assert "SofPowerDownDsp(" not in release
+assert "ctx->BootDmaStopUnconfirmed || ctx->DspNeedsPowerDown" in release
 
 mapping = source[source.index("static VOID SofUnmapPreparedBars("):source.index("/**\n * @brief Traverses")]
 selector = source[source.index("static BOOLEAN SofMemoryRangeValid("):source.index("/**\n * @brief KMDF EvtDevicePrepareHardware")]

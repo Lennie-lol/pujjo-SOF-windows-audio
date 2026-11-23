@@ -554,6 +554,9 @@ SofEvtDeviceReleaseHardware(
     SofUnmapPreparedBars(ctx);
 
     ctx->HardwarePrepared = FALSE;
+    if (ctx->BootDmaStopUnconfirmed || ctx->DspNeedsPowerDown ||
+        ctx->BootPpBitsAdded || ctx->BootIntBitsAdded)
+        return STATUS_DEVICE_NOT_READY;
     return status;
 }
 
@@ -766,13 +769,14 @@ SofEvtDeviceD0Exit(
 
     /* Stop device IRQs and drain the DPC and IPC senders before core reset. */
     ctx->CurrentPowerState = PowerDeviceUnspecified;
-    SofIpcDisableInterrupts(ctx);
+    BOOLEAN irqMasked = SofIpcDisableInterrupts(ctx);
     SofIpcQuiesce(ctx);
     if (ctx->DspNeedsPowerDown && !SofDeviceRemoved(ctx)) {
         NTSTATUS powerStatus = SofPowerDownDsp(ctx);
         if (!NT_SUCCESS(powerStatus)) return powerStatus;
     }
     if (!NT_SUCCESS(streamStatus)) return streamStatus;
+    if (!irqMasked) return STATUS_DEVICE_NOT_READY;
     return SofRestoreBootController(ctx);
 }
 

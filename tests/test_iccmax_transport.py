@@ -34,6 +34,10 @@ typedef int NTSTATUS;
 #define SOF_HDA_GCTL_RESET 1u
 #define SOF_HDA_INTCTL 32u
 #define SOF_HDA_PPCTL_GPROCEN (1u<<30)
+#define HDA_DSP_REG_ADSPCS 4u
+#define HDA_DSP_ADSPCS_SPA_MASK(c) ((c)<<16)
+#define HDA_DSP_ADSPCS_CPA_MASK(c) ((c)<<24)
+#define HDA_DSP_ADSPCS_CRST_MASK(c) (c)
 #define SofLogBreadcrumb(s) ((void)(s))
 #define KeMemoryBarrier() ((void)0)
 #define PAGE_SIZE 4096u
@@ -54,6 +58,7 @@ typedef struct { void *VirtualAddress; struct {ULONG LowPart, HighPart;} Physica
 typedef struct { PUCHAR Bar0VirtualAddress; ULONG Bar0Length, NumCaptureStreams,
     NumPlaybackStreams, PpCapOffset, BootPpBitsAdded, BootIntBitsAdded;
     BOOLEAN Removed, DspNeedsPowerDown, BootDmaStopUnconfirmed, IrqMaskNeeded;
+    PUCHAR Bar4VirtualAddress; ULONG Bar4Length;
 } CTX, *PSOF_DEVICE_CONTEXT;
 static int SofDeviceRemoved(CTX *c) { return c->Removed; }
 static int pj_ipc4_mmio_span_valid(ULONG length, ULONG offset, ULONG bytes) {
@@ -64,6 +69,7 @@ static BDL storage[2][PAGE_SIZE/sizeof(BDL)];
 static unsigned allocs, frees, starts;
 static PUCHAR drop;
 static ULONG readl(PUCHAR p) { ULONG v; memcpy(&v,p,4); return v; }
+#define SofDspRead32(base,off) readl((base)+(off))
 static void writel(ULONG v, PUCHAR p) { if (p != drop) memcpy(p,&v,4); }
 static unsigned readw(PUCHAR p) { uint16_t v; memcpy(&v,p,2); return v; }
 static void writew(uint16_t v, PUCHAR p) { if (p != drop) memcpy(p,&v,2); }
@@ -99,10 +105,20 @@ int main(void) {
         {0x83,0,-6}, /* late descriptor error */
         {0x80,0,-5}, {0x98,0,-1} /* stuck RUN or attached BDL */
     };
-    CTX c={.Bar0VirtualAddress=bar,.Bar0Length=sizeof(bar),.NumCaptureStreams=1,
+    UCHAR dsp[8]={0};
+    CTX c={.Bar0VirtualAddress=bar,.Bar0Length=sizeof(bar),.Bar4VirtualAddress=dsp,
+           .Bar4Length=sizeof(dsp),.NumCaptureStreams=1,
            .NumPlaybackStreams=1,.PpCapOffset=0x200};
     assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_NOT_READY); /* controller held in reset */
     writel(1,bar+SOF_HDA_GCTL);
+    bar[0x80]=2;
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
+    bar[0x80]=0; writel(0x1000,bar+0xb8);
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
+    writel(0,bar+0xb8); writel(0x01010000,dsp+4);
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && c.BootPpBitsAdded);
+    assert(SofRestoreBootController(&c)==0 && readl(bar+0x204)==0);
+    writel(0,dsp+4);
     writel(8,bar+0x204);
     assert(SofAcquireBootProcessing(&c)==0 && c.BootPpBitsAdded==SOF_HDA_PPCTL_GPROCEN);
     assert(readl(bar+0x204)==(8|SOF_HDA_PPCTL_GPROCEN));

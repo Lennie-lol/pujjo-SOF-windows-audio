@@ -858,6 +858,22 @@ static NTSTATUS SofAcquireBootProcessing(PSOF_DEVICE_CONTEXT Ctx)
         SofLogBreadcrumb("[HDA] Controller unavailable or held in reset before DSP access.\n");
         return STATUS_DEVICE_NOT_READY;
     }
+    /* Both descriptors must be available before even the first core reset.
+     * Each setup function checks again immediately before taking its slot. */
+    for (ULONG capture = 0; capture <= 1; ++capture) {
+        ULONG slot;
+        if (!pj_hda_stream_slot(Ctx->NumCaptureStreams, Ctx->NumPlaybackStreams,
+                capture, 0, Ctx->Bar0Length, &slot)) return STATUS_DEVICE_CONFIGURATION_ERROR;
+        PUCHAR regs = bar0 + SOF_HDA_ADSP_LOADER_BASE + slot * SOF_HDA_ADSP_SD_ENTRY_SIZE;
+        ULONG ctl = SofCodeLoaderReadControl(regs);
+        if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
+        if ((ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)) ||
+            readl(regs + SOF_HDA_ADSP_REG_SD_BDLPL) ||
+            readl(regs + SOF_HDA_ADSP_REG_SD_BDLPU)) {
+            SofLogBreadcrumb("[HDA] Cold boot descriptor already in use.\n");
+            return STATUS_DEVICE_BUSY;
+        }
+    }
     PUCHAR reg = bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL;
     ULONG value = readl(reg);
     if (value == MAXULONG) return STATUS_DEVICE_NOT_READY;
@@ -867,6 +883,15 @@ static NTSTATUS SofAcquireBootProcessing(PSOF_DEVICE_CONTEXT Ctx)
         value = readl(reg);
         if (value == MAXULONG || !(value & SOF_HDA_PPCTL_GPROCEN))
             return STATUS_DEVICE_NOT_READY;
+    }
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPCS, sizeof(ULONG)) ||
+        SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
+    ULONG core = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPCS);
+    const ULONG powered = HDA_DSP_ADSPCS_SPA_MASK(1) | HDA_DSP_ADSPCS_CPA_MASK(1);
+    if (core == MAXULONG) return STATUS_DEVICE_NOT_READY;
+    if ((core & powered) && !(core & HDA_DSP_ADSPCS_CRST_MASK(1))) {
+        SofLogBreadcrumb("[DSP] Powered core 0 outside reset. Cold boot ownership unavailable.\n");
+        return STATUS_DEVICE_BUSY;
     }
     return STATUS_SUCCESS;
 }
