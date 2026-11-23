@@ -35,7 +35,7 @@ SUITES=[
  'tests/test_ipc4_pretest_safety.py','tests/run_dma_plan_tests.py',
  'tests/test_interrupt_boot_preflight.py','tests/test_kmdf_irq_lifecycle.py','tests/run_notification_race.py',
  'tests/test_read_only_resource_discovery.py',
- 'tests/test_prepare_hardware_rollback.py','tests/test_portcls_child.py','tests/run_codec_control_tests.py',
+ 'tests/test_prepare_hardware_rollback.py','tests/test_portcls_child.py','tests/test_dmic_review_package.py','tests/run_codec_control_tests.py',
 ]
 def main():
     p=argparse.ArgumentParser();p.add_argument('--logs',default='validation-v0.0.17/final')
