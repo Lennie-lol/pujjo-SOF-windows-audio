@@ -74,3 +74,14 @@ zero, matching the recorded Windows inventory. This narrows the diagnostic
 to the documented target; identity checks do not establish physical safety.
 Existing family-level guards for other development variants are unchanged.
 No signing, hardware activation or firmware boot is performed by CI.
+
+
+## Read-only DSP boot-only artifact verification
+
+The Release CI job now runs scripts/Verify-PujjoDspBootDiagnostic.ps1 after staging the unsigned package and before upload. It checks the three package members against sha256.json, the source revision, Pujjo PCI identity, and forced-safe INF values. It does not install, sign, arm, boot or touch hardware.
+
+On Windows after extracting the unsigned GitHub Actions artifact, run:
+
+    .\scripts\Verify-PujjoDspBootDiagnostic.ps1 -SubmissionDirectory .\Pujjo-DSP-boot-only-UNSIGNED-SUBMISSION
+
+Optionally pass -FirmwarePath to verify the exact ADL-N IPC4 image, and -InspectLocalBoard on the physical Google Pujjo rev3 for read-only SMBIOS and PCI checks. After obtaining an authorized Microsoft-signed package, use -SignedPackageDirectory and -SignToolPath to verify that INF and SYS remain identical to CI and that the CAT has valid Windows kernel-policy signature and membership (SignTool /kp). The preflight result is not hardware qualification and must not be used to authorize installation or one-shot DSP boot. Signed package acquisition, reversible rollback rehearsal, and physical DMA/IRQ review remain separate requirements.
