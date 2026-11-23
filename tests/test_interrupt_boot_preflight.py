@@ -14,7 +14,7 @@ assert "MTL_DSP_IRQSTS > Ctx->Bar4Length - ptr" in isr
 assert dpc.count("pj_ipc4_mmio_span_valid(") >= 5
 assert "Ctx->FwState == SOF_FW_BOOT_IN_PROGRESS" in dpc
 assert "Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS" in loader
-assert loader.index("Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS") < loader.index("ctlVal |= SOF_HDA_SD_CTL_DMA_START")
+assert loader.index("ctlVal |= SOF_HDA_SD_CTL_DMA_START") < loader.index("Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS")
 assert "-community.ri" not in loader and "Falling back to community firmware" not in loader
 assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)" in loader
 assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)" in (root/"src/driver/Device.c").read_text()
@@ -46,9 +46,10 @@ publish=dpc.split("if (bootReady || bootFault)",1)[1]
 assert dpc.index("SofDspWrite32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTda") < dpc.index("Ctx->FwState = SOF_FW_BOOT_READY_RECEIVED")
 assert publish.index("KeAcquireSpinLock(&Ctx->IpcLock") < publish.index("Ctx->FwState = SOF_FW_BOOT_READY_RECEIVED") < publish.index("KeReleaseSpinLock(&Ctx->IpcLock")
 assert "bootReady && !Ctx->IpcFaulted" in publish
-assert "else if (bootFault)" in publish
+assert "Ctx->IpcFaulted = TRUE;" in publish
 assert "Ctx->FwState = SOF_FW_BOOT_COMPLETE" not in dpc
-assert "KeSetEvent(&Ctx->FwReadyEvent" in publish.split("else if (bootFault)",1)[1]
+fault = publish.split("} else {",1)[1]
+assert fault.index("Ctx->FwState = SOF_FW_BOOT_FAILED;") < fault.index("KeSetEvent(&Ctx->FwReadyEvent")
 assert "SofIpcRearmInterrupt(" not in dpc
 assert dpc.index("SofDspWrite32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTda") < dpc.index("/* Flush the posted ACKs") < dpc.index("KeSetEvent(&Ctx->FwReadyEvent")
 print("PASS: single DPC consumer, acknowledged readiness, fault wakeup and bounded boot wait")
@@ -61,7 +62,7 @@ assert "interruptConfig.AutomaticSerialization = FALSE;" in device
 d0=device.split("NTSTATUS\nSofEvtDeviceD0Entry(",1)[1].split("\n/**",1)[0]
 assert d0.index("if (ipcFaulted ||") < d0.index("SofStartFirmwareBoot(ctx, NULL)")
 assert d0.index("return bootStatus;") < d0.index("SofPublishAudioChild(") < d0.index("WdfTimerStart(")
-assert d0.index("if (!NT_SUCCESS(portStatus))") < d0.index("return NT_SUCCESS(powerStatus) ? portStatus : powerStatus;")
+assert d0.index("if (!NT_SUCCESS(portStatus))") < d0.index("NTSTATUS restoreStatus = SofRestoreBootController(ctx)") < d0.index("return NT_SUCCESS(restoreStatus) ? portStatus : restoreStatus;")
 assert "SofSdwEnumerateChildren(" not in device and "SofHdaSendVerb(" not in device
 assert "SofVerifyAdlNIpc4Candidate(rawFw, rawFwSize)" in boot
 assert boot.index("SofVerifyAdlNIpc4Candidate(rawFw, rawFwSize)") < boot.index("SofAllocateDmaBuffer(")
@@ -109,7 +110,9 @@ assert dpc_wrapper.index("ctx->IrqArmed && ctx->IrqPending") < dpc_wrapper.index
 assert dpc_wrapper.index("SofIpcDpcHandler(ctx)") < dpc_wrapper.index("SofIpcRearmInterrupt(ctx)")
 assert "SofIpcEnableInterrupts(ctx)" not in d0
 assert boot.index("SofIpcDisableInterrupts(Ctx)") < boot.index("SofDspWrite32(bar4, Ctx->HwDesc->HipcIdr, ipcHdr)")
-assert boot.index("/* Acknowledge ROM */") < boot.index("Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS") < boot.index("SofIpcEnableInterrupts(Ctx)") < boot.index("ctlVal |= SOF_HDA_SD_CTL_DMA_START")
+run = boot.index("ctlVal |= SOF_HDA_SD_CTL_DMA_START")
+assert boot.index("/* Acknowledge ROM */") < boot.rindex("incoming & Ctx->HwDesc->HipcTdrBusy", 0, run) < run
+assert run < boot.index("!(ctlAfter & SOF_HDA_SD_CTL_DMA_START)") < boot.index("Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS") < boot.index("SofIpcEnableInterrupts(Ctx)")
 assert boot.count("SofIpcEnableInterrupts(Ctx)")==1
 assert "incoming & Ctx->HwDesc->HipcTdrBusy" in boot
 assert "doorbell & Ctx->HwDesc->HipcIdrBusy" in boot

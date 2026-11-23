@@ -9,9 +9,8 @@
  *  1. Image Parsing: Validates the extended manifest header ($AE1 magic), verifies
  *     bounds, strips the host manifest, and inspects module/version headers.
  *  2. DMA Memory Management: Allocates physical memory using KMDF Common Buffer
- *     (with full IOMMU / VT-d support) or contiguous physical memory fallback.
- *  3. CPU Cache Flushes: Flushes processor caches (KeFlushIoBuffers) to guarantee
- *     DRAM coherency before hardware DMA engines are triggered.
+ *     using the device-visible logical address and controller address width.
+ *  3. Orders coherent x64 common-buffer stores before publishing DMA descriptors.
  *  4. Decoupled Code Loader DMA: Programs Intel HD-A stream registers (SD_CTL, SD_CBL,
  *     SD_FORMAT, SD_BDLPL/PU, SD_LVI) and decouples the stream from the physical link
  *     via Processing Pipe Control (PPCTL) and Software Position in Buffer (SPIB).
@@ -168,6 +167,8 @@ SofParseFirmwareImage(
 
 #ifdef _KERNEL_MODE
 
+#define SOF_ADLN_IPC4_IMAGE_BYTES 707036u
+
 /**
  * @brief Reads a complete firmware file from the filesystem into non-paged kernel pool.
  *
@@ -233,11 +234,13 @@ SofLoadFirmwareFile(
         return status;
     }
 
-    fileSize = fileInfo.EndOfFile.LowPart;
-    if (fileSize == 0 || fileInfo.EndOfFile.HighPart != 0) {
+    /* The only bootable file is the pinned ADL-N image. Bound nonpaged
+     * pool use before allocating or reading an untrusted file length. */
+    if (fileInfo.EndOfFile.QuadPart != SOF_ADLN_IPC4_IMAGE_BYTES) {
         ZwClose(fileHandle);
         return STATUS_FILE_INVALID;
     }
+    fileSize = SOF_ADLN_IPC4_IMAGE_BYTES;
 
     rawBuffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, fileSize, SOF_POOL_TAG);
     if (!rawBuffer) {
@@ -331,6 +334,12 @@ SofAllocateDmaBuffer(
     }
     DmaBuf->VirtualAddress = WdfCommonBufferGetAlignedVirtualAddress(DmaBuf->CommonBuffer);
     DmaBuf->PhysicalAddress = WdfCommonBufferGetAlignedLogicalAddress(DmaBuf->CommonBuffer);
+    if (!pj_hda_dma_span_valid(DmaBuf->PhysicalAddress.LowPart,
+            (ULONG)DmaBuf->PhysicalAddress.HighPart, Size, Ctx->HdaDma64Bit)) {
+        WdfObjectDelete(DmaBuf->CommonBuffer);
+        RtlZeroMemory(DmaBuf, sizeof(*DmaBuf));
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
     RtlZeroMemory(DmaBuf->VirtualAddress, Size);
     return STATUS_SUCCESS;
 }
@@ -532,7 +541,7 @@ static VOID SofCodeLoaderWriteControl(_In_ PUCHAR StreamRegs, _In_ ULONG Value)
  *  3. Decouples the stream from the physical HD-A link in PPCTL.
  *  4. Builds a 2-entry Buffer Descriptor List (BDL) mapping the firmware payload into
  *     two halves (HD-A requires LVI >= 1). Leaves completion interrupts masked for polling.
- *  5. Flushes processor write caches (KeFlushIoBuffers) for staging payload and BDL.
+ *  5. Orders CPU stores to the x64 common buffers before publishing the BDL.
  *  6. Performs hardware stream engine reset cycle (assert SRST, poll, clear SRST, poll).
  *  7. Clears status flags (BCIS, FIFOE, DESE).
  *  8. Programs Cyclic Buffer Length (SD_CBL), Stream Format (SD_FORMAT = 0x40, 32-bit,
@@ -623,12 +632,6 @@ SofConfigureCodeLoaderDma(
      * If the controller is in reset, DMA engines cannot accept commands or cycle.
      */
     gctl = readl(bar0 + SOF_HDA_GCTL);
-    if (gctl == 0xFFFFFFFFu) return STATUS_DEVICE_NOT_READY;
-    if (!(gctl & SOF_HDA_GCTL_RESET)) {
-        writel(gctl | SOF_HDA_GCTL_RESET, bar0 + SOF_HDA_GCTL);
-        KeStallExecutionProcessor(1000);
-        gctl = readl(bar0 + SOF_HDA_GCTL);
-    }
     if (gctl == 0xFFFFFFFFu || !(gctl & SOF_HDA_GCTL_RESET))
         return STATUS_DEVICE_NOT_READY;
 
@@ -665,25 +668,9 @@ SofConfigureCodeLoaderDma(
     bdl[1].Size = plan.second.length;
     bdl[1].Ioc = 0;
 
-    /*
-     * Flush Processor Caches to System RAM:
-     * Guarantees that the CPU write buffers and L1/L2/L3 cache lines holding the
-     * payload and BDL table are written back to DRAM before the DMA engine reads them.
-     */
-    {
-        PMDL mdl = IoAllocateMdl(FwDmaBuf->VirtualAddress, FwDmaBuf->Size, FALSE, FALSE, NULL);
-        if (mdl) {
-            MmBuildMdlForNonPagedPool(mdl);
-            KeFlushIoBuffers(mdl, TRUE, TRUE);
-            IoFreeMdl(mdl);
-        }
-        PMDL bdlMdl = IoAllocateMdl(BdlDmaBuf->VirtualAddress, BdlDmaBuf->Size, FALSE, FALSE, NULL);
-        if (bdlMdl) {
-            MmBuildMdlForNonPagedPool(bdlMdl);
-            KeFlushIoBuffers(bdlMdl, TRUE, TRUE);
-            IoFreeMdl(bdlMdl);
-        }
-    }
+    /* The ADL-N/x64 WDF common buffers are coherent. Publish the completed
+     * payload and both descriptors before any MMIO exposes the BDL. */
+    KeMemoryBarrier();
 
     /*
      * 1. Reset Stream Engine:
@@ -723,11 +710,14 @@ SofConfigureCodeLoaderDma(
         spbfcctl = readl(bar0 + Ctx->SpbCapOffset + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL);
     if (intctl == 0xFFFFFFFFu || ppctl == 0xFFFFFFFFu || spbfcctl == 0xFFFFFFFFu)
         return STATUS_DEVICE_NOT_READY;
+    if (Ctx->PpCapOffset && !(ppctl & SOF_HDA_PPCTL_GPROCEN))
+        return STATUS_DEVICE_NOT_READY;
     if ((ppctl | spbfcctl | intctl) & (1u << streamIndex))
         return STATUS_DEVICE_BUSY;
 
     /* Only decouple a stream after the controller acknowledged its reset. */
     if (Ctx->PpCapOffset) {
+        Ctx->BootPpBitsAdded |= ~ppctl & SOF_HDA_PPCTL_PIE;
         writel(ppctl | (1u << streamIndex) | SOF_HDA_PPCTL_GPROCEN | SOF_HDA_PPCTL_PIE,
                bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL);
     }
@@ -755,6 +745,7 @@ SofConfigureCodeLoaderDma(
     SofCodeLoaderWriteControl(streamRegs, ctl);
 
     /* Keep the controller/DSP IRQ route enabled and mask this stream. */
+    Ctx->BootIntBitsAdded |= ~intctl & (SOF_HDA_INT_GLOBAL_EN | SOF_HDA_INT_CTRL_EN);
     writel((intctl & ~(1u << streamIndex)) | SOF_HDA_INT_GLOBAL_EN | SOF_HDA_INT_CTRL_EN,
            bar0 + SOF_HDA_INTCTL);
 
@@ -814,7 +805,7 @@ static NTSTATUS SofVerifyAdlNIpc4Candidate(PUCHAR Image, ULONG ImageBytes)
     BCRYPT_ALG_HANDLE algorithm = NULL;
     NTSTATUS status;
 
-    if (ImageBytes != 707036u) return STATUS_INVALID_IMAGE_FORMAT;
+    if (ImageBytes != SOF_ADLN_IPC4_IMAGE_BYTES) return STATUS_INVALID_IMAGE_FORMAT;
     status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0);
     if (!NT_SUCCESS(status)) return status;
     status = BCryptHash(algorithm, NULL, 0, Image, ImageBytes, digest, sizeof(digest));
@@ -825,7 +816,86 @@ static NTSTATUS SofVerifyAdlNIpc4Candidate(PUCHAR Image, ULONG ImageBytes)
 }
 #endif
 
+/* Remove only bits raised by this boot, after IPC, the cores and both DMA
+ * engines are quiet. Preserve unrelated fields on the shared controller. */
+NTSTATUS SofRestoreBootController(_In_ PSOF_DEVICE_CONTEXT Ctx)
+{
+    if (Ctx->BootDmaStopUnconfirmed) return STATUS_DEVICE_NOT_READY;
+    if (!Ctx->BootIntBitsAdded && !Ctx->BootPpBitsAdded) return STATUS_SUCCESS;
+    if (Ctx->DspNeedsPowerDown || Ctx->IrqMaskNeeded ||
+        !Ctx->Bar0VirtualAddress || SofDeviceRemoved(Ctx))
+        return STATUS_DEVICE_NOT_READY;
+    PUCHAR bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
+    PUCHAR regs[] = {bar0 + SOF_HDA_INTCTL, bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL};
+    ULONG *owned[] = {&Ctx->BootIntBitsAdded, &Ctx->BootPpBitsAdded};
+    for (ULONG i = 0; i < RTL_NUMBER_OF(regs); ++i) {
+        ULONG mask = *owned[i];
+        if (mask) {
+            ULONG value = readl(regs[i]);
+            if (value == MAXULONG) return STATUS_DEVICE_NOT_READY;
+            writel(value & ~mask, regs[i]);
+            value = readl(regs[i]);
+            if (value == MAXULONG || (value & mask)) return STATUS_DEVICE_NOT_READY;
+            *owned[i] = 0;
+        }
+    }
+    return STATUS_SUCCESS;
+}
+
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT
+static NTSTATUS SofAcquireBootProcessing(PSOF_DEVICE_CONTEXT Ctx)
+{
+    PUCHAR bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
+    if (Ctx->BootDmaStopUnconfirmed || Ctx->BootIntBitsAdded || Ctx->BootPpBitsAdded ||
+        SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar0Length, SOF_HDA_GCTL, sizeof(ULONG)) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar0Length, SOF_HDA_INTCTL, sizeof(ULONG)) ||
+        !Ctx->PpCapOffset || Ctx->PpCapOffset > Ctx->Bar0Length ||
+        SOF_HDA_REG_PP_PPCTL + sizeof(ULONG) > Ctx->Bar0Length - Ctx->PpCapOffset)
+        return STATUS_INVALID_BUFFER_SIZE;
+    ULONG gctl = readl(bar0 + SOF_HDA_GCTL);
+    if (gctl == MAXULONG || !(gctl & SOF_HDA_GCTL_RESET)) {
+        SofLogBreadcrumb("[HDA] Controller unavailable or held in reset before DSP access.\n");
+        return STATUS_DEVICE_NOT_READY;
+    }
+    /* Both descriptors must be available before even the first core reset.
+     * Each setup function checks again immediately before taking its slot. */
+    for (ULONG capture = 0; capture <= 1; ++capture) {
+        ULONG slot;
+        if (!pj_hda_stream_slot(Ctx->NumCaptureStreams, Ctx->NumPlaybackStreams,
+                capture, 0, Ctx->Bar0Length, &slot)) return STATUS_DEVICE_CONFIGURATION_ERROR;
+        PUCHAR regs = bar0 + SOF_HDA_ADSP_LOADER_BASE + slot * SOF_HDA_ADSP_SD_ENTRY_SIZE;
+        ULONG ctl = SofCodeLoaderReadControl(regs);
+        if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
+        if ((ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)) ||
+            readl(regs + SOF_HDA_ADSP_REG_SD_BDLPL) ||
+            readl(regs + SOF_HDA_ADSP_REG_SD_BDLPU)) {
+            SofLogBreadcrumb("[HDA] Cold boot descriptor already in use.\n");
+            return STATUS_DEVICE_BUSY;
+        }
+    }
+    PUCHAR reg = bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL;
+    ULONG value = readl(reg);
+    if (value == MAXULONG) return STATUS_DEVICE_NOT_READY;
+    if (!(value & SOF_HDA_PPCTL_GPROCEN)) {
+        Ctx->BootPpBitsAdded = SOF_HDA_PPCTL_GPROCEN;
+        writel(value | SOF_HDA_PPCTL_GPROCEN, reg);
+        value = readl(reg);
+        if (value == MAXULONG || !(value & SOF_HDA_PPCTL_GPROCEN))
+            return STATUS_DEVICE_NOT_READY;
+    }
+    if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPCS, sizeof(ULONG)) ||
+        SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
+    ULONG core = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPCS);
+    const ULONG powered = HDA_DSP_ADSPCS_SPA_MASK(1) | HDA_DSP_ADSPCS_CPA_MASK(1);
+    if (core == MAXULONG) return STATUS_DEVICE_NOT_READY;
+    if ((core & powered) && !(core & HDA_DSP_ADSPCS_CRST_MASK(1))) {
+        SofLogBreadcrumb("[DSP] Powered core 0 outside reset. Cold boot ownership unavailable.\n");
+        return STATUS_DEVICE_BUSY;
+    }
+    return STATUS_SUCCESS;
+}
+
 /* Confirm both halves of the descriptor address, failing closed on loss. */
 static NTSTATUS SofLoaderDmaAddressesMatch(PUCHAR registers, ULONG low, ULONG high)
 {
@@ -884,6 +954,11 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
         readl(Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPL) != 0 ||
         readl(Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPU) != 0)
         return STATUS_DEVICE_BUSY;
+    /* This capture slot is reserved for the workaround. Refuse stale
+     * stream errors before publishing either common buffer. */
+    UCHAR dmaStatus = READ_REGISTER_UCHAR(Dma->Registers + SOF_HDA_ADSP_REG_SD_STS);
+    if (dmaStatus == 0xffu) return STATUS_DEVICE_NOT_READY;
+    if (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS) return STATUS_IO_DEVICE_ERROR;
 
     status = SofAllocateDmaBuffer(Ctx, PAGE_SIZE, &Dma->Data);
     if (!NT_SUCCESS(status)) return status;
@@ -902,6 +977,7 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     bdl[1].AddrHigh = plan.second.high;
     bdl[1].Size = plan.second.length;
 
+    KeMemoryBarrier();
     Dma->OriginalGuardband = ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK;
     Dma->OriginalDecoupled = (ppctl & 1u) != 0;
     Dma->Published = TRUE;
@@ -915,7 +991,9 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     ltrp = READ_REGISTER_UCHAR(Dma->Ltrp);
     ppctl = readl(Dma->Ppctl);
     if (ltrp == 0xffu || (ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK) != SOF_ADLN_LTRP_BOOT_GUARDBAND ||
-        ppctl == MAXULONG || !(ppctl & 1u))
+        ppctl == MAXULONG || !(ppctl & 1u) ||
+        readl(Dma->Registers + SOF_HDA_ADSP_REG_SD_CBL) != PAGE_SIZE ||
+        readw(Dma->Registers + SOF_HDA_ADSP_REG_SD_LVI) != 1u)
         return STATUS_DEVICE_NOT_READY;
     status = SofLoaderDmaAddressesMatch(Dma->Registers,
         Dma->Bdl.PhysicalAddress.LowPart, (ULONG)Dma->Bdl.PhysicalAddress.HighPart);
@@ -936,7 +1014,7 @@ static NTSTATUS SofStopIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     if (Dma->Published) {
         ULONG ctl = SofCodeLoaderReadControl(Dma->Registers), attempt;
         ULONG ppctl;
-        UCHAR ltrp;
+        UCHAR ltrp, dmaStatus;
         if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
         SofCodeLoaderWriteControl(Dma->Registers, 0);
         for (attempt = 0; attempt < 500u; ++attempt) {
@@ -951,15 +1029,24 @@ static NTSTATUS SofStopIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
         status = SofLoaderDmaAddressesMatch(Dma->Registers, 0, 0);
         if (!NT_SUCCESS(status)) return status;
         Dma->Published = FALSE;
+        dmaStatus = READ_REGISTER_UCHAR(Dma->Registers + SOF_HDA_ADSP_REG_SD_STS);
+        if (dmaStatus == 0xffu) status = STATUS_DEVICE_NOT_READY;
+        else if (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS) status = STATUS_IO_DEVICE_ERROR;
         WRITE_REGISTER_UCHAR(Dma->Registers + SOF_HDA_ADSP_REG_SD_STS, SOF_HDA_CL_DMA_SD_INT_MASK);
         ppctl = readl(Dma->Ppctl);
-        if (ppctl != MAXULONG)
+        if (ppctl != MAXULONG) {
             writel((ppctl & ~1u) | (Dma->OriginalDecoupled ? 1u : 0u), Dma->Ppctl);
+            ppctl = readl(Dma->Ppctl);
+        }
         ltrp = READ_REGISTER_UCHAR(Dma->Ltrp);
-        if (ltrp != 0xffu)
+        if (ltrp != 0xffu) {
             WRITE_REGISTER_UCHAR(Dma->Ltrp,
                 (UCHAR)((ltrp & ~SOF_ADLN_LTRP_GUARDBAND_MASK) | Dma->OriginalGuardband));
-        if (ppctl == MAXULONG || ltrp == 0xffu) status = STATUS_DEVICE_NOT_READY;
+            ltrp = READ_REGISTER_UCHAR(Dma->Ltrp);
+        }
+        if (ppctl == MAXULONG || ((ppctl & 1u) != 0) != Dma->OriginalDecoupled ||
+            ltrp == 0xffu || (ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK) != Dma->OriginalGuardband)
+            status = STATUS_DEVICE_NOT_READY;
     }
     SofFreeDmaBuffer(Ctx, &Dma->Bdl);
     SofFreeDmaBuffer(Ctx, &Dma->Data);
@@ -1161,6 +1248,8 @@ SofStartFirmwareBoot(
 
     /* ROM ACK is polled by this loader, never by the normal IPC DPC.
      * Disable channel interrupts only after the firmware image is accepted. */
+    status = SofAcquireBootProcessing(Ctx);
+    if (!NT_SUCCESS(status)) goto boot_failed;
     if (!SofIpcDisableInterrupts(Ctx)) {
         status = STATUS_DEVICE_NOT_READY;
         goto boot_failed;
@@ -1323,7 +1412,16 @@ SofStartFirmwareBoot(
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
     }
     if (timeout == 2000u) {
-        status = STATUS_IO_TIMEOUT;
+        /* Until the new ROM acknowledges PURGE its SRAM can still contain
+         * the previous boot's state. Sample it at the timeout boundary. */
+        statusReg = SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg);
+        ULONG romError = SofDspRead32(bar4, Ctx->HwDesc->RomErrorReg);
+        RtlStringCbPrintfA(bmsg, sizeof(bmsg),
+            "[12-ROM] PURGE ACK timeout: FSR=0x%08x ROM_ERR=0x%08x\n",
+            statusReg, romError);
+        SofLogBreadcrumb(bmsg);
+        status = statusReg == MAXULONG ? STATUS_DEVICE_NOT_READY :
+            (statusReg & SOF_FSR_HALTED_MASK ? STATUS_IO_DEVICE_ERROR : STATUS_IO_TIMEOUT);
         goto boot_failed;
     }
 
@@ -1359,6 +1457,10 @@ SofStartFirmwareBoot(
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
     }
     if (timeout == 1000u) {
+        RtlStringCbPrintfA(bmsg, sizeof(bmsg),
+            "[12-ROM] INIT_DONE timeout: FSR=0x%08x ROM_ERR=0x%08x\n",
+            statusReg, SofDspRead32(bar4, Ctx->HwDesc->RomErrorReg));
+        SofLogBreadcrumb(bmsg);
         status = STATUS_IO_TIMEOUT;
         goto boot_failed;
     }
@@ -1380,15 +1482,6 @@ SofStartFirmwareBoot(
      * Set DMA_START (RUN bit) in SD_CTL. The HD-A engine begins reading descriptors
      * and pushing firmware binary data into the DSP memory window.
      */
-    /* FW_READY is meaningful only after we have explicitly initiated this
-     * boot attempt. Notification received earlier must not mark us ready. */
-    KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
-    Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS;
-    KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
-    if (!SofIpcEnableInterrupts(Ctx)) {
-        status = STATUS_DEVICE_NOT_READY;
-        goto boot_failed;
-    }
     {
         ULONG ctlReadback = SofCodeLoaderReadControl(streamRegs);
         ULONG route = readl(bar0 + SOF_HDA_INTCTL);
@@ -1418,6 +1511,14 @@ SofStartFirmwareBoot(
             status = STATUS_DEVICE_NOT_READY;
             goto dma_unconfirmed;
         }
+        /* IRQs are still masked. Reject an incoming doorbell that arrived
+         * during descriptor validation, before this image can execute. */
+        ULONG incoming = SofDspRead32(bar4, Ctx->HwDesc->HipcTdr);
+        if (incoming == MAXULONG || (incoming & Ctx->HwDesc->HipcTdrBusy) ||
+            SofDeviceRemoved(Ctx)) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto stop_dma;
+        }
         ctlVal |= SOF_HDA_SD_CTL_DMA_START;
         SofCodeLoaderWriteControl(streamRegs, ctlVal);
 
@@ -1425,6 +1526,21 @@ SofStartFirmwareBoot(
         ULONG ctlAfter = SofCodeLoaderReadControl(streamRegs);
 
         if (ctlAfter == 0xFFFFFFFFu || !(ctlAfter & SOF_HDA_SD_CTL_DMA_START)) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto stop_dma;
+        }
+
+        /* A fast response remains latched in HIPCTDR until acknowledged.
+         * Admit the DPC only after the stream has acknowledged RUN. */
+        KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
+        if (Ctx->IpcFaulted || Ctx->FwState != SOF_FW_BOOT_NOT_STARTED) {
+            KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+            status = STATUS_DEVICE_NOT_READY;
+            goto stop_dma;
+        }
+        Ctx->FwState = SOF_FW_BOOT_IN_PROGRESS;
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        if (!SofIpcEnableInterrupts(Ctx)) {
             status = STATUS_DEVICE_NOT_READY;
             goto stop_dma;
         }
@@ -1439,7 +1555,7 @@ SofStartFirmwareBoot(
     }
 
     /*
-     * 6. Wait for ROM status FSR_STATE_FW_ENTERED (0x5) or IPC FW_READY:
+     * 6. Wait for ROM status FSR_STATE_FW_ENTERED (0x5).
      * Polls ROM Status register (HFDSC) for up to 4 seconds.
      */
     timeout = 4000; /* 4 seconds */
@@ -1466,8 +1582,7 @@ SofStartFirmwareBoot(
         }
         if (bootState == SOF_FW_BOOT_FAILED || statusReg == 0xFFFFFFFFu)
             break;
-        if (FSR_TO_STATE_CODE(statusReg) == FSR_STATE_FW_ENTERED ||
-            bootState == SOF_FW_BOOT_READY_RECEIVED) {
+        if (FSR_TO_STATE_CODE(statusReg) == FSR_STATE_FW_ENTERED) {
             DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                        "[SOF] *** FIRMWARE SUCCESSFULLY ENTERED (ROM Status: 0x%08x) ***\n",
                        statusReg);
@@ -1536,6 +1651,11 @@ stop_dma:
                 goto boot_failed;
             }
             writel(intctl & ~(1u << streamIndex), bar0 + SOF_HDA_INTCTL);
+            intctl = readl(bar0 + SOF_HDA_INTCTL);
+            if (intctl == MAXULONG || (intctl & (1u << streamIndex))) {
+                status = STATUS_DEVICE_NOT_READY;
+                goto boot_failed;
+            }
         }
 
         {
@@ -1567,7 +1687,8 @@ stop_dma:
             writel(spbControl & ~(1u << streamIndex),
                    spibBar + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL);
             spbControl = readl(spibBar + SOF_HDA_REG_CL_SPBFIFO_SPBFCCTL);
-            if (spbControl == MAXULONG || (spbControl & (1u << streamIndex))) {
+            if (spbControl == MAXULONG || (spbControl & (1u << streamIndex)) ||
+                readl(spibAddr) != 0) {
                 status = STATUS_DEVICE_NOT_READY;
                 goto boot_failed;
             }
@@ -1588,8 +1709,7 @@ stop_dma:
     bootState = Ctx->FwState;
     KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
     if (bootState == SOF_FW_BOOT_FAILED || statusReg == 0xFFFFFFFFu ||
-        (FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED &&
-         bootState != SOF_FW_BOOT_READY_RECEIVED)) {
+        FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED) {
         ULONG lpib = READ_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_LPIB));
         UCHAR sdsts = READ_REGISTER_UCHAR((PUCHAR)(streamRegs + SOF_HDA_ADSP_REG_SD_STS));
         ULONG romErr = SofDspRead32(bar4, Ctx->HwDesc->RomErrorReg);
@@ -1651,11 +1771,12 @@ stop_dma:
         return STATUS_SUCCESS;
     } else {
         RtlStringCbPrintfA(bmsg, sizeof(bmsg),
-            "[12g] FW_READY notification not received within timeout, but FW_ENTERED verified (ROM_STS=0x%08x)\n",
-            statusReg);
+            "[12g] FW_READY wait failed: wait=0x%08x ROM_STS=0x%08x\n",
+            status, statusReg);
         SofLogBreadcrumb(bmsg);
         /* ROM entry is not IPC4 readiness. Never manufacture boot success. */
-        status = status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_DEVICE_NOT_READY;
+        status = status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT :
+            (status == STATUS_SUCCESS ? STATUS_DEVICE_PROTOCOL_ERROR : STATUS_DEVICE_NOT_READY);
         goto boot_failed;
     }
 boot_failed:
@@ -1673,6 +1794,10 @@ dma_unconfirmed:
     /* ICCMAX must stop even when the code-loader descriptor was lost. */
     if (!NT_SUCCESS(SofStopIccmaxDma(Ctx, &iccmax)))
         SofLogBreadcrumb("[Power] ICCMAX rollback could not be confirmed.\n");
+    if (dmaConfigured || iccmax.Published) {
+        Ctx->BootDmaStopUnconfirmed = TRUE;
+        SofLogBreadcrumb("[DMA] Stop or BDL detach unconfirmed. Retaining common buffers.\n");
+    }
     if (Ctx->DspNeedsPowerDown) {
         NTSTATUS rollbackStatus;
         SofIpcDisableInterrupts(Ctx);
@@ -1680,6 +1805,8 @@ dma_unconfirmed:
         if (!NT_SUCCESS(rollbackStatus))
             SofLogBreadcrumb("[Power] DSP rollback could not be confirmed.\n");
     }
+    if (!NT_SUCCESS(SofRestoreBootController(Ctx)))
+        SofLogBreadcrumb("[HDA] Controller rollback could not be confirmed.\n");
     return status;
 #endif /* PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT */
 }

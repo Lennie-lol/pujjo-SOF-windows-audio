@@ -6,6 +6,12 @@ caps=src.split("static NTSTATUS SofDiscoverHdaCaps(",1)[1].split("\n/**",1)[0]
 prep=src.split("SofEvtDevicePrepareHardware(",1)[1].split("\n/**",1)[0]
 assert "writel(" not in caps and "WRITE_REGISTER_" not in caps
 assert "busInterface.SetBusData(" not in prep
+assert prep.index("pciConfig.Command & PCI_ENABLE_MEMORY_SPACE") < prep.index("SofMapPreparedBars")
+d0 = src.split("NTSTATUS\nSofEvtDeviceD0Entry(", 1)[1].split("\n/**", 1)[0]
+assert "PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_BUS_MASTER" in d0
+assert d0.index("busInterface.GetBusData(") < d0.index("busInterface.InterfaceDereference(")
+assert d0.index("bytesRead != sizeof(command)") < d0.index("SofStartFirmwareBoot(")
+assert "(command & required) != required" in d0 and "busInterface.SetBusData(" not in d0
 assert "PCI Command updated" not in prep
 assert "writel(" not in prep and "WRITE_REGISTER_" not in prep
 assert "SofHardwareDevelopmentAllowed()" in prep
@@ -78,6 +84,7 @@ typedef int NTSTATUS;
 #define DbgPrintEx(...) ((void)0)
 typedef struct { PUCHAR Bar0VirtualAddress; ULONG Bar0Length;
  ULONG NumCaptureStreams, NumPlaybackStreams, PpCapOffset, SpbCapOffset, MlCapOffset;
+ unsigned HdaDma64Bit;
 } SOF_DEVICE_CONTEXT, *PSOF_DEVICE_CONTEXT;
 static unsigned char regs[1024];
 static ULONG limit;
@@ -89,16 +96,18 @@ cases=r'''
 static SOF_DEVICE_CONTEXT ctx;
 static void init(void) {
  memset(regs,0,sizeof(regs)); limit=sizeof(regs);
- ctx=(SOF_DEVICE_CONTEXT){regs,limit,99,99,99,99,99};
+ ctx=(SOF_DEVICE_CONTEXT){regs,limit,99,99,99,99,99,1};
  put(SOF_HDA_GCAP,0x55aa3200u);
 }
 static void bad(void) {
  assert(SofDiscoverHdaCaps(&ctx)<0);
- assert(!ctx.NumCaptureStreams && !ctx.NumPlaybackStreams && !ctx.PpCapOffset && !ctx.SpbCapOffset && !ctx.MlCapOffset);
+ assert(!ctx.NumCaptureStreams && !ctx.NumPlaybackStreams && !ctx.PpCapOffset && !ctx.SpbCapOffset && !ctx.MlCapOffset && !ctx.HdaDma64Bit);
 }
 static void cap(ULONG at,ULONG id,ULONG next) {put(at,(id<<SOF_HDA_CAP_ID_OFF)|next);}
 int main(void) {
  init(); assert(SofDiscoverHdaCaps(&ctx)==0 && ctx.NumCaptureStreams==2 && ctx.NumPlaybackStreams==3 && !ctx.MlCapOffset);
+ assert(!ctx.HdaDma64Bit);
+ put(SOF_HDA_GCAP,0x3201); assert(SofDiscoverHdaCaps(&ctx)==0 && ctx.HdaDma64Bit);
  init();put(SOF_HDA_LLCH,0x100);cap(0x100,3,0x120);cap(0x120,4,0x140);cap(0x140,2,0);
  assert(SofDiscoverHdaCaps(&ctx)==0 && ctx.PpCapOffset==0x100 && ctx.SpbCapOffset==0x120 && ctx.MlCapOffset==0x140);
  init();put(SOF_HDA_GCAP,0xffff);bad();

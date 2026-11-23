@@ -10,6 +10,7 @@ extern "C" {
 #define PJ_DMA_MAX_PERIODS 256u
 typedef struct { PJ_DWORD low, high, length; } pj_dma_segment;
 typedef struct { pj_dma_segment first, second; } pj_dma_plan;
+int pj_hda_dma_span_valid(PJ_DWORD low, PJ_DWORD high, PJ_DWORD bytes, int dma64);
 /* Output unchanged on failure. Both segment starts must be 128-byte aligned. */
 int pj_dma_plan_pair(PJ_DWORD low, PJ_DWORD high, PJ_DWORD total,
                      PJ_DWORD split, pj_dma_plan *out);

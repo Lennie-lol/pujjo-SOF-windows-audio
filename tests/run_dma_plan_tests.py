@@ -15,6 +15,13 @@ int main(void) {
     pj_dma_plan p;
     PJ_DWORD period=99u;
     assert(pj_dma_plan_pair(0xffffff80u, 1u, 512u, 256u, &p));
+    assert(pj_hda_dma_span_valid(0xffffff80u,0,128,0));
+    assert(!pj_hda_dma_span_valid(0xffffff80u,0,129,0));
+    assert(pj_hda_dma_span_valid(0xffffff80u,0,129,1));
+    assert(!pj_hda_dma_span_valid(0,1,1,0));
+    assert(!pj_hda_dma_span_valid(0xffffff80u,0xffffffffu,129,1));
+    assert(!pj_hda_dma_span_valid(1,0,128,1));
+    assert(!pj_hda_dma_span_valid(0,0,0,1));
     assert(p.first.low==0xffffff80u && p.first.high==1u && p.first.length==256u);
     assert(p.second.low==128u && p.second.high==2u && p.second.length==256u);
     assert(!pj_dma_plan_pair(0xffffff80u,0xffffffffu,512u,256u,&p));

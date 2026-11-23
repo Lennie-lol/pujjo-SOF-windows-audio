@@ -72,9 +72,9 @@ if ($InspectLocalBoard) {
     $boards = @(Get-CimInstance Win32_BaseBoard -ErrorAction Stop)
     Require ($boards.Count -eq 1) 'Baseboard not uniquely identified'
     Require ($boards[0].Manufacturer -eq 'Google' -and $boards[0].Product -eq 'Pujjo') 'Not Google Pujjo'
-    Require ([string]$boards[0].Version -match '^rev3(\b|$)') 'Pujjo rev3 not confirmed'
-    $dsp = @(Get-PnpDevice -ErrorAction Stop | Where-Object {
-        ([string]$_.InstanceId).Contains('VEN_8086&DEV_54C8&SUBSYS_00000000')
+    Require ([string]$boards[0].Version -eq 'rev3') 'Pujjo rev3 not confirmed'
+    $dsp = @(Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object {
+        ([string]$_.InstanceId) -match '^PCI\\VEN_8086&DEV_54C8&SUBSYS_00000000(?:&|\\)'
     })
     Require ($dsp.Count -eq 1) 'No unique 8086:54C8 PnP device'
     Write-Output 'PASS: read-only physical Google Pujjo rev3 identity.'

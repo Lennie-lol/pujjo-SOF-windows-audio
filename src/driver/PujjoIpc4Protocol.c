@@ -23,10 +23,12 @@ int pj_ipc4_is_notification(PJ_DWORD primary)
                         PJ_IPC4_TYPE_MASK | PJ_IPC4_RESERVED_MASK)) ==
            (PJ_IPC4_GLOBAL_NOTIFICATION << 24);
 }
-int pj_ipc4_is_fw_ready(PJ_DWORD primary)
+int pj_ipc4_is_cold_fw_ready(PJ_DWORD primary, PJ_DWORD extension)
 {
-    return pj_ipc4_is_notification(primary) &&
-           ((primary >> 16) & 255u) == PJ_IPC4_NOTIFY_FW_READY;
+    /* SOF v2.12 ipc_boot_complete_msg emits this exact pair. The guarded
+     * loader admits only cold boots, so resume/library flags are invalid. */
+    return primary == ((PJ_IPC4_GLOBAL_NOTIFICATION << 24) |
+                       (PJ_IPC4_NOTIFY_FW_READY << 16)) && extension == 0;
 }
 int pj_ipc4_reply_matches(PJ_DWORD request, PJ_DWORD reply)
 {

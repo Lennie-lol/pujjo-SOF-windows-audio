@@ -41,7 +41,7 @@ pj_ipc4_status pj_ipc4_encode(const pj_ipc4_packet *packet,
 pj_ipc4_status pj_ipc4_validate(const pj_ipc4_packet *packet);
 int pj_ipc4_is_reply(PJ_DWORD primary);
 int pj_ipc4_is_notification(PJ_DWORD primary);
-int pj_ipc4_is_fw_ready(PJ_DWORD primary);
+int pj_ipc4_is_cold_fw_ready(PJ_DWORD primary, PJ_DWORD extension);
 int pj_ipc4_reply_matches(PJ_DWORD request, PJ_DWORD reply);
 /* IPC4 pipeline/module command builders. Header fields follow the bundled
  * dual BSD/GPL Intel IPC4 header; no transport or hardware access.

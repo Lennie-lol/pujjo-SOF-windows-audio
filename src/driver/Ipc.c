@@ -725,6 +725,12 @@ SofIpcDpcHandler(
                 }
                 Ctx->IpcReplyReady = !Ctx->IpcFaulted;
                 signalReply = TRUE;
+            } else {
+                /* A reply without its unique outstanding request cannot be
+                 * assigned to a later command on this untagged channel. */
+                Ctx->IpcFaulted = TRUE;
+                bootFault = TRUE;
+                signalReply = TRUE;
             }
             KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
 
@@ -741,9 +747,9 @@ SofIpcDpcHandler(
                        "[SOF] IPC Notification: Type %u (0x%08x|0x%08x)\n",
                        notifyType, primary, extension);
 
-            if (pj_ipc4_is_fw_ready(primary)) {
-                /* Publish readiness only after acknowledging the notification. */
-                bootReady = TRUE;
+            if (pj_ipc4_is_notification(primary) && notifyType == SOF_IPC4_NOTIFY_FW_READY) {
+                bootReady = pj_ipc4_is_cold_fw_ready(primary, tdd) != 0;
+                bootFault = !bootReady;
             } else if (pj_ipc4_is_notification(primary) &&
                        notifyType == SOF_IPC4_NOTIFY_EXCEPTION_CAUGHT) {
                 /* Firmware panic/exception caught by base FW */
@@ -815,8 +821,12 @@ SofIpcDpcHandler(
             Ctx->FwState == SOF_FW_BOOT_IN_PROGRESS) {
             Ctx->FwState = SOF_FW_BOOT_READY_RECEIVED;
             KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
-        } else if (bootFault) {
-            /* Wake the loader promptly; the fault state is already latched. */
+        } else {
+            /* A malformed, duplicate or out-of-phase cold-start message
+             * invalidates this session, including a pending FW_CONFIG. */
+            Ctx->IpcFaulted = TRUE;
+            Ctx->FwState = SOF_FW_BOOT_FAILED;
+            signalReply = TRUE;
             KeSetEvent(&Ctx->FwReadyEvent, IO_NO_INCREMENT, FALSE);
         }
         KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
@@ -892,6 +902,7 @@ SofIpcSendWhilePowered(
             return STATUS_INVALID_BUFFER_SIZE;
     }
     if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdr, 4u) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcTdr, 4u) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, Ctx->HwDesc->HipcIdd, 4u))
         return STATUS_INVALID_BUFFER_SIZE;
     /* Do not silently truncate mailbox payloads or read past their source.
@@ -931,6 +942,15 @@ SofIpcSendWhilePowered(
         return STATUS_DEVICE_BUSY;
     }
 
+    /* The DPC can have sampled TDR and still be waiting for this lock.
+     * Its reply stays BUSY until it has examined the request owner. */
+    ULONG incoming = SofDspRead32(Ctx->Bar4VirtualAddress, Ctx->HwDesc->HipcTdr);
+    if (incoming == MAXULONG ||
+        ((incoming & Ctx->HwDesc->HipcTdrBusy) && pj_ipc4_is_reply(incoming))) {
+        Ctx->IpcFaulted = TRUE;
+        KeReleaseSpinLock(&Ctx->IpcLock, oldIrql);
+        return incoming == MAXULONG ? STATUS_DEVICE_NOT_READY : STATUS_DEVICE_PROTOCOL_ERROR;
+    }
     Ctx->IpcTxBusy = TRUE;
     Ctx->IpcReplyReady = FALSE;
     Ctx->IpcRequestPrimary = Msg->Primary;
@@ -1077,10 +1097,14 @@ NTSTATUS SofIpcGetBootFirmwareVersion(
             PJ_IPC4_MAX_MAILBOX_PAYLOAD, 2u, &caps) != PJ_IPC4_VALID) {
             status = STATUS_DEVICE_PROTOCOL_ERROR;
         } else {
+            char bmsg[160];
             RtlCopyMemory(Version, caps.version, sizeof(caps.version));
-            DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
-                "[SOF] FW_CONFIG: DL=%lu UL=%lu pipelines=%lu\n",
-                (ULONG)caps.dl_bytes, (ULONG)caps.ul_bytes, (ULONG)caps.max_pipelines);
+            RtlStringCbPrintfA(bmsg, sizeof(bmsg),
+                "[IPC4] FW_CONFIG reply: version=%u.%u.%u.%u DL=%lu UL=%lu pipelines=%lu\n",
+                Version[0], Version[1], Version[2], Version[3], (ULONG)caps.dl_bytes,
+                (ULONG)caps.ul_bytes, (ULONG)caps.max_pipelines);
+            SofLogBreadcrumb(bmsg);
+            DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "%s", bmsg);
         }
     }
     ExFreePoolWithTag(reply.Payload, SOF_DEVICE_TAG);

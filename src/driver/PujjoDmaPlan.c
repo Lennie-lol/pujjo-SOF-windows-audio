@@ -11,6 +11,13 @@ static int add_offset(PJ_DWORD low, PJ_DWORD high, PJ_DWORD offset,
     *new_high = high + carry;
     return 1;
 }
+int pj_hda_dma_span_valid(PJ_DWORD low, PJ_DWORD high, PJ_DWORD bytes, int dma64)
+{
+    PJ_DWORD last_low, last_high;
+    return bytes && !(low & 127u) &&
+        add_offset(low, high, bytes - 1u, &last_low, &last_high) &&
+        (dma64 || last_high == 0);
+}
 int pj_dma_plan_pair(PJ_DWORD low, PJ_DWORD high, PJ_DWORD total,
                      PJ_DWORD split, pj_dma_plan *out)
 {

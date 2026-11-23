@@ -17,8 +17,18 @@ for raw, halted in ((0, False), (1, False), (5, False),
     assert bool(raw & 0x80000000) == halted
 
 boot = loader.split("NTSTATUS\nSofStartFirmwareBoot(", 1)[1]
+file_read = loader.split("NTSTATUS\nSofLoadFirmwareFile(", 1)[1].split("VOID\nSofFreeFirmwareBuffer(", 1)[0]
+length_check = file_read.index("fileInfo.EndOfFile.QuadPart != SOF_ADLN_IPC4_IMAGE_BYTES")
+assert length_check < file_read.index("return STATUS_FILE_INVALID;") < file_read.index("ExAllocatePool2(")
+assert "ioStatus.Information != fileSize" in file_read
+assert "ImageBytes != SOF_ADLN_IPC4_IMAGE_BYTES" in loader
 initial = boot.split("/* Wait for ROM status FSR_STATE_INIT_DONE", 1)[1].split(
     "/* ROM ACK belongs to the loader", 1)[0]
+no_ack = boot.split("if (timeout == 2000u)", 1)[1].split("/* Acknowledge ROM */", 1)[0]
+assert "PURGE ACK timeout" in no_ack and "RomErrorReg" in no_ack
+assert no_ack.index("statusReg == MAXULONG") < no_ack.index("statusReg & SOF_FSR_HALTED_MASK")
+assert "STATUS_IO_DEVICE_ERROR : STATUS_IO_TIMEOUT" in no_ack and "goto boot_failed;" in no_ack
+assert "INIT_DONE timeout" in initial
 assert initial.index("statusReg == 0xFFFFFFFFu") < initial.index(
     "statusReg & SOF_FSR_HALTED_MASK") < initial.index(
     "FSR_TO_STATE_CODE(statusReg) == FSR_STATE_INIT_DONE")
@@ -38,9 +48,13 @@ halt_dma = transfer.split("if (statusReg != 0xFFFFFFFFu && (statusReg & SOF_FSR_
 assert halt_dma.index("ROM halted during firmware DMA") < halt_dma.index(
     "status = STATUS_IO_DEVICE_ERROR;") < halt_dma.index("goto stop_dma;")
 assert "RomErrorReg" in transfer
+assert "SOF_FW_BOOT_READY_RECEIVED" not in transfer
 
 fault = boot.split("/* Check if FW entered successfully; a fault must never become success. */", 1)[1]
 assert "bootState == SOF_FW_BOOT_FAILED ? STATUS_DEVICE_PROTOCOL_ERROR : STATUS_IO_TIMEOUT" in fault
+before_wait = fault.split("KeWaitForSingleObject", 1)[0]
+assert "FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED" in before_wait
+assert "SOF_FW_BOOT_READY_RECEIVED" not in before_wait
 
 # The known-good forced-safe KMDF entry remains the first PnP creation path.
 add = driver.split("SofEvtDeviceAdd(", 1)[1]

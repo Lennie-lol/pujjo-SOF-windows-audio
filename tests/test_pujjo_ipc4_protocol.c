@@ -42,11 +42,11 @@ static void protocol_tests(void)
     assert(pj_ipc4_decode(malformed,sizeof(malformed),&decoded)==PJ_IPC4_VALID);
     malformed[3]=0x80u;
     assert(pj_ipc4_decode(malformed,sizeof(malformed),&decoded)==PJ_IPC4_INVALID_HEADER);
-    assert(pj_ipc4_is_fw_ready(0x1b080000u));
-    assert(!pj_ipc4_is_fw_ready(0x1b070000u));
-    assert(!pj_ipc4_is_fw_ready(0x1b080000u|PJ_IPC4_TARGET_MASK));
-    assert(!pj_ipc4_is_fw_ready(0x1b080000u|PJ_IPC4_DIRECTION_MASK));
-    assert(!pj_ipc4_is_fw_ready(0x1b080000u|PJ_IPC4_RESERVED_MASK));
+    assert(pj_ipc4_is_cold_fw_ready(0x1b080000u, 0));
+    for (unsigned bit = 0; bit < 32; ++bit) {
+        assert(!pj_ipc4_is_cold_fw_ready(0x1b080000u ^ (1u << bit), 0));
+        assert(!pj_ipc4_is_cold_fw_ready(0x1b080000u, 1u << bit));
+    }
     assert(pj_ipc4_reply_matches(0x02000010u,0x22000000u));
     assert(!pj_ipc4_reply_matches(0x02000010u,0x23000000u));
     assert(!pj_ipc4_reply_matches(0x02000010u,0x02000000u));
