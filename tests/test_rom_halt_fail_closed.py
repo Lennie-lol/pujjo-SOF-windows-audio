@@ -24,6 +24,11 @@ assert "ioStatus.Information != fileSize" in file_read
 assert "ImageBytes != SOF_ADLN_IPC4_IMAGE_BYTES" in loader
 initial = boot.split("/* Wait for ROM status FSR_STATE_INIT_DONE", 1)[1].split(
     "/* ROM ACK belongs to the loader", 1)[0]
+no_ack = boot.split("if (timeout == 2000u)", 1)[1].split("/* Acknowledge ROM */", 1)[0]
+assert "PURGE ACK timeout" in no_ack and "RomErrorReg" in no_ack
+assert no_ack.index("statusReg == MAXULONG") < no_ack.index("statusReg & SOF_FSR_HALTED_MASK")
+assert "STATUS_IO_DEVICE_ERROR : STATUS_IO_TIMEOUT" in no_ack and "goto boot_failed;" in no_ack
+assert "INIT_DONE timeout" in initial
 assert initial.index("statusReg == 0xFFFFFFFFu") < initial.index(
     "statusReg & SOF_FSR_HALTED_MASK") < initial.index(
     "FSR_TO_STATE_CODE(statusReg) == FSR_STATE_INIT_DONE")

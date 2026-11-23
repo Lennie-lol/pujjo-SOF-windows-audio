@@ -1077,10 +1077,14 @@ NTSTATUS SofIpcGetBootFirmwareVersion(
             PJ_IPC4_MAX_MAILBOX_PAYLOAD, 2u, &caps) != PJ_IPC4_VALID) {
             status = STATUS_DEVICE_PROTOCOL_ERROR;
         } else {
+            char bmsg[160];
             RtlCopyMemory(Version, caps.version, sizeof(caps.version));
-            DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
-                "[SOF] FW_CONFIG: DL=%lu UL=%lu pipelines=%lu\n",
-                (ULONG)caps.dl_bytes, (ULONG)caps.ul_bytes, (ULONG)caps.max_pipelines);
+            RtlStringCbPrintfA(bmsg, sizeof(bmsg),
+                "[IPC4] FW_CONFIG reply: version=%u.%u.%u.%u DL=%lu UL=%lu pipelines=%lu\n",
+                Version[0], Version[1], Version[2], Version[3], (ULONG)caps.dl_bytes,
+                (ULONG)caps.ul_bytes, (ULONG)caps.max_pipelines);
+            SofLogBreadcrumb(bmsg);
+            DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "%s", bmsg);
         }
     }
     ExFreePoolWithTag(reply.Payload, SOF_DEVICE_TAG);

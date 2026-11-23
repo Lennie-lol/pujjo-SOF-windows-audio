@@ -1343,7 +1343,16 @@ SofStartFirmwareBoot(
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
     }
     if (timeout == 2000u) {
-        status = STATUS_IO_TIMEOUT;
+        /* Until the new ROM acknowledges PURGE its SRAM can still contain
+         * the previous boot's state. Sample it at the timeout boundary. */
+        statusReg = SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg);
+        ULONG romError = SofDspRead32(bar4, Ctx->HwDesc->RomErrorReg);
+        RtlStringCbPrintfA(bmsg, sizeof(bmsg),
+            "[12-ROM] PURGE ACK timeout: FSR=0x%08x ROM_ERR=0x%08x\n",
+            statusReg, romError);
+        SofLogBreadcrumb(bmsg);
+        status = statusReg == MAXULONG ? STATUS_DEVICE_NOT_READY :
+            (statusReg & SOF_FSR_HALTED_MASK ? STATUS_IO_DEVICE_ERROR : STATUS_IO_TIMEOUT);
         goto boot_failed;
     }
 
@@ -1379,6 +1388,10 @@ SofStartFirmwareBoot(
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
     }
     if (timeout == 1000u) {
+        RtlStringCbPrintfA(bmsg, sizeof(bmsg),
+            "[12-ROM] INIT_DONE timeout: FSR=0x%08x ROM_ERR=0x%08x\n",
+            statusReg, SofDspRead32(bar4, Ctx->HwDesc->RomErrorReg));
+        SofLogBreadcrumb(bmsg);
         status = STATUS_IO_TIMEOUT;
         goto boot_failed;
     }
