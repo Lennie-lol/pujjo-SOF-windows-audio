@@ -16,6 +16,8 @@ for forbidden in ('pnputil /add-driver', 'pnputil /delete-driver', 'bcdedit /set
                   'New-SelfSignedCertificate', 'Start-Service', 'Enable-PnpDevice'):
     assert forbidden.lower() not in script.lower(), forbidden
 assert "New-Object 'System.Collections.Generic.List[object]'" in script
+assert "Version -eq 'rev3'" in script and 'Get-PnpDevice -PresentOnly' in script
+assert r"^PCI\\VEN_8086&DEV_54C8&SUBSYS_00000000(?:&|\\)" in script
 assert 'foreach ($entry in $parsed)' in script
 assert "shell: powershell" in workflow
 assert 'Verify DSP submission with Windows PowerShell 5.1' in workflow
