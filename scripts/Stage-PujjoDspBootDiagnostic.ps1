@@ -32,8 +32,8 @@ Get-FileHash -Algorithm SHA256 -LiteralPath $inf,$sys,$cat |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'sha256.json')
 Set-Content -LiteralPath (Join-Path $output 'UNSIGNED-SUBMISSION-ONLY.txt') -Value @(
     "Source revision $SourceRevision"
-    'Package version 0.0.3.0; distinct from the signed 0.0.2.0 recovery baseline.'
-    'UNSIGNED DSP boot-only submission input; forced-safe defaults; not hardware verified, signed or authorized for installation.'
+    'Package version 0.0.4.0; distinct from previous signed packages.'
+    'UNSIGNED DSP diagnostic submission input; forced-safe defaults; one-shot read-only resource probe only; DMA and firmware execution locked; not hardware verified, signed or authorized for installation.'
     'Microsoft kernel-policy signing and catalog membership verification required.'
     'No firmware is bundled. Required pinned firmware: 707036 bytes; SHA256 bc83cffa1bb5a4a8da24bbc7bb7040bd744f1e0c63e3d16151d1769ac8ae8214.'
     'No replacement NHLT, PortCls package, codec or amplifier control. No installer.'
