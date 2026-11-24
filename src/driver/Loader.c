@@ -1113,7 +1113,7 @@ SofStartFirmwareBoot(
     _In_opt_ PCWSTR OptionalFwPath
 )
 {
-#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)
+#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) || defined(PUJJO_DSP_BOOT_DIAGNOSTIC)
     /* Deliberately no DSP power, ROM commands, or DMA on source-only builds. */
     UNREFERENCED_PARAMETER(Ctx);
     UNREFERENCED_PARAMETER(OptionalFwPath);
