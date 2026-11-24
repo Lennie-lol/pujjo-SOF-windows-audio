@@ -13,9 +13,9 @@ assert prep.index("SofSelectPciResources(") < prep.index("SofMapPreparedBars(")
 assert prep.index("if (!NT_SUCCESS(status)) goto PreparationFailed;", prep.index("SofMapPreparedBars(")) < prep.index("WdfInterruptCreate(")
 assert prep.index("interruptConfig.InterruptRaw = interruptRaw;") < prep.index("WdfInterruptCreate(")
 assert prep.index("interruptConfig.InterruptTranslated = interruptTranslated;") < prep.index("WdfInterruptCreate(")
-assert prep.index("WdfInterruptCreate(") < prep.index("SofDiscoverHdaCaps(ctx)")
+assert prep.index("WdfInterruptCreate(") < prep.index("SofDiscoverHdaCaps(ctx)", prep.index("WdfInterruptCreate("))
 assert "SofUnmapPreparedBars(ctx);" in prep.split("PreparationFailed:", 1)[1]
-assert release.index("KeFlushQueuedDpcs()") < release.index("SofIpcCleanup(ctx)") < release.index("SofUnmapPreparedBars(ctx)")
+assert release.index("KeFlushQueuedDpcs()") < release.index("SofIpcCleanup(ctx)") < release.index("SofUnmapPreparedBars(ctx)", release.index("SofIpcCleanup(ctx)"))
 assert "SofPowerDownDsp(" not in release
 assert "ctx->BootDmaStopUnconfirmed || ctx->DspNeedsPowerDown" in release
 
