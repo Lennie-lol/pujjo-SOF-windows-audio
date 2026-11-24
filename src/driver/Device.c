@@ -279,7 +279,9 @@ SofEvtDevicePrepareHardware(
     PHYSICAL_ADDRESS bar0Bus = {0}, bar4Bus = {0};
     PCM_PARTIAL_RESOURCE_DESCRIPTOR bars[2] = { NULL, NULL };
     PCM_PARTIAL_RESOURCE_DESCRIPTOR interruptRaw = NULL, interruptTranslated = NULL;
+#ifndef PUJJO_DSP_BOOT_DIAGNOSTIC
     WDF_INTERRUPT_CONFIG interruptConfig;
+#endif
     BUS_INTERFACE_STANDARD busInterface;
     PCI_COMMON_CONFIG pciConfig = {0};
     char msg[256];
@@ -288,6 +290,8 @@ SofEvtDevicePrepareHardware(
 #ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
     if (!g_CanaryArmed || g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT)
         return STATUS_NOT_SUPPORTED;
+    /* Consume the in-memory lease before even read-only discovery. */
+    g_CanaryArmed = FALSE;
 #endif
 
     /* Pujjo-only fork. Fail closed before touching PCI registers. */
@@ -369,6 +373,29 @@ SofEvtDevicePrepareHardware(
     status = SofMapPreparedBars(ctx, bars);
     if (!NT_SUCCESS(status)) goto PreparationFailed;
 
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    /* A physical read-only pre-DMA milestone. No interrupt registration,
+     * IPC initialization, stream programming, power or firmware writes. */
+    status = SofDiscoverHdaCaps(ctx);
+    if (!NT_SUCCESS(status)) goto PreparationFailed;
+    {
+        ULONG gctl = readl((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_GCTL);
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[Probe] BAR0=0x%x BAR4=0x%x MSI=%u PCI_CMD=0x%04x GCTL=0x%08x PP=0x%x SPIB=0x%x C%u/P%u\n",
+            ctx->Bar0Length, ctx->Bar4Length,
+            (interruptTranslated->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) != 0,
+            pciConfig.Command, gctl, ctx->PpCapOffset, ctx->SpbCapOffset,
+            ctx->NumCaptureStreams, ctx->NumPlaybackStreams);
+        SofLogBreadcrumb(msg);
+        if (gctl == MAXULONG) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto PreparationFailed;
+        }
+    }
+    SofUnmapPreparedBars(ctx);
+    SofLogBreadcrumb("[Probe] Read-only resource discovery complete; DMA and firmware boot locked.\n");
+    return STATUS_SUCCESS;
+#else
     WDF_INTERRUPT_CONFIG_INIT(&interruptConfig, SofEvtInterruptIsr, SofEvtInterruptDpc);
     interruptConfig.AutomaticSerialization = FALSE;
     interruptConfig.InterruptRaw = interruptRaw;
@@ -476,6 +503,7 @@ SofEvtDevicePrepareHardware(
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] Mapped hardware resources.\n");
     return STATUS_SUCCESS;
+#endif
 
 PreparationFailed:
     /* KMDF retires any interrupt created in this PrepareHardware pass
@@ -530,6 +558,12 @@ SofEvtDeviceReleaseHardware(
 
     UNREFERENCED_PARAMETER(ResourcesTranslated);
     if (!SofHardwareDevelopmentAllowed()) return STATUS_SUCCESS;
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    /* The probe allocates no IPC, IRQ or DMA state. Do not touch those
+     * uninitialized subsystems on a failed or completed resource probe. */
+    SofUnmapPreparedBars(ctx);
+    return STATUS_SUCCESS;
+#else
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] SofEvtDeviceReleaseHardware starting...\n");
@@ -558,6 +592,7 @@ SofEvtDeviceReleaseHardware(
         ctx->BootPpBitsAdded || ctx->BootIntBitsAdded)
         return STATUS_DEVICE_NOT_READY;
     return status;
+#endif
 }
 
 /**
