@@ -11,7 +11,8 @@ Class=MEDIA
 ClassGuid={4d36e96c-e325-11ce-bfc1-08002be10318}
 Provider=%ProviderName%
 CatalogFile=sof_dsp.cat
-DriverVer=11/23/2026,0.0.2.0
+; Distinct INF revision: do not reuse the signed 0.0.2.0 recovery package identity.
+DriverVer=11/23/2026,0.0.3.0
 PnpLockdown=1
 
 [DestinationDirs]

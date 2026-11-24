@@ -57,6 +57,12 @@ assert d0.index("g_CanaryArmed = FALSE;") < d0.index("SofStartFirmwareBoot(ctx, 
 
 for name in ("SafeBootPolicy", "BootSafetyToken", "ArmedTesting", "EnablePortCls"):
     assert f"HKR,Parameters,{name},0x00010001,0" in inf
-assert "DriverVer=11/23/2026,0.0.2.0" in inf
+assert re.findall(r"(?im)^\s*DriverVer\s*=\s*([^\r\n]+)", inf) == ["11/23/2026,0.0.3.0"]
+assert "DriverVer=11/23/2026,0.0.2.0" not in inf
+stage = (ROOT / "scripts/Stage-PujjoDspBootDiagnostic.ps1").read_text(encoding="utf-8")
+verify = (ROOT / "scripts/Verify-PujjoDspBootDiagnostic.ps1").read_text(encoding="utf-8")
+assert "Package version 0.0.3.0;" in stage
+assert "Package version 0.0.3.0;" in verify
+assert "Wrong diagnostic package version; expected 0.0.3.0" in verify
 assert "'tests/test_forced_safe_kmdf_stub.py'" in suite
 print("PASS: forced-safe KMDF-only stub precedes PnP callbacks/DMA; one-shot DSP guard preserved")
