@@ -252,6 +252,11 @@ DriverEntry(
         /* SOF_SAFE_BOOT_SINGLE_SHOT: Requires BOTH token==1 AND \SystemRoot\sof_canary.bin */
         if (bootSafetyToken == 1 && canaryFilePresent && paramsKey != NULL &&
             NT_SUCCESS(SofWriteRegistryDword(paramsKey, L"BootSafetyToken", 0)) &&
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+            /* Persist disarm of BOTH authorization values before entering any
+             * diagnostic callbacks. Keep the requested policy in memory only. */
+            NT_SUCCESS(SofWriteRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE)) &&
+#endif
             NT_SUCCESS(ZwFlushKey(paramsKey))) {
             /* ATOMIC DISARM: Immediately clear token in registry and flush to guarantee safe next boot */
             g_CanaryArmed = TRUE;
@@ -295,6 +300,13 @@ DriverEntry(
         }
     }
 
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    /* A missing, invalid or already consumed canary never selects the
+     * callback-bearing path on a subsequent start. */
+    if (!g_CanaryArmed) {
+        g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
+    }
+#endif
     if (paramsKey != NULL) {
         ZwClose(paramsKey);
     }
@@ -456,10 +468,12 @@ SofEvtDeviceAdd(
     WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpPowerCallbacks);
     pnpPowerCallbacks.EvtDevicePrepareHardware = SofEvtDevicePrepareHardware;
     pnpPowerCallbacks.EvtDeviceReleaseHardware = SofEvtDeviceReleaseHardware;
+#ifndef PUJJO_DSP_BOOT_DIAGNOSTIC
     pnpPowerCallbacks.EvtDeviceSurpriseRemoval = SofEvtDeviceSurpriseRemoval;
     /* FW_READY and stream shutdown require live WDF IRQ delivery. */
     pnpPowerCallbacks.EvtDeviceD0EntryPostInterruptsEnabled = SofEvtDeviceD0Entry;
     pnpPowerCallbacks.EvtDeviceD0ExitPreInterruptsDisabled  = SofEvtDeviceD0Exit;
+#endif
 
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpPowerCallbacks);
 
@@ -484,6 +498,13 @@ SofEvtDeviceAdd(
     KeInitializeSpinLock(&deviceContext->AudioPositionLock);
     deviceContext->CurrentPowerState = PowerDeviceD3;
 
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    /* Read-only one-shot resource discovery only. DMA common buffers are
+     * device-owned; retaining local handles cannot guarantee their lifetime
+     * after a failed start or removal. No interrupt or DMA owner is created. */
+    SofLogBreadcrumb("[Safety] DMA lifetime unqualified; read-only resource probe only.\n");
+    return STATUS_SUCCESS;
+#else
     /* Create KMDF DMA Enabler for IOMMU / VT-d Common Buffer mapping & Bus Mastering */
     {
         WDF_DMA_ENABLER_CONFIG dmaConfig;
@@ -581,6 +602,7 @@ SofEvtDeviceAdd(
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] Device successfully created and initialized.\n");
     return STATUS_SUCCESS;
+#endif
 }
 
 /**
