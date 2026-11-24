@@ -54,8 +54,9 @@ foreach ($name in $names) {
 $infText = Get-Content -LiteralPath (Join-Path $package 'sof_dsp.inf') -Raw
 $versionLines = @($infText -split '\r?\n' | Where-Object { $_ -match '^\s*DriverVer\s*=' })
 Require ($versionLines.Count -eq 1) 'Expected exactly one DriverVer line'
-Require ($versionLines[0].Trim() -eq 'DriverVer=11/23/2026,0.0.3.0') 'Wrong diagnostic package version; expected 0.0.3.0'
-Require ($notice.Contains('Package version 0.0.3.0;')) 'Missing diagnostic package version in notice'
+Require ($versionLines[0].Trim() -eq 'DriverVer=11/23/2026,0.0.4.0') 'Wrong diagnostic package version; expected 0.0.4.0'
+Require ($notice.Contains('Package version 0.0.4.0;')) 'Missing diagnostic package version in notice'
+Require ($notice.Contains('DMA and firmware execution locked')) 'Missing DMA lifetime hold notice'
 Require ($infText.Contains('PCI\VEN_8086&DEV_54C8&SUBSYS_00000000')) 'Wrong DSP PCI ID'
 Require ($infText.Contains('AddService = sof_dsp')) 'Wrong or missing driver service'
 foreach ($setting in @('SafeBootPolicy','BootSafetyToken','ArmedTesting','EnablePortCls','EnableS0Idle','EnableUsbOffload')) {
