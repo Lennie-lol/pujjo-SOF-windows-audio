@@ -1,10 +1,10 @@
 # Pujjo rev3 DSP cold-boot review
 
-The signed v0.0.2.0 KMDF-only package is the recovery driver. The recorded device was healthy with Problem Code 0 and published INF `oem80.inf`. The boot-only review artifact uses the same version. Identify each package by its catalog, hashes and actual published name.
+The signed v0.0.2.0 KMDF-only package is the recovery driver. The recorded device was healthy with Problem Code 0 and published INF `oem80.inf`. The boot-only review artifact now uses INF DriverVer 0.0.3.0. On the physical board, staging a previous candidate with the identical v0.0.2.0 INF returned the existing `oem80.inf` even though its SYS hash differed. The installed SYS remained the recovery baseline. A separate versioned INF and regenerated catalog address that identity collision; separate Driver Store publication and ranking must still be verified on Windows. Keep the service name and forced-safe defaults unchanged. Preserve the old package off-device and identify each package by its catalog, hashes and actual published name. Never remove the fallback to force staging; a newer equal-ranked package can be selected on a later enumeration. This version bump does not authorize installation or hardware boot.
 
 ## Read-only preflight
 
-1. Use the Release artifact named `Pujjo-DSP-boot-only-UNSIGNED-SUBMISSION` and the source checkout from the same Actions run. Record the 40-character **build revision** from the run and the revision in the package notice. A PR build can use GitHub's test merge commit.
+1. Use the Release artifact named `Pujjo-DSP-boot-only-UNSIGNED-SUBMISSION` and the source checkout from the same Actions run. Require package version 0.0.3.0. Record the 40-character **build revision** from the run and the revision in the package notice. A PR build can use GitHub's test merge commit.
 2. On the board, capture these queries and the result of the repository verifier. Supply paths to the extracted artifact and the separately obtained firmware. The verifier checks the candidate's 707036-byte length and SHA-256.
 
    ```powershell
