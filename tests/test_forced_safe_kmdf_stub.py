@@ -57,12 +57,27 @@ assert d0.index("g_CanaryArmed = FALSE;") < d0.index("SofStartFirmwareBoot(ctx, 
 
 for name in ("SafeBootPolicy", "BootSafetyToken", "ArmedTesting", "EnablePortCls"):
     assert f"HKR,Parameters,{name},0x00010001,0" in inf
-assert re.findall(r"(?im)^\s*DriverVer\s*=\s*([^\r\n]+)", inf) == ["11/23/2026,0.0.3.0"]
+assert re.findall(r"(?im)^\s*DriverVer\s*=\s*([^\r\n]+)", inf) == ["11/23/2026,0.0.4.0"]
 assert "DriverVer=11/23/2026,0.0.2.0" not in inf
 stage = (ROOT / "scripts/Stage-PujjoDspBootDiagnostic.ps1").read_text(encoding="utf-8")
 verify = (ROOT / "scripts/Verify-PujjoDspBootDiagnostic.ps1").read_text(encoding="utf-8")
-assert "Package version 0.0.3.0;" in stage
-assert "Package version 0.0.3.0;" in verify
-assert "Wrong diagnostic package version; expected 0.0.3.0" in verify
+assert "Package version 0.0.4.0;" in stage
+assert "Package version 0.0.4.0;" in verify
+assert "Wrong diagnostic package version; expected 0.0.4.0" in verify
 assert "'tests/test_forced_safe_kmdf_stub.py'" in suite
-print("PASS: forced-safe KMDF-only stub precedes PnP callbacks/DMA; one-shot DSP guard preserved")
+entry = driver.split("DriverEntry(", 1)[1].split("WDF_DRIVER_CONFIG_INIT", 1)[0]
+assert entry.index('SofWriteRegistryDword(paramsKey, L"BootSafetyToken", 0)') < entry.index('SofWriteRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE)') < entry.index("NT_SUCCESS(ZwFlushKey(paramsKey))") < entry.index("g_CanaryArmed = TRUE;")
+assert "if (!g_CanaryArmed) {\n        g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;" in entry
+assert "#ifndef PUJJO_DSP_BOOT_DIAGNOSTIC\n    pnpPowerCallbacks.EvtDeviceSurpriseRemoval" in add
+probe_add = add.split("Read-only one-shot resource discovery only", 1)[1].split("#else", 1)[0]
+assert "return STATUS_SUCCESS;" in probe_add and "WdfDmaEnablerCreate(" not in probe_add
+probe = prepare.split("A physical read-only pre-DMA milestone", 1)[1].split("#else", 1)[0]
+for forbidden in ("writel(", "writew(", "WRITE_REGISTER_", "SofIpcInitialize(", "WdfInterruptCreate(", "SofStartFirmwareBoot(", "SofAllocateDmaBuffer("):
+    assert forbidden not in probe
+assert "SofDiscoverHdaCaps(ctx)" in probe and "SofUnmapPreparedBars(ctx)" in probe
+assert "g_CanaryArmed = FALSE;" in prepare.split("WdfFdoQueryForInterface", 1)[0]
+loader = (ROOT / "src/driver/Loader.c").read_text(encoding="utf-8")
+boot = loader.split("SofStartFirmwareBoot(", 1)[1]
+assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) || defined(PUJJO_DSP_BOOT_DIAGNOSTIC)" in boot
+assert "return STATUS_NOT_SUPPORTED;" in boot.split("#else", 1)[0]
+print("PASS: persistent one-shot disarm, read-only resource probe and DMA activation hold")
