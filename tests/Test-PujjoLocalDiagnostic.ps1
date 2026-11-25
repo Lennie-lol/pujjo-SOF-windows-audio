@@ -20,7 +20,7 @@ try {
     Get-ChildItem $ci.FullName | Get-FileHash -Algorithm SHA256 |
         Select-Object Algorithm,Hash,@{Name='File';Expression={Split-Path -Leaf $_.Path}} |
         ConvertTo-Json | Set-Content (Join-Path $root 'sha256.json')
-    Set-Content (Join-Path $root 'UNSIGNED-SUBMISSION-ONLY.txt') "Source revision $revision unsigned Package version 0.0.4.0; DMA and firmware execution locked"
+    Set-Content (Join-Path $root 'UNSIGNED-SUBMISSION-ONLY.txt') "Source revision $revision unsigned Package version 0.0.5.0; DMA and firmware execution locked"
     $tool = Join-Path $root 'verify.cmd'
     Set-Content -Encoding Ascii $tool @(
         '@echo off'

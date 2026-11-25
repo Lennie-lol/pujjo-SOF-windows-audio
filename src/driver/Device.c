@@ -288,10 +288,9 @@ SofEvtDevicePrepareHardware(
 
     if (!SofHardwareDevelopmentAllowed()) return STATUS_NOT_SUPPORTED;
 #ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
-    if (!g_CanaryArmed || g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT)
+    if (g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT ||
+        InterlockedCompareExchange(&g_DiagnosticPreparePermit, 0, 1) != 1)
         return STATUS_NOT_SUPPORTED;
-    /* Consume the in-memory lease before even read-only discovery. */
-    g_CanaryArmed = FALSE;
 #endif
 
     /* Pujjo-only fork. Fail closed before touching PCI registers. */

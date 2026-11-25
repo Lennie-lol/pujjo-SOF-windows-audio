@@ -92,6 +92,9 @@ EVT_WDF_TIMER SofEvtWatchdogHealthTimer;
 #define SOF_SAFE_BOOT_PRODUCTION  2
 
 /** @brief Global flag indicating whether the audio stack is armed (TRUE) or in Safe Mode (FALSE). */
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+extern volatile LONG g_DiagnosticPreparePermit;
+#endif
 extern BOOLEAN g_CanaryArmed;
 
 /** @brief Global policy setting governing driver boot safety behavior. */

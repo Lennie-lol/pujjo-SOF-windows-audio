@@ -173,15 +173,6 @@ SofSdwCreateChildPdo(
         goto Error;
     }
 
-    /* Protect SoundWire child PDO against IopDecrementDeviceObjectRef underflow */
-    PDEVICE_OBJECT wdmChildPdo = WdfDeviceWdmGetDeviceObject(childDevice);
-    if (wdmChildPdo != NULL) {
-        for (ULONG i = 0; i < 100000; i++) {
-            ObReferenceObject(wdmChildPdo);
-        }
-        InterlockedExchange(&wdmChildPdo->ReferenceCount, 100000);
-    }
-
     childCtx = SofSdwGetChildContext(childDevice);
     RtlZeroMemory(childCtx, sizeof(SOF_SDW_CHILD_CONTEXT));
     childCtx->ParentCtx = Ctx;
@@ -3433,15 +3424,6 @@ SofSdcaFilterDeviceAdd(
     filterCtx = GetSdcaFilterContext(device);
     filterCtx->Device = device;
     filterCtx->Target = WdfDeviceGetIoTarget(device);
-
-    /* Protect filter device against IopDecrementDeviceObjectRef underflow (BugCheck 0x18) */
-    PDEVICE_OBJECT wdmFilterDevice = WdfDeviceWdmGetDeviceObject(device);
-    if (wdmFilterDevice != NULL) {
-        for (ULONG i = 0; i < 100000; i++) {
-            ObReferenceObject(wdmFilterDevice);
-        }
-        InterlockedExchange(&wdmFilterDevice->ReferenceCount, 100000);
-    }
 
     /* Configure default parallel queue to intercept IOCTLs */
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);

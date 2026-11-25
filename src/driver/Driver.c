@@ -70,6 +70,9 @@ void SofLogBreadcrumb(const char* text)
 NTSYSAPI NTSTATUS NTAPI ZwFlushKey(_In_ HANDLE KeyHandle);
 
 /** @brief Global flag indicating if the audio DSP stack is actively armed. */
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+volatile LONG g_DiagnosticPreparePermit = 0;
+#endif
 BOOLEAN g_CanaryArmed = FALSE;
 
 /** @brief Active safe boot policy governing driver recovery behavior. */
@@ -260,6 +263,9 @@ DriverEntry(
             NT_SUCCESS(ZwFlushKey(paramsKey))) {
             /* ATOMIC DISARM: Immediately clear token in registry and flush to guarantee safe next boot */
             g_CanaryArmed = TRUE;
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+            InterlockedExchange(&g_DiagnosticPreparePermit, 1);
+#endif
             SofLogBreadcrumb("[Safety] Canary file consumed & token reset to 0 in DriverEntry! Armed for single boot.\n");
             DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                        "[SOF] Safety Canary: Consumed & reset to 0 in DriverEntry. Armed for single boot.\n");
@@ -371,9 +377,13 @@ SofIsPciDspDevice(
         if (pBuffer != NULL) {
             PWCHAR pCurrent = pBuffer;
             while (*pCurrent != L'\0') {
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+                if (_wcsicmp(pCurrent, L"PCI\\VEN_8086&DEV_54C8&SUBSYS_00000000") == 0) {
+#else
                 if (wcsstr(pCurrent, L"PCI\\VEN_8086&DEV_E428") != NULL ||
                     wcsstr(pCurrent, L"PCI\\VEN_8086&DEV_4F80") != NULL ||
                     wcsstr(pCurrent, L"PCI\\VEN_8086") != NULL) {
+#endif
                     isPci = TRUE;
                     break;
                 }
@@ -415,6 +425,7 @@ SofEvtDeviceAdd(
 
     SofLogBreadcrumb("[5] SofEvtDeviceAdd entered!\n");
 
+#ifndef PUJJO_DSP_BOOT_DIAGNOSTIC
     /* Check if this is a filter device (e.g. LowerFilter on SDCA Audio Function) */
     if (SofIsSdcaFunctionDevice(DeviceInit)) {
         if (!g_CanaryArmed) {
@@ -427,6 +438,7 @@ SofEvtDeviceAdd(
         return SofSdcaFilterDeviceAdd(Driver, DeviceInit);
     }
 
+#endif
     /* Reject any device that is not our PCI DSP */
     if (!SofIsPciDspDevice(DeviceInit)) {
         SofLogBreadcrumb("[5-Reject] Unrecognized non-PCI device in SofEvtDeviceAdd -> STATUS_NOT_SUPPORTED\n");

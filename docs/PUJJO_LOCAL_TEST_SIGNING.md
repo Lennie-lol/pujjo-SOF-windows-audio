@@ -1,4 +1,4 @@
-# Local catalog verification for the v0.0.4.0 resource diagnostic
+# Local catalog verification for the v0.0.5.0 resource diagnostic
 
 Use Windows PowerShell on the controlled Chromebook. Obtain the original `Pujjo-DSP-boot-only-UNSIGNED-SUBMISSION` ZIP directly from the known successful PR #29 Release job. Extract it separately from the directory containing the locally signed CAT and the two unchanged CI members. Obtain the full checkout SHA from that build's checkout log (a PR merge SHA is possible). The manifest and notice in a user-supplied directory cannot authenticate their own origin.
 
@@ -25,3 +25,11 @@ Require the final local PASS. The inherited preflight prints its unsigned-submis
 - The diagnostic PCI branch returns before creating IRQ or DMA objects. It registers no D0 callbacks, programs no streams, and reaches no codec, amplifier or firmware execution. The separate firmware loader guard stays in force. The full loader's DMA-buffer lifetime across failed start and removal remains unqualified.
 
 Keep the working fallback bound. Existing board, recovery, backup and signing observations do not exercise either failing path. Installation, one-shot arming and physical rollback procedures require a reviewed replacement binary and a newly verified catalog. Do not apply the cold-boot evidence procedure to this artifact.
+
+## Replacement source review for v0.0.5.0
+
+The diagnostic DeviceAdd accepts the exact hardware ID from the INF. The preprocessor excludes the SDCA classifier and filter attach call. The SoundWire child and filter creation routines no longer pin WDM objects or overwrite their reference counts.
+
+DriverEntry publishes one driver-wide LONG permit only after flushing the persistent disarm. PrepareHardware claims it with InterlockedCompareExchange before board inspection, bus queries or mapping. Discovery failure consumes the permit. Release, rebalance and new device objects cannot renew it. Disarmed loads use the callback-free stub. Authorized devices register only prepare and release. Discovery checks board and PCI identity, correlates resources, bounds capability reads and unmaps on success and rollback. The DMA, IRQ, D0, firmware, codec and amplifier paths remain closed.
+
+Keep the hardware hold until both Windows configurations pass and the original Release artifact, exact checkout revision and member hashes are independently verified. A locally signed catalog also requires the separate membership and trust checks above.
