@@ -58,6 +58,8 @@ try {
         ExpectFailure "modified $name"
         Copy-Item (Join-Path $ci.FullName $name) $signed.FullName -Force
     }
+    # Verify the restored package and leave the native exit status at success.
+    Verify
     Write-Output 'PASS: local signing control-flow regressions'
 } finally {
     if ((Split-Path $root -Parent).TrimEnd('\') -eq [IO.Path]::GetTempPath().TrimEnd('\')) {
