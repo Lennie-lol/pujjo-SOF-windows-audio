@@ -28,8 +28,8 @@ Keep the working fallback bound. Existing board, recovery, backup and signing ob
 
 ## Replacement source review for v0.0.5.0
 
-The diagnostic DeviceAdd accepts the exact hardware ID from the INF. The preprocessor excludes the SDCA classifier and filter attach call. The SoundWire child and filter creation routines no longer pin WDM objects or overwrite their reference counts.
+The diagnostic DeviceAdd accepts the exact hardware ID from the INF. The preprocessor excludes the SDCA classifier and filter attach call. The HDA child, SoundWire child and filter creation routines no longer pin WDM objects or overwrite their reference counts.
 
-DriverEntry publishes one driver-wide LONG permit only after flushing the persistent disarm. PrepareHardware claims it with InterlockedCompareExchange before board inspection, bus queries or mapping. Discovery failure consumes the permit. Release, rebalance and new device objects cannot renew it. Disarmed loads use the callback-free stub. Authorized devices register only prepare and release. Discovery checks board and PCI identity, correlates resources, bounds capability reads and unmaps on success and rollback. The DMA, IRQ, D0, firmware, codec and amplifier paths remain closed.
+DriverEntry publishes one driver-wide LONG permit only after flushing the persistent disarm. PrepareHardware claims it with InterlockedCompareExchange before board inspection, bus queries or mapping. Discovery failure consumes the permit. Release, rebalance and new device objects cannot renew it. Disarmed loads use the callback-free stub. Authorized devices register only prepare and release. Diagnostic D0 entry independently returns before any controller access. Discovery checks board and PCI identity, correlates resources, bounds capability reads and unmaps on success and rollback. The DMA, IRQ, D0, firmware, codec and amplifier paths remain closed.
 
 Keep the hardware hold until both Windows configurations pass and the original Release artifact, exact checkout revision and member hashes are independently verified. A locally signed catalog also requires the separate membership and trust checks above.

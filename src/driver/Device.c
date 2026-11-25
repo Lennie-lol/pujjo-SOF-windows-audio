@@ -611,7 +611,7 @@ SofEvtDeviceD0Entry(
     _In_ WDF_POWER_DEVICE_STATE PreviousState
 )
 {
-#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)
+#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) || defined(PUJJO_DSP_BOOT_DIAGNOSTIC)
     /* Default development build is NEVER allowed to power or boot Pujjo DSP.
        This is not an installable or hardware-test-ready audio driver. */
     UNREFERENCED_PARAMETER(Device);
@@ -651,14 +651,6 @@ SofEvtDeviceD0Entry(
 
     /* The loader is the sole owner of the cold firmware boot sequence.
      * No speculative HDMI/HDA/SSP graph creation or codec programming here. */
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
-    if (!g_CanaryArmed || g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT ||
-        ctx->EnablePortCls != 0)
-        return STATUS_NOT_SUPPORTED;
-    /* Consume the in-memory authorization too, before any firmware boot.
-     * DriverEntry already consumed persistent authorization. */
-    g_CanaryArmed = FALSE;
-#endif
     /* Re-read at D0 entry. The bus owns these PCI command bits and their
      * state during PrepareHardware need not be their state at DMA start. */
     BUS_INTERFACE_STANDARD busInterface;

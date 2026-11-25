@@ -52,8 +52,8 @@ assert prepare.index("g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT") < prepare.
     "WdfFdoQueryForInterface"
 )
 d0 = device.split("SofEvtDeviceD0Entry(", 1)[1]
-assert "g_CanaryArmed = FALSE;" in d0
-assert d0.index("g_CanaryArmed = FALSE;") < d0.index("SofStartFirmwareBoot(ctx, NULL);")
+assert "|| defined(PUJJO_DSP_BOOT_DIAGNOSTIC)" in d0.split("#else", 1)[0]
+assert "return STATUS_NOT_SUPPORTED;" in d0.split("#else", 1)[0]
 
 for name in ("SafeBootPolicy", "BootSafetyToken", "ArmedTesting", "EnablePortCls"):
     assert f"HKR,Parameters,{name},0x00010001,0" in inf
