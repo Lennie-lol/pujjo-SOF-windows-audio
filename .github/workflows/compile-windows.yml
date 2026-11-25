@@ -208,6 +208,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $revision = (git rev-parse HEAD).Trim()
           ./scripts/Verify-PujjoDspBootDiagnostic.ps1 -SubmissionDirectory "$env:RUNNER_TEMP/pujjo-dsp-boot-only" -ExpectedRevision $revision
+      - name: Exercise local diagnostic verification gates
+        if: matrix.configuration == 'Release'
+        shell: powershell
+        run: ./tests/Test-PujjoLocalDiagnostic.ps1
       - name: Verify DSP submission with Windows PowerShell 5.1
         if: matrix.configuration == 'Release'
         shell: powershell
