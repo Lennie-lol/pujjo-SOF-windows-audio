@@ -42,6 +42,15 @@ NTSYSAPI NTSTATUS NTAPI ZwFlushKey(_In_ HANDLE KeyHandle);
 #error DSP diagnostic must be boot-only and must not consume a replacement NHLT
 #endif
 
+#if defined(PUJJO_DMIC_ENUMERATION_CANDIDATE) && ( \
+    !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) || \
+    !defined(PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED) || \
+    !defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO) || \
+    defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG) || \
+    defined(PUJJO_REVIEWED_TOPOLOGY_NHLT) || defined(PUJJO_DSP_BOOT_DIAGNOSTIC))
+#error The DMIC-only development candidate must not include analog or diagnostic activation
+#endif
+
 static BOOLEAN SofHardwareDevelopmentAllowed(VOID)
 {
 #if defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)
@@ -290,6 +299,42 @@ static VOID SofLogDmicProfile(VOID)
     SofNhltFreeAcpiTable(table);
     SofLogBreadcrumb("[DMIC] Evidence only; firmware, DMA and audio child locked.\n");
 }
+/* Verify the exact source fallback without attaching it to a device. */
+static VOID SofLogEmbeddedDmicProfile(VOID)
+{
+    pj_dmic_profile profile;
+    char msg[192];
+    NTSTATUS status = SofNhltInspectEmbeddedDmic(&profile);
+    if (NT_SUCCESS(status)) {
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[DMIC] Embedded microphone-only route valid: %u bytes %uHz PDM; NOT activated.\n",
+            profile.bytes, profile.pdm_clock_hz);
+    } else {
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[DMIC] Embedded microphone-only route rejected: 0x%08x\n", status);
+    }
+    SofLogBreadcrumb(msg);
+}
+
+/* Query only: never invoke DeviceReset or reset platform resources. */
+static VOID SofLogResetCapability(WDFDEVICE Device)
+{
+    DEVICE_RESET_INTERFACE_STANDARD reset = {0};
+    char msg[160];
+    NTSTATUS status = WdfFdoQueryForInterface(Device, &GUID_DEVICE_RESET_INTERFACE_STANDARD,
+        (PINTERFACE)&reset, sizeof(reset), 1, NULL);
+    if (NT_SUCCESS(status)) {
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[Reset] Bus reset interface present: types=0x%08x handler=%u; not invoked.\n",
+            reset.SupportedResetTypes, reset.DeviceReset != NULL);
+        if (reset.InterfaceDereference) reset.InterfaceDereference(reset.Context);
+    } else {
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[Reset] Bus reset interface unavailable: 0x%08x\n", status);
+    }
+    SofLogBreadcrumb(msg);
+}
+
 #endif
 
 /**
@@ -366,7 +411,7 @@ SofEvtDevicePrepareHardware(
 
     /* Only the Intel Alder Lake-N 54C8 controller is in scope.
      * Never silently default to another Intel DSP when PCI config access fails. */
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+#if defined(PUJJO_DSP_BOOT_DIAGNOSTIC) || defined(PUJJO_DMIC_ENUMERATION_CANDIDATE)
     if (pciConfig.u.type0.SubVendorID != 0 || pciConfig.u.type0.SubSystemID != 0)
         return STATUS_NOT_SUPPORTED;
 #endif
@@ -430,6 +475,8 @@ SofEvtDevicePrepareHardware(
     }
     SofUnmapPreparedBars(ctx);
     SofLogDmicProfile();
+    SofLogEmbeddedDmicProfile();
+    SofLogResetCapability(Device);
     SofLogBreadcrumb("[Probe] Read-only resource discovery complete; DMA and firmware boot locked.\n");
     return STATUS_SUCCESS;
 #else
@@ -495,11 +542,21 @@ SofEvtDevicePrepareHardware(
         NTSTATUS nhltStatus = SofNhltQueryAcpiTable(&nhltBuffer, &nhltSize);
         BOOLEAN topologySource = FALSE;
         if (nhltStatus == STATUS_NOT_FOUND || nhltStatus == STATUS_OBJECT_NAME_NOT_FOUND) {
+#ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE
+            nhltStatus = SofNhltQueryPujjoDmicFallback(nhltStatus, &nhltBuffer, &nhltSize);
+#else
             nhltStatus = SofNhltQueryPujjoFallback(nhltStatus, &nhltBuffer, &nhltSize);
+#endif
             topologySource = NT_SUCCESS(nhltStatus);
         }
         if (NT_SUCCESS(nhltStatus) && nhltBuffer != NULL) {
             nhltStatus = SofNhltParse(nhltBuffer, nhltSize, &ctx->NhltInfo);
+#ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE
+            if (NT_SUCCESS(nhltStatus)) {
+                pj_dmic_profile profile;
+                nhltStatus = SofNhltInspectPujjoDmic(nhltBuffer, nhltSize, &profile);
+            }
+#endif
             if (NT_SUCCESS(nhltStatus)) {
                 ctx->NhltTable = nhltBuffer;
                 ctx->NhltTableSize = nhltSize;
@@ -518,6 +575,14 @@ SofEvtDevicePrepareHardware(
         }
         SofLogBreadcrumb(msg);
     }
+
+#ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE
+    /* Do not boot a DSP for which no microphone configuration was admitted. */
+    if (!ctx->NhltTable) {
+        status = STATUS_NOT_FOUND;
+        goto PreparationFailed;
+    }
+#endif
 
     /* These settings request an audio adapter after firmware boot. */
     ctx->ArmedTesting = 0;

@@ -98,3 +98,7 @@ flush and zero readbacks before permission. Do not reboot with a leftover
 request. A failure consumes the attempt: clear any remaining authorization
 and preserve its logs before any further decision. Any subsequent reboot
 must be disarmed.
+
+## v0.0.8.0 microphone integration
+
+The unsigned resource diagnostic adds only embedded DMIC structural evidence and a read-only reset-interface query. The separate microphone-only candidate is compile-only, rejects DriverEntry and independently blocks firmware execution. See [v8 review](PUJJO_DMIC_ENUMERATION_V8.md). A successful local signature is not permission to use the candidate.

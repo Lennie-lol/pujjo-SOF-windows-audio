@@ -66,7 +66,7 @@ static int pj_ipc4_mmio_span_valid(ULONG length, ULONG offset, ULONG bytes) {
 }
 static UCHAR bar[8192];
 static BDL storage[2][PAGE_SIZE/sizeof(BDL)];
-static unsigned allocs, frees, starts;
+static unsigned allocs, frees, starts, ctl_reads, poison_ctl_read;
 static PUCHAR drop;
 static ULONG readl(PUCHAR p) { ULONG v; memcpy(&v,p,4); return v; }
 #define SofDspRead32(base,off) readl((base)+(off))
@@ -78,7 +78,7 @@ static void WRITE_REGISTER_UCHAR(PUCHAR p, UCHAR v) {
     if (p == drop) return;
     if (p == bar+0x83) *p &= (UCHAR)~v; else *p=v;
 }
-static ULONG SofCodeLoaderReadControl(PUCHAR p) { return *p; }
+static ULONG SofCodeLoaderReadControl(PUCHAR p) { ++ctl_reads; return ctl_reads==poison_ctl_read ? MAXULONG : *p; }
 static void SofCodeLoaderWriteControl(PUCHAR p, ULONG v) {
     if (v & SOF_HDA_SD_CTL_DMA_START) ++starts;
     if (p != drop) *p=(UCHAR)v;
@@ -151,6 +151,28 @@ int main(void) {
         assert(!d.Published && frees==2);
         if (offset!=0x204) assert(readl(bar+0x204)==0x40000000u);
         if (offset!=0x1048) assert(bar[0x1048]==0x43);
+    }
+    /* Lost access on the final control read, even after BDL zero,
+       must retain buffers; zero BDL alone is not a stop proof. */
+    {
+        SOF_ICCMAX_DMA d={0};
+        memset(bar,0,sizeof(bar)); drop=NULL; allocs=frees=starts=0;
+        assert(SofStartIccmaxDma(&c,&d)==0);
+        ctl_reads=0; poison_ctl_read=4;
+        assert(SofStopIccmaxDma(&c,&d)==STATUS_DEVICE_NOT_READY);
+        assert(d.Published && frees==0);
+        poison_ctl_read=0;
+        assert(SofStopIccmaxDma(&c,&d)==0 && frees==2);
+    }
+    {
+        SOF_ICCMAX_DMA d={0};
+        memset(bar,0,sizeof(bar)); drop=NULL; allocs=frees=starts=0;
+        assert(SofStartIccmaxDma(&c,&d)==0);
+        bar[0x83]=0xff;
+        assert(SofStopIccmaxDma(&c,&d)==STATUS_DEVICE_NOT_READY);
+        assert(d.Published && frees==0);
+        bar[0x83]=0;
+        assert(SofStopIccmaxDma(&c,&d)==0 && frees==2);
     }
     for (unsigned i=0;i<2;++i) {
         SOF_ICCMAX_DMA d={0};

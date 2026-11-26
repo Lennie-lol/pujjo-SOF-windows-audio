@@ -909,6 +909,42 @@ static NTSTATUS SofLoaderDmaAddressesMatch(PUCHAR registers, ULONG low, ULONG hi
     return STATUS_SUCCESS;
 }
 
+/* Both boot descriptors use exactly the same stop proof. A transfer error
+ * and ownership failure are distinct: a stopped DMA can report a transfer
+ * error, but only verified RUN/reset/address state permits freeing its buffers.
+ * The caller owns the mapped descriptor and must not race another start. */
+static NTSTATUS SofStopAndDetachBootStream(PUCHAR Registers, UCHAR *DmaStatus)
+{
+    ULONG ctl, attempt;
+    if (!Registers || !DmaStatus) return STATUS_DEVICE_NOT_READY;
+    ctl = SofCodeLoaderReadControl(Registers);
+    if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
+    SofCodeLoaderWriteControl(Registers, ctl & ~SOF_HDA_SD_CTL_DMA_START);
+    for (attempt = 0; attempt < 500u; ++attempt) {
+        ctl = SofCodeLoaderReadControl(Registers);
+        if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
+        if (!(ctl & SOF_HDA_SD_CTL_DMA_START)) break;
+        KeStallExecutionProcessor(10);
+    }
+    if (attempt == 500u) return STATUS_IO_TIMEOUT;
+    *DmaStatus = READ_REGISTER_UCHAR(Registers + SOF_HDA_ADSP_REG_SD_STS);
+    if (*DmaStatus == 0xffu) return STATUS_DEVICE_NOT_READY;
+    SofCodeLoaderWriteControl(Registers, 0);
+    ctl = SofCodeLoaderReadControl(Registers);
+    if (ctl == MAXULONG || (ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)))
+        return STATUS_DEVICE_NOT_READY;
+    WRITE_REGISTER_UCHAR(Registers + SOF_HDA_ADSP_REG_SD_STS, SOF_HDA_CL_DMA_SD_INT_MASK);
+    writel(0, Registers + SOF_HDA_ADSP_REG_SD_BDLPL);
+    writel(0, Registers + SOF_HDA_ADSP_REG_SD_BDLPU);
+    if (!NT_SUCCESS(SofLoaderDmaAddressesMatch(Registers, 0, 0)))
+        return STATUS_DEVICE_NOT_READY;
+    /* Check control again after address readback, not just before detachment. */
+    ctl = SofCodeLoaderReadControl(Registers);
+    if (ctl == MAXULONG || (ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)))
+        return STATUS_DEVICE_NOT_READY;
+    return STATUS_SUCCESS;
+}
+
 /* cAVS 2.5 ICCMAX boot workaround, as used by the Linux ADL-N
  * descriptor. A temporary capture descriptor keeps the platform guardband
  * active during boot. It is unrelated to microphone routing. */
@@ -1012,27 +1048,12 @@ static NTSTATUS SofStopIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
 {
     NTSTATUS status = STATUS_SUCCESS;
     if (Dma->Published) {
-        ULONG ctl = SofCodeLoaderReadControl(Dma->Registers), attempt;
         ULONG ppctl;
         UCHAR ltrp, dmaStatus;
-        if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
-        SofCodeLoaderWriteControl(Dma->Registers, 0);
-        for (attempt = 0; attempt < 500u; ++attempt) {
-            ctl = SofCodeLoaderReadControl(Dma->Registers);
-            if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
-            if (!(ctl & SOF_HDA_SD_CTL_DMA_START)) break;
-            KeStallExecutionProcessor(10);
-        }
-        if (attempt == 500u) return STATUS_IO_TIMEOUT;
-        writel(0, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPL);
-        writel(0, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPU);
-        status = SofLoaderDmaAddressesMatch(Dma->Registers, 0, 0);
+        status = SofStopAndDetachBootStream(Dma->Registers, &dmaStatus);
         if (!NT_SUCCESS(status)) return status;
         Dma->Published = FALSE;
-        dmaStatus = READ_REGISTER_UCHAR(Dma->Registers + SOF_HDA_ADSP_REG_SD_STS);
-        if (dmaStatus == 0xffu) status = STATUS_DEVICE_NOT_READY;
-        else if (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS) status = STATUS_IO_DEVICE_ERROR;
-        WRITE_REGISTER_UCHAR(Dma->Registers + SOF_HDA_ADSP_REG_SD_STS, SOF_HDA_CL_DMA_SD_INT_MASK);
+        if (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS) status = STATUS_IO_DEVICE_ERROR;
         ppctl = readl(Dma->Ppctl);
         if (ppctl != MAXULONG) {
             writel((ppctl & ~1u) | (Dma->OriginalDecoupled ? 1u : 0u), Dma->Ppctl);
@@ -1117,6 +1138,13 @@ SofStartFirmwareBoot(
     /* Deliberately no DSP power, ROM commands, or DMA on source-only builds. */
     UNREFERENCED_PARAMETER(Ctx);
     UNREFERENCED_PARAMETER(OptionalFwPath);
+    return STATUS_NOT_SUPPORTED;
+#else
+#ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE
+    /* Source-only candidate: no physical DMA ownership qualification. */
+    UNREFERENCED_PARAMETER(Ctx);
+    UNREFERENCED_PARAMETER(OptionalFwPath);
+    SofLogBreadcrumb("[Safety] DMIC candidate: DMA lifetime not qualified; firmware boot blocked.\n");
     return STATUS_NOT_SUPPORTED;
 #else
     SOF_ICCMAX_DMA iccmax = {0};
@@ -1623,43 +1651,14 @@ SofStartFirmwareBoot(
 stop_dma:
     /* 7. Stop Code Loader DMA and disable SPIB */
     {
-        ULONG ctlVal = SofCodeLoaderReadControl(streamRegs);
-        if (ctlVal == 0xFFFFFFFFu) {
-            status = STATUS_DEVICE_NOT_READY;
+        UCHAR dmaStatus;
+        NTSTATUS stopStatus = SofStopAndDetachBootStream(streamRegs, &dmaStatus);
+        if (!NT_SUCCESS(stopStatus)) {
+            status = stopStatus;
             goto dma_unconfirmed;
         }
-        ctlVal &= ~SOF_HDA_SD_CTL_DMA_START;
-        SofCodeLoaderWriteControl(streamRegs, ctlVal);
-
-        for (timeout = 0; timeout < 500u; ++timeout) {
-            ctlVal = SofCodeLoaderReadControl(streamRegs);
-            if (ctlVal != 0xFFFFFFFFu && !(ctlVal & SOF_HDA_SD_CTL_DMA_START))
-                break;
-            KeStallExecutionProcessor(10);
-        }
-        if (timeout == 500u) {
-            status = STATUS_IO_TIMEOUT;
-            goto dma_unconfirmed;
-        }
-
-        /* Catch transfer errors even if they appeared at the end of the poll. */
-        UCHAR dmaStatus = READ_REGISTER_UCHAR(streamRegs + SOF_HDA_ADSP_REG_SD_STS);
-        if (NT_SUCCESS(status)) {
-            if (dmaStatus == 0xffu)
-                status = STATUS_DEVICE_NOT_READY;
-            else if (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS)
-                status = STATUS_IO_DEVICE_ERROR;
-        }
-
-        /* Confirm RUN clear and address detachment before freeing buffers. */
-        SofCodeLoaderWriteControl(streamRegs, 0);
-        WRITE_REGISTER_UCHAR(streamRegs + SOF_HDA_ADSP_REG_SD_STS, SOF_HDA_CL_DMA_SD_INT_MASK);
-        writel(0, streamRegs + SOF_HDA_ADSP_REG_SD_BDLPL);
-        writel(0, streamRegs + SOF_HDA_ADSP_REG_SD_BDLPU);
-        if (!NT_SUCCESS(SofLoaderDmaAddressesMatch(streamRegs, 0, 0))) {
-            status = STATUS_DEVICE_NOT_READY;
-            goto dma_unconfirmed;
-        }
+        if (NT_SUCCESS(status) && (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS))
+            status = STATUS_IO_DEVICE_ERROR;
         dmaConfigured = FALSE;
         {
             ULONG intctl = readl(bar0 + SOF_HDA_INTCTL);
@@ -1830,6 +1829,7 @@ dma_unconfirmed:
     if (!NT_SUCCESS(SofRestoreBootController(Ctx)))
         SofLogBreadcrumb("[HDA] Controller rollback could not be confirmed.\n");
     return status;
+#endif /* PUJJO_DMIC_ENUMERATION_CANDIDATE */
 #endif /* PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT */
 }
 

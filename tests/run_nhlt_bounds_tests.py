@@ -22,6 +22,7 @@ shim = r'''
 #include <string.h>
 #include <stdlib.h>
 #define _KERNEL_MODE
+#define PUJJO_DMIC_ENUMERATION_CANDIDATE
 typedef void *PVOID;
 #define STATUS_OBJECT_NAME_NOT_FOUND -5
 #define STATUS_INSUFFICIENT_RESOURCES -6
@@ -179,6 +180,23 @@ static void test_lookup(void) {
     fix_checksum(bytes,first+ep_bytes);
     void *owned = NULL;
     ULONG owned_bytes = 0;
+    pj_dmic_profile embedded;
+    assert(SofNhltInspectEmbeddedDmic(&embedded)==STATUS_SUCCESS);
+    assert(embedded.bytes==1848u && embedded.pdm_clock_hz==2400000u);
+    assert(SofNhltQueryPujjoDmicFallback(STATUS_INVALID_PARAMETER,&owned,&owned_bytes)==STATUS_INVALID_PARAMETER);
+    assert(!owned && !owned_bytes);
+    assert(SofNhltQueryPujjoDmicFallback(STATUS_SUCCESS,&owned,&owned_bytes)==STATUS_INVALID_PARAMETER);
+    assert(!owned && !owned_bytes);
+    for(int missing=0;missing<2;missing++) {
+        assert(SofNhltQueryPujjoDmicFallback(missing?STATUS_OBJECT_NAME_NOT_FOUND:STATUS_NOT_FOUND,&owned,&owned_bytes)==STATUS_SUCCESS);
+        assert(owned_bytes==sizeof(PujjoDmicNhlt) && owned!=PujjoDmicNhlt);
+        assert(!memcmp(owned,PujjoDmicNhlt,owned_bytes));
+        SOF_NHLT_INFO fallback;
+        assert(SofNhltParse(owned,owned_bytes,&fallback)==STATUS_SUCCESS);
+        assert(fallback.TotalEndpoints==1 && fallback.DmicEndpointsCount==1 &&
+            !fallback.SspEndpointsCount && !fallback.SdwEndpointsCount);
+        free(owned); owned=NULL; owned_bytes=0;
+    }
     assert(SofNhltQueryPujjoFallback(STATUS_NOT_FOUND,&owned,&owned_bytes)==STATUS_NOT_FOUND);
     assert(!owned && !owned_bytes);
     assert(SofNhltCopyFallback(STATUS_INVALID_PARAMETER,bytes,sizeof(bytes),&owned,&owned_bytes)==STATUS_INVALID_PARAMETER);

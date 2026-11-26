@@ -77,7 +77,7 @@ BOOLEAN g_CanaryArmed = FALSE;
 
 /** @brief Active safe boot policy governing driver recovery behavior. */
 /* Boot-only diagnostics fail closed even if the Parameters key is missing. */
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+#if defined(PUJJO_DSP_BOOT_DIAGNOSTIC) || defined(PUJJO_DMIC_ENUMERATION_CANDIDATE)
 ULONG g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
 #else
 ULONG g_SafeBootPolicy = SOF_SAFE_BOOT_PRODUCTION;
@@ -268,6 +268,14 @@ DriverEntry(
     _In_ PUNICODE_STRING RegistryPath
 )
 {
+#ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE
+    UNREFERENCED_PARAMETER(DriverObject);
+    UNREFERENCED_PARAMETER(RegistryPath);
+    /* Compile-only route integration: never consume a canary or grant hardware access. */
+    SofLogBreadcrumb("[Safety] DMIC enumeration candidate is compile-only; refusing driver load.\n");
+    return STATUS_NOT_SUPPORTED;
+#else
+
     WDF_DRIVER_CONFIG config;
     NTSTATUS status;
     char msg[256];
@@ -297,7 +305,7 @@ DriverEntry(
 
 #ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
     ULONG requestedPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
-    SofLogBreadcrumb("[Safety] Pujjo resource diagnostic v0.0.7.0\n");
+    SofLogBreadcrumb("[Safety] Pujjo resource diagnostic v0.0.8.0\n");
     if (!NT_SUCCESS(regStatus)) {
         RtlStringCbPrintfA(msg, sizeof(msg),
             "[Safety] Open diagnostic parameters failed: 0x%08x\n", (ULONG)regStatus);
@@ -423,6 +431,7 @@ DriverEntry(
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] DriverEntry succeeded.\n");
     return STATUS_SUCCESS;
+#endif /* PUJJO_DMIC_ENUMERATION_CANDIDATE */
 }
 
 /**
@@ -453,7 +462,7 @@ SofIsPciDspDevice(
         if (pBuffer != NULL) {
             PWCHAR pCurrent = pBuffer;
             while (*pCurrent != L'\0') {
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+#if defined(PUJJO_DSP_BOOT_DIAGNOSTIC) || defined(PUJJO_DMIC_ENUMERATION_CANDIDATE)
                 if (_wcsicmp(pCurrent, L"PCI\\VEN_8086&DEV_54C8&SUBSYS_00000000") == 0) {
 #else
                 if (wcsstr(pCurrent, L"PCI\\VEN_8086&DEV_E428") != NULL ||
@@ -502,6 +511,7 @@ SofEvtDeviceAdd(
     SofLogBreadcrumb("[5] SofEvtDeviceAdd entered!\n");
 
 #ifndef PUJJO_DSP_BOOT_DIAGNOSTIC
+#ifndef PUJJO_DMIC_ENUMERATION_CANDIDATE
     /* Check if this is a filter device (e.g. LowerFilter on SDCA Audio Function) */
     if (SofIsSdcaFunctionDevice(DeviceInit)) {
         if (!g_CanaryArmed) {
@@ -513,6 +523,7 @@ SofEvtDeviceAdd(
         SofLogBreadcrumb("[5-Filter] Canary Armed: SDCA Audio Function device detected! Attaching lower filter.\n");
         return SofSdcaFilterDeviceAdd(Driver, DeviceInit);
     }
+#endif
 
 #endif
     /* Reject any device that is not our PCI DSP */

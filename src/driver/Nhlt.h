@@ -253,7 +253,12 @@ NTSTATUS SofNhltCopyConfiguration(
 NTSTATUS SofNhltInspectPujjoDmic(const void *Table, size_t Bytes,
                                 pj_dmic_profile *Profile);
 
+NTSTATUS SofNhltInspectEmbeddedDmic(pj_dmic_profile *Profile);
+
 #ifdef _KERNEL_MODE
+#ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE
+NTSTATUS SofNhltQueryPujjoDmicFallback(NTSTATUS AcpiStatus, PVOID *Buffer, PULONG Bytes);
+#endif
 NTSTATUS SofNhltQueryPujjoFallback(NTSTATUS AcpiStatus, PVOID *Buffer, PULONG Bytes);
 #endif
 

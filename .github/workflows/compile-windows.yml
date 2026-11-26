@@ -127,6 +127,7 @@ jobs:
           foreach ($case in @(
             @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_ENABLE_EXPERIMENTAL_AUDIO /DPUJJO_ENABLE_EXPERIMENTAL_ANALOG' },
             @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_DSP_BOOT_DIAGNOSTIC'; Name='dsp-boot-only' },
+            @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_ENABLE_EXPERIMENTAL_AUDIO /DPUJJO_DMIC_ENUMERATION_CANDIDATE'; Name='dmic-enumeration-compile-only' },
             @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_READONLY_PROBE'; Name='codec-identity' },
             @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_CONTROL'; Name='codec-runtime' },
             @{ Project='pujjo_rt1019_probe'; Defines='/DPJ1019_ENABLE_CONTROL'; Name='amp-runtime' }

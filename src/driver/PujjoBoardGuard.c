@@ -26,7 +26,7 @@ BOOLEAN PujjoBoardIdentityMatches(void)
     if (!raw) return FALSE;
     st = AuxKlibGetSystemFirmwareTable(PUJJO_RSMB_PROVIDER, 0, raw, size, &actual);
     if (NT_SUCCESS(st) && actual >= 8 && actual <= size) {
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+#if defined(PUJJO_DSP_BOOT_DIAGNOSTIC) || defined(PUJJO_DMIC_ENUMERATION_CANDIDATE)
         accepted = PujjoMatchRawSmbiosRev3(raw, actual) ? TRUE : FALSE;
 #else
         accepted = PujjoMatchRawSmbios(raw, actual) ? TRUE : FALSE;

@@ -23,7 +23,8 @@ assert 'PCI\\VEN_1022&DEV_' not in inf
 
 device = (src / 'Device.c').read_text()
 assert 'PujjoBoardIdentityMatches()' in device
-assert device.index('PujjoBoardIdentityMatches()') < device.index('WdfFdoQueryForInterface')
+prepare = device.split("SofEvtDevicePrepareHardware(", 1)[1]
+assert prepare.index('PujjoBoardIdentityMatches()') < prepare.index('WdfFdoQueryForInterface') < prepare.index('SofLogResetCapability(Device)')
 assert 'busInterface.SetBusData(' not in device
 assert 'PCI Command updated:' not in device
 assert 'ctx->VendorId != 0x8086 || ctx->DeviceId != 0x54C8' in device

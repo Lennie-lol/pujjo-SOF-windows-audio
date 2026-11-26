@@ -246,7 +246,8 @@ static NTSTATUS AudioSelectFormat(PSOF_DEVICE_CONTEXT Ctx)
     NTSTATUS status;
     if (!Ctx) return STATUS_INVALID_PARAMETER;
     if (!Ctx->NhltTable || !Ctx->NhltTableSize) return STATUS_NOT_FOUND;
-    /* Native four-slot PCM99 only. Never publish an arbitrary stereo route
+    /* Reviewed four-slot PCM99 only (native or explicitly scoped DMIC candidate).
+     * Never publish an arbitrary stereo route
      * just because firmware happens to advertise some other DMIC format. */
     status = SofNhltInspectPujjoDmic(Ctx->NhltTable, Ctx->NhltTableSize, &profile);
     if (!NT_SUCCESS(status)) return status;

@@ -57,13 +57,13 @@ assert "return STATUS_NOT_SUPPORTED;" in d0.split("#else", 1)[0]
 
 for name in ("SafeBootPolicy", "BootSafetyToken", "ArmedTesting", "EnablePortCls"):
     assert f"HKR,Parameters,{name},0x00010001,0" in inf
-assert re.findall(r"(?im)^\s*DriverVer\s*=\s*([^\r\n]+)", inf) == ["11/26/2026,0.0.7.0"]
+assert re.findall(r"(?im)^\s*DriverVer\s*=\s*([^\r\n]+)", inf) == ["11/26/2026,0.0.8.0"]
 assert "DriverVer=11/23/2026,0.0.2.0" not in inf
 stage = (ROOT / "scripts/Stage-PujjoDspBootDiagnostic.ps1").read_text(encoding="utf-8")
 verify = (ROOT / "scripts/Verify-PujjoDspBootDiagnostic.ps1").read_text(encoding="utf-8")
-assert "Package version 0.0.7.0;" in stage
-assert "Package version 0.0.7.0;" in verify
-assert "Wrong diagnostic package version; expected 0.0.7.0" in verify
+assert "Package version 0.0.8.0;" in stage
+assert "Package version 0.0.8.0;" in verify
+assert "Wrong diagnostic package version; expected 0.0.8.0" in verify
 assert "'tests/test_forced_safe_kmdf_stub.py'" in suite
 entry = driver.split("DriverEntry(", 1)[1].split("WDF_DRIVER_CONFIG_INIT", 1)[0]
 diagnostic_entry = entry.split("#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC", 1)[1].split("#else", 1)[0]

@@ -5,7 +5,7 @@ from pathlib import Path
 import os, shlex, subprocess, tempfile
 root = Path(__file__).resolve().parents[1]
 device = (root / "src/driver/Device.c").read_text()
-body = device[device.index("static VOID SofLogDmicProfile(VOID)"):device.index("\n#endif",device.index("static VOID SofLogDmicProfile(VOID)"))]
+body = device[device.index("static VOID SofLogDmicProfile(VOID)"):device.index("\n/* Verify the exact source fallback",device.index("static VOID SofLogDmicProfile(VOID)"))]
 assert "SofNhltQueryPujjoFallback" not in body
 assert "Wdf" not in body and "readl(" not in body and "writel(" not in body
 prepare = device[device.index("SofEvtDevicePrepareHardware("):]

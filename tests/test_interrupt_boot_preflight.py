@@ -87,7 +87,9 @@ print("PASS: cold boot ownership and no speculative audio activation on D0 entry
 ack=boot[boot.index("/* Wait for ROM IPC ACK"):boot.index("/* Acknowledge ROM")]
 assert "ack == 0xFFFFFFFFu" in ack and "if (timeout == 2000u)" in ack
 stop=boot[boot.index("stop_dma:"):boot.index("/* Re-read the ROM state AFTER")]
-assert stop.index("!(ctlVal & SOF_HDA_SD_CTL_DMA_START)") < stop.index("goto dma_unconfirmed;", stop.index("if (timeout == 500u)")) < stop.index("SofFreeDmaBuffer")
+detach = loader.split("static NTSTATUS SofStopAndDetachBootStream(", 1)[1].split("\n}", 1)[0]
+assert detach.index("!(ctl & SOF_HDA_SD_CTL_DMA_START)") < detach.index("if (attempt == 500u)") < detach.index("writel(0, Registers + SOF_HDA_ADSP_REG_SD_BDLPL)")
+assert stop.index("SofStopAndDetachBootStream(") < stop.index("goto dma_unconfirmed;") < stop.index("SofFreeDmaBuffer")
 assert "SofFreeDmaBuffer" not in boot.split("dma_unconfirmed:",1)[1]
 assert "ExWaitForRundownProtectionRelease" in ipc
 entry = ipc.split("NTSTATUS\nSofIpcSendMessage(",1)[1].split("\n}",1)[0]
@@ -96,7 +98,7 @@ assert device.index("SofDisconnectAudioChild(ctx)", device.index("SofEvtDeviceD0
 
 # SPIB teardown follows confirmed RUN clear and rejects inaccessible MMIO.
 spib_stop = stop.split("if (Ctx->SpbCapOffset)",1)[1]
-assert stop.index("if (timeout == 500u)") < stop.index("ULONG spbControl = readl(")
+assert stop.index("SofStopAndDetachBootStream(") < stop.index("ULONG spbControl = readl(")
 assert spib_stop.index("if (spbControl == 0xFFFFFFFFu)") < spib_stop.index("goto boot_failed;") < spib_stop.index("writel(0, spibAddr)")
 assert "writel(spbControl & ~(1u << streamIndex)" in spib_stop
 assert "writel(readl(" not in spib_stop
@@ -185,7 +187,7 @@ assert core_start.index('SofCavsCoreTransition(Ctx, reset, 0') < core_start.inde
 assert boot.index('SofStartIccmaxDma(Ctx, &iccmax)') < boot.index('SofCavsCoreTransition(Ctx, HDA_DSP_ADSPCS_SPA_MASK(1)') < boot.index('SofDspWrite32(bar4, Ctx->HwDesc->HipcIdr, ipcHdr)')
 assert boot.index('SofStopIccmaxDma(Ctx, &iccmax)') < boot.index('KeWaitForSingleObject(&Ctx->FwReadyEvent')
 iccmax=loader.split('static NTSTATUS SofStopIccmaxDma(',1)[1].split('static NTSTATUS SofQueryBootedFirmwareVersion',1)[0]
-assert iccmax.index('if (attempt == 500u) return STATUS_IO_TIMEOUT;') < iccmax.index('Dma->Published = FALSE;') < iccmax.index('SofFreeDmaBuffer(')
+assert iccmax.index('SofStopAndDetachBootStream(') < iccmax.index('Dma->Published = FALSE;') < iccmax.index('SofFreeDmaBuffer(')
 print('PASS: cAVS register transitions reject timeout, missing acknowledgement, and disappearing MMIO')
 
 # Execute actual descriptor readback logic against host-only MMIO doubles.
@@ -236,9 +238,10 @@ with tempfile.TemporaryDirectory(prefix='pj_loader_bdl_') as d:
                     *shlex.split(os.environ.get('CFLAGS','')),str(src),'-o',str(exe)],check=True,timeout=60)
     subprocess.run([str(exe)],check=True,timeout=10)
 assert boot.index('dmaConfigured = TRUE;') < boot.index('SofLoaderDmaAddressesMatch(streamRegs,') < boot.index('SofStartIccmaxDma(Ctx, &iccmax)')
-assert stop.index('writel(0, streamRegs + SOF_HDA_ADSP_REG_SD_BDLPU)') < stop.index('SofLoaderDmaAddressesMatch(streamRegs, 0, 0)') < stop.index('dmaConfigured = FALSE;')
-assert 'goto dma_unconfirmed;' in stop.split('SofLoaderDmaAddressesMatch(streamRegs, 0, 0)',1)[1].split('dmaConfigured = FALSE;',1)[0]
-assert iccmax.index('SofLoaderDmaAddressesMatch(Dma->Registers, 0, 0)') < iccmax.index('Dma->Published = FALSE;')
+assert detach.index('writel(0, Registers + SOF_HDA_ADSP_REG_SD_BDLPU)') < detach.index('SofLoaderDmaAddressesMatch(Registers, 0, 0)') < detach.rindex('SofCodeLoaderReadControl(Registers)')
+assert stop.index('SofStopAndDetachBootStream(') < stop.index('dmaConfigured = FALSE;')
+assert 'goto dma_unconfirmed;' in stop.split('SofStopAndDetachBootStream(',1)[1].split('dmaConfigured = FALSE;',1)[0]
+assert iccmax.index('SofStopAndDetachBootStream(Dma->Registers, &dmaStatus)') < iccmax.index('Dma->Published = FALSE;')
 iccmax_start=loader.split('static NTSTATUS SofStartIccmaxDma(',1)[1].split('static NTSTATUS SofStopIccmaxDma(',1)[0]
 assert iccmax_start.index('SofLoaderDmaAddressesMatch(Dma->Registers,') < iccmax_start.index('SofCodeLoaderWriteControl(Dma->Registers, SOF_HDA_SD_CTL_DMA_START)')
 print('PASS: loader and ICCMAX BDL publication and detachment readback')
