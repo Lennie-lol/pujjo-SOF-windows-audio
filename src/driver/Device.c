@@ -24,6 +24,7 @@
 #include "Topo.h"
 #include "WaveRt.h"
 #include "PujjoAudioBus.h"
+#include "PujjoIpc4Protocol.h"
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_ANALOG
 #include "PujjoAnalog.h"
 #endif
@@ -255,6 +256,42 @@ static NTSTATUS SofSelectPciResources(
     return STATUS_SUCCESS;
 }
 
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+/* The native ACPI table is queried only after BARs have been unmapped.
+ * Missing/malformed NHLT is useful evidence, not a failure of PCI discovery.
+ * No fallback table is consulted and no route is enabled by this result. */
+static VOID SofLogDmicProfile(VOID)
+{
+    PVOID table = NULL;
+    ULONG bytes = 0;
+    pj_dmic_profile profile;
+    char msg[256];
+    NTSTATUS status = SofNhltQueryAcpiTable(&table, &bytes);
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[DMIC] Native ACPI NHLT status=0x%08x bytes=%u\n", status, bytes);
+    SofLogBreadcrumb(msg);
+    if (NT_SUCCESS(status) && table) {
+        status = SofNhltInspectPujjoDmic(table, bytes, &profile);
+        if (NT_SUCCESS(status)) {
+            ULONG fits = profile.bytes <= PJ_IPC4_MAX_MAILBOX_PAYLOAD -
+                (sizeof(struct sof_ipc4_copier_data) - sizeof(ULONG));
+            RtlStringCbPrintfA(msg, sizeof(msg),
+                "[DMIC] Native 48k/4ch/32bit structure valid: config=%u clock=%uHz divider=%u CIC=%u/%u FIR=%u/%u/%u/%u mailbox-fit=%u\n",
+                profile.bytes, profile.pdm_clock_hz, profile.clock_divider,
+                profile.cic_decimation[0], profile.cic_decimation[1],
+                profile.fir_decimation[0][0], profile.fir_decimation[0][1],
+                profile.fir_decimation[1][0], profile.fir_decimation[1][1], fits);
+        } else {
+            RtlStringCbPrintfA(msg, sizeof(msg),
+                "[DMIC] Native capture profile not admitted: status=0x%08x; no fallback activated.\n", status);
+        }
+        SofLogBreadcrumb(msg);
+    }
+    SofNhltFreeAcpiTable(table);
+    SofLogBreadcrumb("[DMIC] Evidence only; firmware, DMA and audio child locked.\n");
+}
+#endif
+
 /**
  * @brief KMDF EvtDevicePrepareHardware callback.
  *
@@ -392,6 +429,7 @@ SofEvtDevicePrepareHardware(
         }
     }
     SofUnmapPreparedBars(ctx);
+    SofLogDmicProfile();
     SofLogBreadcrumb("[Probe] Read-only resource discovery complete; DMA and firmware boot locked.\n");
     return STATUS_SUCCESS;
 #else

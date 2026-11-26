@@ -86,13 +86,16 @@ else:
 fixture = "\n".join("static const UCHAR %s[] = {%s};" % (name, ",".join(map(str, data)))
                     for name, data in zip(const_names, (ssp_table, ssp0, ssp1))) + "\n"
 if args.complete:
-    from assemble_pujjo_complete_nhlt import audit
+    from assemble_pujjo_complete_nhlt import audit, assemble_dmic_only
     complete = (folder / "complete-candidate-only.nhlt").read_bytes()
     dmic = (folder / "dmic/dmic0-reference.bin").read_bytes()
     audit(complete, ssp_table, dmic)
+    dmic_only = (folder / "dmic/dmic-only-candidate.nhlt").read_bytes()
+    if dmic_only != assemble_dmic_only(ssp_table, dmic):
+        raise ValueError("DMIC-only review candidate differs from verified independent sources")
     fixture += "#define TEST_COMPLETE_NHLT 1\n"
     fixture += "\n".join("static const UCHAR %s[] = {%s};" % (name, ",".join(map(str,data)))
-                         for name,data in (("complete_table",complete),("dmic_expected",dmic))) + "\n"
+                         for name,data in (("complete_table",complete),("dmic_expected",dmic),("dmic_only_table",dmic_only))) + "\n"
 analog_source = (root / "src/driver/PujjoAnalog.c").read_text()
 analog_helpers = analog_source[analog_source.index("static ULONG SspWord"):
                                analog_source.index("/* Firmware may acknowledge RUN")]
@@ -231,6 +234,9 @@ static void test_generated_ssp(void) {
     UCHAR actual[96];
     ULONG length=0;
     assert(SofNhltParse(ssp_table,sizeof(ssp_table),&info)==STATUS_SUCCESS);
+    pj_dmic_profile absent;
+    assert(SofNhltInspectPujjoDmic(ssp_table,sizeof(ssp_table),&absent)==STATUS_NOT_FOUND);
+    assert(!absent.bytes);
     assert(info.TotalEndpoints==3u && info.ExternalCodecPresent);
     assert(SofNhltCopyConfiguration(ssp_table,sizeof(ssp_table),&key,actual,96,&length)==STATUS_SUCCESS);
     assert(length==96 && !memcmp(actual,ssp0_expected,96));
@@ -280,6 +286,23 @@ static void test_complete(void) {
     ULONG length=0;
     UCHAR payload[sizeof(dmic_expected)], damaged[sizeof(complete_table)];
     SOF_NHLT_CONFIG_KEY key={NHLT_LINK_DMIC,0,NHLT_DIRECTION_CAPTURE,NHLT_DEVICE_DMIC,48000,4,32,32};
+    assert(SofNhltParse(complete_table,sizeof(complete_table),&info)==STATUS_SUCCESS);
+    pj_dmic_profile profile;
+    assert(SofNhltInspectPujjoDmic(complete_table,sizeof(complete_table),&profile)==STATUS_SUCCESS);
+    assert(profile.bytes==sizeof(dmic_expected) && profile.pdm_clock_hz>=2400000 &&
+           profile.pdm_clock_hz<=4800000);
+    assert(SofNhltInspectPujjoDmic(ssp_table,sizeof(ssp_table),&profile)==STATUS_NOT_FOUND);
+    assert(!profile.bytes);
+    assert(SofNhltParse(dmic_only_table,sizeof(dmic_only_table),&info)==STATUS_SUCCESS);
+    assert(info.TotalEndpoints==1 && info.DmicEndpointsCount==1 && !info.SspEndpointsCount && !info.SdwEndpointsCount);
+    assert(SofNhltInspectPujjoDmic(dmic_only_table,sizeof(dmic_only_table),&profile)==STATUS_SUCCESS);
+    assert(profile.bytes==sizeof(dmic_expected));
+    /* Repaired ACPI checksum must not hide a corrupt routing word. */
+    memcpy(damaged,dmic_only_table,sizeof(dmic_only_table));
+    damaged[sizeof(dmic_only_table)-sizeof(dmic_expected)+28]^=1u;
+    fix_checksum(damaged,sizeof(dmic_only_table));
+    assert(SofNhltInspectPujjoDmic(damaged,sizeof(dmic_only_table),&profile)==STATUS_INVALID_PARAMETER);
+    assert(!profile.bytes);
     assert(SofNhltParse(complete_table,sizeof(complete_table),&info)==STATUS_SUCCESS);
     assert(info.TotalEndpoints==4u && info.DmicEndpointsCount==1u && info.SspEndpointsCount==3u);
     assert(info.Dmic.Present && info.Dmic.ChannelCount==4u && info.Dmic.BitDepth==32u);
@@ -360,9 +383,10 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix="pj_nhlt_") as temp:
     src = Path(temp) / "nhlt.c"
     exe = Path(temp) / ("nhlt.exe" if os.name == "nt" else "nhlt")
-    src.write_text(shim + consts + packed + "\n#pragma pack(pop)\n" + info + body + fixture + analog_types + analog_helpers + main)
+    src.write_text('#include "PujjoDmicProfile.h"\n' + shim + consts + packed + "\n#pragma pack(pop)\n" + info + body + fixture + analog_types + analog_helpers + main)
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
-                    *shlex.split(os.environ.get("CFLAGS", "")), str(src), "-o", str(exe)], check=True, timeout=40)
+                    *shlex.split(os.environ.get("CFLAGS", "")), "-I"+str(root/"src/driver"), str(src),
+                    str(root/"src/driver/PujjoDmicProfile.c"), "-o", str(exe)], check=True, timeout=40)
     subprocess.run([str(exe)], check=True, timeout=15)
 if args.candidate_dir is not None:
     print("PASS: actual upstream-cross-checked SSP candidate artifacts through production NHLT parser")

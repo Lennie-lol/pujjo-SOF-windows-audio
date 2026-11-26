@@ -1,4 +1,8 @@
-# Local catalog verification for the v0.0.6.0 resource diagnostic
+# Local catalog verification for the resource diagnostic
+
+Current v0.0.7.0 scope: [native DMIC profile inspection](PUJJO_DMIC_PROFILE_V7.md).
+Sign and verify only the exact CI submission from the corresponding revision. The
+physical v0.0.6.0 diagnostic remains the known-good fallback.
 
 Use Windows PowerShell on the controlled Chromebook. Obtain the original `Pujjo-DSP-boot-only-UNSIGNED-SUBMISSION` ZIP directly from the known successful PR #29 Release job. Extract it separately from the directory containing the locally signed CAT and the two unchanged CI members. Obtain the full checkout SHA from that build's checkout log (a PR merge SHA is possible). The manifest and notice in a user-supplied directory cannot authenticate their own origin.
 

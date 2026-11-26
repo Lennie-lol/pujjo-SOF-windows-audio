@@ -7,6 +7,7 @@ import json, os, shlex, shutil, subprocess, sys, tempfile
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 CASES=[
+ ('dmic-profile','src/driver/PujjoDmicProfile.c','tests/test_pujjo_dmic_profile.c',[]),
  ('board','src/driver/PujjoBoardId.c','tests/test_pujjo_boardid.c',[]),
  ('resources','src/driver/peripheral/PujjoResourcePolicy.c','tests/test_pujjo_resource_policy.c',[]),
  ('acpi','src/driver/experimental/PujjoAcpiResources.c','tests/test_pujjo_acpi_resources.c',[]),
@@ -52,7 +53,7 @@ def main():
                     results.append(dict(test=label,status=status,exit_code=rc))
                     print(status,label,flush=True)
                 # Execute full transport sources and coordinator as well as parser bodies.
-                for runner in ('run_loader_transport_tests.py','run_windows_transport_tests.py','run_bringup_tests.py','run_dma_tests.py','run_nhlt_bounds_tests.py','run_ipc4_protocol_tests.py','run_dma_plan_tests.py','run_codec_control_tests.py','test_diagnostic_disarm.py'):
+                for runner in ('run_loader_transport_tests.py','run_windows_transport_tests.py','run_bringup_tests.py','run_dma_tests.py','run_nhlt_bounds_tests.py','run_ipc4_protocol_tests.py','run_dma_plan_tests.py','run_codec_control_tests.py','test_diagnostic_disarm.py','test_dmic_diagnostic.py','run_dmic_route_tests.py','run_nhlt_graph_tests.py'):
                     env=dict(os.environ,CC=cc,CFLAGS=shlex.join(flags))
                     cmd=[sys.executable,'tests/'+runner]
                     run=subprocess.run(cmd,cwd=ROOT,env=env,capture_output=True,text=True,timeout=120)

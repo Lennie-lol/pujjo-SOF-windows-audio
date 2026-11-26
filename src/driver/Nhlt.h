@@ -26,6 +26,7 @@
 #include <ksmedia.h>
 #endif
 #include <sof/sof_osal.h>
+#include "PujjoDmicProfile.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -246,6 +247,11 @@ NTSTATUS SofNhltCopyConfiguration(
     _In_ ULONG Capacity,
     _Out_ PULONG ConfigBytes
 );
+
+/* Strict native Pujjo capture profile, without copying or allocating payloads.
+ * Structural evidence only; never performs DSP or DMA operations. */
+NTSTATUS SofNhltInspectPujjoDmic(const void *Table, size_t Bytes,
+                                pj_dmic_profile *Profile);
 
 #ifdef _KERNEL_MODE
 NTSTATUS SofNhltQueryPujjoFallback(NTSTATUS AcpiStatus, PVOID *Buffer, PULONG Bytes);

@@ -45,6 +45,14 @@ typedef int NTSTATUS;
 #define NHLT_DIRECTION_RENDER 0
 #define PJ_IPC4_MAX_MAILBOX_PAYLOAD 4096u
 #define PJ_CATALOG_OK 0
+#define PJ_DMIC_RATE 48000u
+#define PJ_DMIC_CHANNELS 4u
+#define PJ_DMIC_BITS 32u
+typedef struct { ULONG bytes; } pj_dmic_profile;
+static int bad_dmic;
+static int pj_dmic_validate(const UCHAR *p,ULONG n,pj_dmic_profile *profile) {
+    assert(p && n==96 && profile);return !bad_dmic;
+}
 #define POOL_FLAG_NON_PAGED 0
 #define SOF_DEVICE_TAG 0
 #define SOF_IPC4_GTW_DMIC 12
@@ -126,7 +134,7 @@ suffix = r'''
 static void reset(DEVICE *d) {
     memset(d,0,sizeof(*d));d->NhltTable=d;d->NhltTableSize=1;d->FwState=1;
     fail_at=step=delete_fails=deletes=frees=allocations=active_memory=0;
-    bad_length=fail_lookup=fail_plan=copier_count=bind_count=0;
+    bad_length=fail_lookup=fail_plan=copier_count=bind_count=bad_dmic=0;
 }
 static int call(DEVICE *d,ULONG bus,BOOLEAN dmic,BOOLEAN capture,SOF_AUDIO_FORMAT_PARAMS *fmt,ULONG *h,ULONG *g,ULONG *a) {
     *h=*g=*a=0;
@@ -162,7 +170,10 @@ int main(void) {
             }
         }
     }
+    reset(&d);bad_dmic=1;
+    assert(call(&d,0,1,1,&fmt,&h,&g,&a)==STATUS_INVALID_PARAMETER && !step && !active_memory);
     fmt.ChannelsCount=2u; fmt.ValidBitDepth=24u;
+    reset(&d);assert(call(&d,0,1,1,&fmt,&h,&g,&a)==STATUS_NOT_SUPPORTED && !step);
     reset(&d);assert(call(&d,1,0,1,&fmt,&h,&g,&a)==STATUS_NOT_SUPPORTED && !step);
     assert(call(&d,2,0,0,&fmt,&h,&g,&a)==STATUS_NOT_SUPPORTED && !step);
     assert(call(&d,1,1,1,&fmt,&h,&g,&a)==STATUS_NOT_SUPPORTED && !step);

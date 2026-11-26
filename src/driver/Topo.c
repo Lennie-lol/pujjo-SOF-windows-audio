@@ -1154,7 +1154,9 @@ static NTSTATUS SofIpc4CreateNhltPipeline(
         Fmt->SamplingFrequency != 48000u || Fmt->ChannelsCount != 2u ||
         Fmt->BitDepth != 32u || Fmt->ValidBitDepth != 24u))
         return STATUS_NOT_SUPPORTED;
-    if (Dmic && (Bus != 0u || !IsCapture))
+    if (Dmic && (Bus != 0u || !IsCapture ||
+        Fmt->SamplingFrequency != PJ_DMIC_RATE || Fmt->ChannelsCount != PJ_DMIC_CHANNELS ||
+        Fmt->BitDepth != PJ_DMIC_BITS || Fmt->ValidBitDepth != PJ_DMIC_BITS))
         return STATUS_NOT_SUPPORTED;
 
     NTSTATUS status;
@@ -1192,7 +1194,7 @@ static NTSTATUS SofIpc4CreateNhltPipeline(
                             &config, &copierPages) != PJ_CATALOG_OK ||
         pj_firmware_plan_ll(&Ctx->GainProfile, chunkBytes, chunkBytes,
                             &config, &gainPages) != PJ_CATALOG_OK ||
-        2u * copierPages + gainPages > 20u)
+        copierPages > 10u || gainPages > 20u - 2u * copierPages)
         return STATUS_NOT_SUPPORTED;
 
     scratch = ExAllocatePool2(POOL_FLAG_NON_PAGED,
@@ -1202,6 +1204,13 @@ static NTSTATUS SofIpc4CreateNhltPipeline(
     status = SofNhltCopyConfiguration(Ctx->NhltTable, Ctx->NhltTableSize,
         &key, scratch, configBytes, &configBytes);
     if (!NT_SUCCESS(status)) goto done;
+    if (Dmic) {
+        pj_dmic_profile profile;
+        if (!pj_dmic_validate(scratch, configBytes, &profile)) {
+            status = STATUS_INVALID_PARAMETER;
+            goto done;
+        }
+    }
     dai.NodeType = Dmic ? SOF_IPC4_GTW_DMIC :
                    IsCapture ? SOF_IPC4_GTW_SSP_IN : SOF_IPC4_GTW_SSP_OUT;
     dai.NodeIndex = Dmic ? SOF_IPC4_NODE_INDEX_INTEL_DMIC(Bus) :

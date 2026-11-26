@@ -24,7 +24,7 @@ SUITES=[
  'tests/test_windows_ci_v017.py','tests/run_kernel_mock_abi_tests.py',
  'tests/test_preinstall_guards.py','tests/test_dsp_submission_preflight_static.py',
  'tests/test_forced_safe_kmdf_stub.py',
- 'tests/test_diagnostic_prepare.py','tests/test_diagnostic_disarm.py',
+ 'tests/test_diagnostic_prepare.py','tests/test_diagnostic_disarm.py','tests/test_dmic_diagnostic.py',
  'tests/test_rom_halt_fail_closed.py',
  'tests/run_post_dma_rom_tests.py',
  'tests/test_iccmax_transport.py',

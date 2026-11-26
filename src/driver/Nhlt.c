@@ -286,6 +286,27 @@ NTSTATUS SofNhltCopyConfiguration(
     return STATUS_SUCCESS;
 }
 
+NTSTATUS SofNhltInspectPujjoDmic(const void *Table, size_t Bytes,
+                                pj_dmic_profile *Profile)
+{
+    const SOF_NHLT_CONFIG_KEY key = {
+        NHLT_LINK_DMIC, 0, NHLT_DIRECTION_CAPTURE, NHLT_DEVICE_DMIC,
+        PJ_DMIC_RATE, PJ_DMIC_CHANNELS, PJ_DMIC_BITS, PJ_DMIC_BITS
+    };
+    SOF_NHLT_MATCH match = {0};
+    NTSTATUS status;
+    if (!Profile) return STATUS_INVALID_PARAMETER;
+    RtlZeroMemory(Profile, sizeof(*Profile));
+    match.Key = &key;
+    status = SofNhltEnumerate(Table, Bytes, SofNhltMatchPcm, &match);
+    if (!NT_SUCCESS(status)) return status;
+    if (match.Conflict) return STATUS_OBJECT_NAME_COLLISION;
+    if (!match.Endpoint) return STATUS_NOT_FOUND;
+    if (!pj_dmic_validate(match.Config, match.ConfigBytes, Profile))
+        return STATUS_INVALID_PARAMETER;
+    return STATUS_SUCCESS;
+}
+
 /* The generated header is reviewed as driver source, never read from a
  * registry path or replaced independently of the signed driver. */
 #ifdef _KERNEL_MODE

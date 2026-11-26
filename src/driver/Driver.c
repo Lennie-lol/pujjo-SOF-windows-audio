@@ -297,7 +297,7 @@ DriverEntry(
 
 #ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
     ULONG requestedPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
-    SofLogBreadcrumb("[Safety] Pujjo resource diagnostic v0.0.6.0\n");
+    SofLogBreadcrumb("[Safety] Pujjo resource diagnostic v0.0.7.0\n");
     if (!NT_SUCCESS(regStatus)) {
         RtlStringCbPrintfA(msg, sizeof(msg),
             "[Safety] Open diagnostic parameters failed: 0x%08x\n", (ULONG)regStatus);

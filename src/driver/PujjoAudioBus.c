@@ -240,47 +240,31 @@ NTSTATUS SofDisconnectAudioChild(PSOF_DEVICE_CONTEXT Ctx)
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_AUDIO
 static NTSTATUS AudioSelectFormat(PSOF_DEVICE_CONTEXT Ctx)
 {
-    /* Prefer the recovery-derived native format; legacy stereo requires an exact separate record. */
-    static const USHORT samples[][3] = {{4, 32, 32}, {2, 16, 16}, {2, 32, 24}, {2, 32, 32}};
-    SOF_NHLT_CONFIG_KEY key = {
-        NHLT_LINK_DMIC, 0, NHLT_DIRECTION_CAPTURE, NHLT_DEVICE_DMIC, 48000, 2, 0, 0
-    };
+    pj_dmic_profile profile;
+    pj_firmware_config record;
+    PJ_DWORD copierPages, gainPages;
+    NTSTATUS status;
     if (!Ctx) return STATUS_INVALID_PARAMETER;
     if (!Ctx->NhltTable || !Ctx->NhltTableSize) return STATUS_NOT_FOUND;
-    for (ULONG i = 0; i < RTL_NUMBER_OF(samples); ++i) {
-        ULONG bytes = 0;
-        key.Channels = samples[i][0];
-        key.ContainerBits = samples[i][1];
-        key.ValidBits = samples[i][2];
-        NTSTATUS status = SofNhltCopyConfiguration(Ctx->NhltTable, Ctx->NhltTableSize,
-                                                   &key, NULL, 0, &bytes);
-        if (status == STATUS_BUFFER_TOO_SMALL) {
-            /* Copier requires attributes plus a nonempty gateway payload. */
-            if (bytes <= sizeof(struct sof_ipc4_gtw_attributes) ||
-                (bytes & 3u) || bytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD -
-                    (sizeof(struct sof_ipc4_copier_data) - sizeof(ULONG)))
-                return STATUS_INVALID_BUFFER_SIZE;
-            pj_firmware_config record;
-            ULONG copierPages, gainPages;
-            ULONG chunkBytes = key.SampleRate / 1000u * key.Channels * (key.ContainerBits / 8u);
-            if (pj_firmware_plan_ll(&Ctx->CopierProfile, chunkBytes, chunkBytes,
-                    &record, &copierPages) != PJ_CATALOG_OK ||
-                pj_firmware_plan_ll(&Ctx->GainProfile, chunkBytes, chunkBytes,
-                    &record, &gainPages) != PJ_CATALOG_OK ||
-                2u * copierPages + gainPages > 20u)
-                continue;
-            Ctx->AudioFormat.Rate = key.SampleRate;
-            Ctx->AudioFormat.Channels = key.Channels;
-            Ctx->AudioFormat.ContainerBits = key.ContainerBits;
-            Ctx->AudioFormat.ValidBits = key.ValidBits;
-            Ctx->AudioFormat.Role = PujjoAudioDmic;
-            return STATUS_SUCCESS;
-        }
-        /* A size-only lookup cannot successfully copy a nonempty blob. */
-        if (NT_SUCCESS(status)) return STATUS_INVALID_BUFFER_SIZE;
-        if (status != STATUS_NOT_FOUND) return status;
-    }
-    return STATUS_NOT_FOUND;
+    /* Native four-slot PCM99 only. Never publish an arbitrary stereo route
+     * just because firmware happens to advertise some other DMIC format. */
+    status = SofNhltInspectPujjoDmic(Ctx->NhltTable, Ctx->NhltTableSize, &profile);
+    if (!NT_SUCCESS(status)) return status;
+    if (profile.bytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD -
+            (sizeof(struct sof_ipc4_copier_data) - sizeof(ULONG)))
+        return STATUS_INVALID_BUFFER_SIZE;
+    if (pj_firmware_plan_ll(&Ctx->CopierProfile, PJ_DMIC_CHUNK_BYTES, PJ_DMIC_CHUNK_BYTES,
+            &record, &copierPages) != PJ_CATALOG_OK ||
+        pj_firmware_plan_ll(&Ctx->GainProfile, PJ_DMIC_CHUNK_BYTES, PJ_DMIC_CHUNK_BYTES,
+            &record, &gainPages) != PJ_CATALOG_OK ||
+        copierPages > 10u || gainPages > 20u - 2u * copierPages)
+        return STATUS_NOT_SUPPORTED;
+    Ctx->AudioFormat.Rate = PJ_DMIC_RATE;
+    Ctx->AudioFormat.Channels = PJ_DMIC_CHANNELS;
+    Ctx->AudioFormat.ContainerBits = PJ_DMIC_BITS;
+    Ctx->AudioFormat.ValidBits = PJ_DMIC_BITS;
+    Ctx->AudioFormat.Role = PujjoAudioDmic;
+    return STATUS_SUCCESS;
 }
 #endif
 

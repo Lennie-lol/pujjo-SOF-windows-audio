@@ -146,24 +146,24 @@ typedef struct { ULONG LinkType,VirtualBusId,Direction,DeviceType,SampleRate,Cha
 typedef struct { ULONG Rate,Channels,ContainerBits,ValidBits,Role; } FORMAT;
 typedef struct { const void *NhltTable; ULONG NhltTableSize; int CopierProfile,GainProfile; FORMAT AudioFormat; } DEVICE,*PSOF_DEVICE_CONTEXT;
 typedef struct { ULONG unused; } pj_firmware_config;
-static int calls, allowed, first_status, reject_chunk, too_many_pages;
-static ULONG blob_bytes;
-static int SofNhltCopyConfiguration(const void *table,ULONG size,const SOF_NHLT_CONFIG_KEY *key,void *dest,ULONG cap,ULONG *bytes) {
-    assert(table && size && !dest && !cap);
-    assert(key->LinkType==2 && key->VirtualBusId==0 && key->Direction==1 && key->DeviceType==0);
-    static const ULONG formats[][3]={{4,32,32},{2,16,16},{2,32,24},{2,32,32}};
-    assert(calls>=0 && calls<4);
-    assert(key->SampleRate==48000 && key->Channels==formats[calls][0]);
-    assert(key->ContainerBits==formats[calls][1] && key->ValidBits==formats[calls][2]);
-    ++calls;
-    if(first_status) return first_status;
-    if(calls!=allowed && allowed!=5) return STATUS_NOT_FOUND;
-    *bytes=blob_bytes;return STATUS_BUFFER_TOO_SMALL;
+#define STATUS_NOT_SUPPORTED -6
+#define PJ_DMIC_RATE 48000u
+#define PJ_DMIC_CHANNELS 4u
+#define PJ_DMIC_BITS 32u
+#define PJ_DMIC_CHUNK_BYTES 768u
+typedef uint32_t PJ_DWORD;
+typedef struct { ULONG bytes; } pj_dmic_profile;
+static int calls, first_status, reject_plan, plan_calls;
+static ULONG blob_bytes, pages[2] = {2,2};
+static int SofNhltInspectPujjoDmic(const void *table,ULONG size,pj_dmic_profile *profile) {
+    assert(table && size && profile); ++calls;
+    profile->bytes=blob_bytes;
+    return first_status;
 }
-static int pj_firmware_plan_ll(int *p,ULONG ibs,ULONG obs,pj_firmware_config *c,ULONG *pages) {
-    assert(p && c && ibs==obs && (ibs==192 || ibs==384 || ibs==768));
-    *pages=too_many_pages?10:2;
-    return reject_chunk==(int)ibs?1:0;
+static int pj_firmware_plan_ll(int *p,ULONG ibs,ULONG obs,pj_firmware_config *c,ULONG *out) {
+    assert(p && c && ibs==768 && obs==768 && plan_calls<2);
+    *out=pages[plan_calls++];
+    return reject_plan==plan_calls?1:0;
 }
 '''
 select_cases = r'''
@@ -172,35 +172,28 @@ int main(void) {
     DEVICE d={&table,1,0,0,{1,2,3,4,99}};
     assert(AudioSelectFormat(NULL)==STATUS_INVALID_PARAMETER);
     d.NhltTableSize=0;assert(AudioSelectFormat(&d)==STATUS_NOT_FOUND && !calls);d.NhltTableSize=1;
-    blob_bytes=96;
-    allowed=0;assert(AudioSelectFormat(&d)==STATUS_NOT_FOUND && calls==4 && d.AudioFormat.Role==99);
-    for(int format=1;format<=4;++format) {
-        calls=0;allowed=format;
-        assert(AudioSelectFormat(&d)==0 && calls==format);
-        assert(d.AudioFormat.Rate==48000 && d.AudioFormat.Channels==(format==1?4u:2u) && d.AudioFormat.Role==0);
-        assert(d.AudioFormat.ContainerBits==(format==2?16u:32u));
-        assert(d.AudioFormat.ValidBits==(format==2?16u:format==3?24u:32u));
+    blob_bytes=248;
+    for(int status=-5;status<0;++status) {
+        first_status=status;calls=plan_calls=0;
+        assert(AudioSelectFormat(&d)==status && calls==1 && !plan_calls && d.AudioFormat.Role==99);
     }
-    calls=0;allowed=5;
-    assert(AudioSelectFormat(&d)==0 && calls==1 && d.AudioFormat.Channels==4);
-    calls=0;reject_chunk=768;
-    assert(AudioSelectFormat(&d)==0 && calls==2 && d.AudioFormat.Channels==2 && d.AudioFormat.ValidBits==16);
-    calls=0;allowed=1;
-    assert(AudioSelectFormat(&d)==STATUS_NOT_FOUND && calls==4);
-    calls=0;allowed=5;reject_chunk=0;too_many_pages=1;
-    assert(AudioSelectFormat(&d)==STATUS_NOT_FOUND && calls==4);
-    calls=0;too_many_pages=0;allowed=3;
-    assert(AudioSelectFormat(&d)==0 && calls==3 && d.AudioFormat.ValidBits==24);
-    allowed=5;
-    too_many_pages=0;calls=0;first_status=STATUS_OBJECT_NAME_COLLISION;
-    assert(AudioSelectFormat(&d)==STATUS_OBJECT_NAME_COLLISION && calls==1);first_status=0;
-    for(ULONG bad=0;bad<=5;++bad) {
-        calls=0;blob_bytes=bad;
-        assert(AudioSelectFormat(&d)==STATUS_INVALID_BUFFER_SIZE && calls==1);
+    first_status=0;calls=plan_calls=0;
+    assert(AudioSelectFormat(&d)==0 && calls==1 && plan_calls==2);
+    assert(d.AudioFormat.Rate==48000 && d.AudioFormat.Channels==4 && d.AudioFormat.Role==0 &&
+           d.AudioFormat.ContainerBits==32 && d.AudioFormat.ValidBits==32);
+    for(int fail=1;fail<=2;++fail) {
+        reject_plan=fail;calls=plan_calls=0;
+        assert(AudioSelectFormat(&d)==STATUS_NOT_SUPPORTED && calls==1 && plan_calls==fail);
     }
-    calls=0;blob_bytes=4096;
-    assert(AudioSelectFormat(&d)==STATUS_INVALID_BUFFER_SIZE && calls==1);
-    puts("PASS: actual DMIC format selection, rejected malformed gateways and firmware budgets");
+    reject_plan=0;calls=plan_calls=0;pages[0]=10;pages[1]=1;
+    assert(AudioSelectFormat(&d)==STATUS_NOT_SUPPORTED && calls==1);
+    calls=plan_calls=0;pages[0]=0xffffffffu;pages[1]=0xffffffffu;
+    assert(AudioSelectFormat(&d)==STATUS_NOT_SUPPORTED && calls==1);
+    calls=plan_calls=0;pages[0]=9;pages[1]=2;
+    assert(AudioSelectFormat(&d)==0 && calls==1);
+    calls=plan_calls=0;blob_bytes=4096;
+    assert(AudioSelectFormat(&d)==STATUS_INVALID_BUFFER_SIZE && calls==1 && !plan_calls);
+    puts("PASS: actual native DMIC profile admission, no stereo downgrade, firmware budgets and overflow rejection");
 }
 '''
 with tempfile.TemporaryDirectory(prefix="pj_dmic_format_") as tmp:

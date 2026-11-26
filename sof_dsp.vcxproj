@@ -110,6 +110,7 @@
     <ClInclude Include="src\driver\PujjoIpc4Protocol.h" />
     <ClInclude Include="src\driver\PujjoIpc4Transaction.h" />
     <ClInclude Include="src\driver\PujjoDmaPlan.h" />
+    <ClInclude Include="src\driver\PujjoDmicProfile.h" />
     <ClInclude Include="src\driver\PujjoFirmwareCatalog.h" />
     <ClInclude Include="src\driver\Loader.h" />
     <ClInclude Include="src\driver\Topo.h" />
@@ -134,6 +135,7 @@
     <ClCompile Include="src\driver\PujjoIpc4Protocol.c" />
     <ClCompile Include="src\driver\PujjoIpc4Transaction.c" />
     <ClCompile Include="src\driver\PujjoDmaPlan.c" />
+    <ClCompile Include="src\driver\PujjoDmicProfile.c" />
     <ClCompile Include="src\driver\PujjoFirmwareCatalog.c" />
     <ClCompile Include="src\driver\Loader.c" />
     <ClCompile Include="src\driver\Topo.c" />

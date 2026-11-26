@@ -215,6 +215,10 @@ static NTSTATUS SofWaveRtCreateStreamCore(
     if (EndpointType == SOF_ENDPOINT_DMIC_PDM) {
         if (!Ctx->AudioOnline) return STATUS_DEVICE_NOT_READY;
         if (!IsCapture) return STATUS_INVALID_PARAMETER;
+        if (Format->SamplingFrequency != PJ_DMIC_RATE ||
+            Format->ChannelsCount != PJ_DMIC_CHANNELS || Format->BitDepth != PJ_DMIC_BITS ||
+            Format->ValidBitDepth != PJ_DMIC_BITS)
+            return STATUS_NOT_SUPPORTED;
         directionSlot = 0;
     }
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_ANALOG
