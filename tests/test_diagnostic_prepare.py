@@ -12,7 +12,7 @@ driver = (root / "src/driver/Driver.c").read_text()
 # Only a successful DriverEntry can publish a permit. PnP cannot renew it.
 assert driver.count("g_DiagnosticPreparePermit") == 2
 assert source.count("g_DiagnosticPreparePermit") == 1
-assert driver.index("NT_SUCCESS(ZwFlushKey(paramsKey))") < driver.index("InterlockedExchange(&g_DiagnosticPreparePermit, 1)")
+assert driver.index("g_CanaryArmed = SofCommitDiagnosticDisarm(") < driver.index("if (g_CanaryArmed) {") < driver.index("InterlockedExchange(&g_DiagnosticPreparePermit, 1)")
 for unit in (root / "src/driver").rglob("*.c"):
     assert "->ReferenceCount" not in unit.read_text(), unit
 program = r"""

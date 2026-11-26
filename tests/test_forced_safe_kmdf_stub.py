@@ -44,8 +44,8 @@ for prohibited in (
 # build should default to forced-safe; guarded DSP startup must still require
 # the existing one-shot authorization at both PrepareHardware and D0Entry.
 assert "ULONG g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;" in driver
-assert 'SofReadRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE)' in driver
-assert "if (g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT)" in driver
+assert 'requestedPolicy = SofReadRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE)' in driver
+assert "RequestedPolicy == SOF_SAFE_BOOT_SINGLE_SHOT && RequestedToken == 1" in driver
 prepare = device.split("SofEvtDevicePrepareHardware(", 1)[1]
 assert "#ifndef PUJJO_DSP_BOOT_DIAGNOSTIC" in add.split("SofSdcaFilterDeviceAdd")[0].rsplit("#endif", 1)[-1]
 assert prepare.index("g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT") < prepare.index(
@@ -57,17 +57,20 @@ assert "return STATUS_NOT_SUPPORTED;" in d0.split("#else", 1)[0]
 
 for name in ("SafeBootPolicy", "BootSafetyToken", "ArmedTesting", "EnablePortCls"):
     assert f"HKR,Parameters,{name},0x00010001,0" in inf
-assert re.findall(r"(?im)^\s*DriverVer\s*=\s*([^\r\n]+)", inf) == ["11/25/2026,0.0.5.0"]
+assert re.findall(r"(?im)^\s*DriverVer\s*=\s*([^\r\n]+)", inf) == ["11/26/2026,0.0.6.0"]
 assert "DriverVer=11/23/2026,0.0.2.0" not in inf
 stage = (ROOT / "scripts/Stage-PujjoDspBootDiagnostic.ps1").read_text(encoding="utf-8")
 verify = (ROOT / "scripts/Verify-PujjoDspBootDiagnostic.ps1").read_text(encoding="utf-8")
-assert "Package version 0.0.5.0;" in stage
-assert "Package version 0.0.5.0;" in verify
-assert "Wrong diagnostic package version; expected 0.0.5.0" in verify
+assert "Package version 0.0.6.0;" in stage
+assert "Package version 0.0.6.0;" in verify
+assert "Wrong diagnostic package version; expected 0.0.6.0" in verify
 assert "'tests/test_forced_safe_kmdf_stub.py'" in suite
 entry = driver.split("DriverEntry(", 1)[1].split("WDF_DRIVER_CONFIG_INIT", 1)[0]
-assert entry.index('SofWriteRegistryDword(paramsKey, L"BootSafetyToken", 0)') < entry.index('SofWriteRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE)') < entry.index("NT_SUCCESS(ZwFlushKey(paramsKey))") < entry.index("g_CanaryArmed = TRUE;")
-assert "if (!g_CanaryArmed) {\n        g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;" in entry
+diagnostic_entry = entry.split("#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC", 1)[1].split("#else", 1)[0]
+assert "SOF_SAFE_BOOT_PRODUCTION" not in diagnostic_entry and "ConsecutiveCrashCount" not in diagnostic_entry
+assert diagnostic_entry.index("SofCommitDiagnosticDisarm(") < diagnostic_entry.index("if (g_CanaryArmed)") < diagnostic_entry.index("InterlockedExchange(&g_DiagnosticPreparePermit, 1)")
+assert "g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;" in diagnostic_entry
+assert "flushStatus == STATUS_SUCCESS" in driver
 assert "#ifndef PUJJO_DSP_BOOT_DIAGNOSTIC\n    pnpPowerCallbacks.EvtDeviceSurpriseRemoval" in add
 probe_add = add.split("Read-only one-shot resource discovery only", 1)[1].split("#else", 1)[0]
 assert "return STATUS_SUCCESS;" in probe_add and "WdfDmaEnablerCreate(" not in probe_add

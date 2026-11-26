@@ -99,15 +99,24 @@ SofReadRegistryDword(
 )
 {
     UNICODE_STRING uName;
-    UCHAR buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
-    PKEY_VALUE_PARTIAL_INFORMATION pInfo = (PKEY_VALUE_PARTIAL_INFORMATION)buffer;
+    union {
+        KEY_VALUE_PARTIAL_INFORMATION Info;
+        UCHAR Bytes[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    } buffer;
+    PKEY_VALUE_PARTIAL_INFORMATION pInfo = &buffer.Info;
     ULONG resultLength = 0;
+    ULONG value;
     NTSTATUS status;
 
     RtlInitUnicodeString(&uName, ValueName);
-    status = ZwQueryValueKey(KeyHandle, &uName, KeyValuePartialInformation, buffer, sizeof(buffer), &resultLength);
-    if (NT_SUCCESS(status) && pInfo->Type == REG_DWORD && pInfo->DataLength >= sizeof(ULONG)) {
-        return *(PULONG)pInfo->Data;
+    status = ZwQueryValueKey(KeyHandle, &uName, KeyValuePartialInformation,
+                             buffer.Bytes, sizeof(buffer.Bytes), &resultLength);
+    if (status == STATUS_SUCCESS &&
+        resultLength >= FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG) &&
+        resultLength <= sizeof(buffer.Bytes) && pInfo->Type == REG_DWORD &&
+        pInfo->DataLength == sizeof(ULONG)) {
+        RtlCopyMemory(&value, pInfo->Data, sizeof(value));
+        return value;
     }
     return DefaultValue;
 }
@@ -132,6 +141,53 @@ SofWriteRegistryDword(
     return ZwSetValueKey(KeyHandle, &uName, 0, REG_DWORD, &Value, sizeof(ULONG));
 }
 
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+/* The diagnostic never interprets a partial disarm as authorization. Even
+ * an incomplete/invalid request is retired where possible, and both writes
+ * are attempted independently so one failure cannot prevent the other reset.
+ * Readback is an additional check, NOT a substitute for a successful flush. */
+static BOOLEAN
+SofCommitDiagnosticDisarm(
+    _In_opt_ HANDLE ParamsKey,
+    _In_ ULONG RequestedPolicy,
+    _In_ ULONG RequestedToken,
+    _In_ BOOLEAN CanaryConsumed
+)
+{
+    char msg[256];
+    NTSTATUS tokenStatus, policyStatus, flushStatus;
+    ULONG tokenReadback, policyReadback;
+    BOOLEAN authorized;
+
+    if (ParamsKey == NULL) {
+        SofLogBreadcrumb("[Safety] Diagnostic parameters unavailable; no permit.\n");
+        return FALSE;
+    }
+    if (RequestedPolicy == SOF_SAFE_BOOT_FORCED_SAFE && RequestedToken == 0 && !CanaryConsumed)
+        return FALSE; /* Ordinary disarmed start does not flush the SYSTEM hive. */
+
+    tokenStatus = SofWriteRegistryDword(ParamsKey, L"BootSafetyToken", 0);
+    policyStatus = SofWriteRegistryDword(ParamsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE);
+    /* Persist even a partial reset when possible. Never grant on failure. */
+    flushStatus = ZwFlushKey(ParamsKey);
+    tokenReadback = SofReadRegistryDword(ParamsKey, L"BootSafetyToken", MAXULONG);
+    policyReadback = SofReadRegistryDword(ParamsKey, L"SafeBootPolicy", MAXULONG);
+    authorized = RequestedPolicy == SOF_SAFE_BOOT_SINGLE_SHOT && RequestedToken == 1 &&
+        CanaryConsumed && tokenStatus == STATUS_SUCCESS && policyStatus == STATUS_SUCCESS &&
+        flushStatus == STATUS_SUCCESS && tokenReadback == 0 &&
+        policyReadback == SOF_SAFE_BOOT_FORCED_SAFE;
+
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[Safety] Diagnostic disarm: Policy=%u Token=%u File=%u TokenWrite=0x%08x PolicyWrite=0x%08x Flush=0x%08x ReadbackToken=0x%08x ReadbackPolicy=0x%08x Permit=%u\n",
+        RequestedPolicy, RequestedToken, CanaryConsumed ? 1u : 0u,
+        (ULONG)tokenStatus, (ULONG)policyStatus, (ULONG)flushStatus,
+        tokenReadback, policyReadback, authorized ? 1u : 0u);
+    SofLogBreadcrumb(msg);
+    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL, "%s", msg);
+    return authorized;
+}
+#endif
+
 /**
  * @brief Atomically detects and consumes the single-shot canary file.
  *
@@ -141,13 +197,14 @@ SofWriteRegistryDword(
  * @return BOOLEAN TRUE if canary file was present and deleted; FALSE otherwise.
  */
 static BOOLEAN
-SofCheckAndConsumeCanaryFile(void)
+SofCheckAndConsumeCanaryFile(_In_ BOOLEAN LogAttempt)
 {
     UNICODE_STRING canPath;
     OBJECT_ATTRIBUTES canOa;
     IO_STATUS_BLOCK canIoStatus;
     HANDLE canHandle = NULL;
     NTSTATUS canStatus;
+    char msg[128];
     BOOLEAN filePresent = FALSE;
 
     /* Native NT kernel path to \SystemRoot\sof_canary.bin (C:\Windows\sof_canary.bin) */
@@ -161,19 +218,35 @@ SofCheckAndConsumeCanaryFile(void)
         &canIoStatus,
         NULL,
         FILE_ATTRIBUTE_NORMAL,
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+        0, /* Exclusive canary open: a sharing conflict denies the attempt. */
+#else
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+#endif
         FILE_OPEN,
         FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
         NULL,
         0
     );
 
+    if (LogAttempt) {
+        RtlStringCbPrintfA(msg, sizeof(msg), "[Safety] Canary open=0x%08x\n", (ULONG)canStatus);
+        SofLogBreadcrumb(msg);
+    }
     if (NT_SUCCESS(canStatus) && canHandle != NULL) {
         FILE_DISPOSITION_INFORMATION dispInfo;
+        NTSTATUS closeStatus;
         dispInfo.DeleteFile = TRUE;
         canStatus = ZwSetInformationFile(canHandle, &canIoStatus, &dispInfo, sizeof(dispInfo), FileDispositionInformation);
         filePresent = NT_SUCCESS(canStatus);
-        if (!NT_SUCCESS(ZwClose(canHandle))) filePresent = FALSE;
+        closeStatus = ZwClose(canHandle);
+        if (!NT_SUCCESS(closeStatus)) filePresent = FALSE;
+        if (LogAttempt) {
+            RtlStringCbPrintfA(msg, sizeof(msg),
+                "[Safety] Canary delete=0x%08x close=0x%08x consumed=%u\n",
+                (ULONG)canStatus, (ULONG)closeStatus, filePresent ? 1u : 0u);
+            SofLogBreadcrumb(msg);
+        }
     }
 
     return filePresent;
@@ -222,29 +295,46 @@ DriverEntry(
         ZwClose(serviceKey);
     }
 
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    ULONG requestedPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
+    SofLogBreadcrumb("[Safety] Pujjo resource diagnostic v0.0.6.0\n");
+    if (!NT_SUCCESS(regStatus)) {
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[Safety] Open diagnostic parameters failed: 0x%08x\n", (ULONG)regStatus);
+        SofLogBreadcrumb(msg);
+        paramsKey = NULL;
+    }
+    if (paramsKey != NULL) {
+        requestedPolicy = SofReadRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE);
+        bootSafetyToken = SofReadRegistryDword(paramsKey, L"BootSafetyToken", 0);
+    }
+    canaryFilePresent = SofCheckAndConsumeCanaryFile(
+        requestedPolicy != SOF_SAFE_BOOT_FORCED_SAFE || bootSafetyToken != 0);
+
+    /* No production/watchdog authorization exists in the diagnostic binary.
+     * Only a durable disarm of a valid one-shot request can publish the permit. */
+    g_CanaryArmed = SofCommitDiagnosticDisarm(paramsKey, requestedPolicy, bootSafetyToken, canaryFilePresent);
+    if (g_CanaryArmed) {
+        g_SafeBootPolicy = SOF_SAFE_BOOT_SINGLE_SHOT;
+        InterlockedExchange(&g_DiagnosticPreparePermit, 1);
+        SofLogBreadcrumb("[Safety] Diagnostic canary consumed and persistent disarm verified; one resource probe authorized.\n");
+    } else {
+        g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
+        SofLogBreadcrumb("[Safety] SafeBootPolicy = FORCED_SAFE (0). Audio stack disabled.\n");
+    }
+#else
     ULONG crashCount = 0;
     ULONG crashMax = 1;
 
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
-    /*
-     * Missing or unexpected diagnostic policy is never a production watchdog
-     * authorization. Only the explicit SINGLE_SHOT path can arm DSP boot.
-     */
-    if (paramsKey != NULL) {
-        g_SafeBootPolicy = SofReadRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE);
-        if (g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT)
-            g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
-#else
     if (paramsKey != NULL) {
         g_SafeBootPolicy = SofReadRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_PRODUCTION);
-#endif
         bootSafetyToken = SofReadRegistryDword(paramsKey, L"BootSafetyToken", 0);
         crashCount = SofReadRegistryDword(paramsKey, L"ConsecutiveCrashCount", 0);
         crashMax = SofReadRegistryDword(paramsKey, L"CrashWatchdogMax", 1);
         if (crashMax == 0) crashMax = 1;
     }
 
-    canaryFilePresent = SofCheckAndConsumeCanaryFile();
+    canaryFilePresent = SofCheckAndConsumeCanaryFile(FALSE);
 
     if (g_SafeBootPolicy == SOF_SAFE_BOOT_FORCED_SAFE) {
         g_CanaryArmed = FALSE;
@@ -255,17 +345,9 @@ DriverEntry(
         /* SOF_SAFE_BOOT_SINGLE_SHOT: Requires BOTH token==1 AND \SystemRoot\sof_canary.bin */
         if (bootSafetyToken == 1 && canaryFilePresent && paramsKey != NULL &&
             NT_SUCCESS(SofWriteRegistryDword(paramsKey, L"BootSafetyToken", 0)) &&
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
-            /* Persist disarm of BOTH authorization values before entering any
-             * diagnostic callbacks. Keep the requested policy in memory only. */
-            NT_SUCCESS(SofWriteRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE)) &&
-#endif
             NT_SUCCESS(ZwFlushKey(paramsKey))) {
             /* ATOMIC DISARM: Immediately clear token in registry and flush to guarantee safe next boot */
             g_CanaryArmed = TRUE;
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
-            InterlockedExchange(&g_DiagnosticPreparePermit, 1);
-#endif
             SofLogBreadcrumb("[Safety] Canary file consumed & token reset to 0 in DriverEntry! Armed for single boot.\n");
             DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                        "[SOF] Safety Canary: Consumed & reset to 0 in DriverEntry. Armed for single boot.\n");
@@ -306,12 +388,6 @@ DriverEntry(
         }
     }
 
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
-    /* A missing, invalid or already consumed canary never selects the
-     * callback-bearing path on a subsequent start. */
-    if (!g_CanaryArmed) {
-        g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
-    }
 #endif
     if (paramsKey != NULL) {
         ZwClose(paramsKey);

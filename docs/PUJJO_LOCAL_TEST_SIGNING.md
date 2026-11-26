@@ -1,4 +1,4 @@
-# Local catalog verification for the v0.0.5.0 resource diagnostic
+# Local catalog verification for the v0.0.6.0 resource diagnostic
 
 Use Windows PowerShell on the controlled Chromebook. Obtain the original `Pujjo-DSP-boot-only-UNSIGNED-SUBMISSION` ZIP directly from the known successful PR #29 Release job. Extract it separately from the directory containing the locally signed CAT and the two unchanged CI members. Obtain the full checkout SHA from that build's checkout log (a PR merge SHA is possible). The manifest and notice in a user-supplied directory cannot authenticate their own origin.
 
@@ -33,3 +33,64 @@ The diagnostic DeviceAdd accepts the exact hardware ID from the INF. The preproc
 DriverEntry publishes one driver-wide LONG permit only after flushing the persistent disarm. PrepareHardware claims it with InterlockedCompareExchange before board inspection, bus queries or mapping. Discovery failure consumes the permit. Release, rebalance and new device objects cannot renew it. Disarmed loads use the callback-free stub. Authorized devices register only prepare and release. Diagnostic D0 entry independently returns before any controller access. Discovery checks board and PCI identity, correlates resources, bounds capability reads and unmaps on success and rollback. The DMA, IRQ, D0, firmware, codec and amplifier paths remain closed.
 
 Keep the hardware hold until both Windows configurations pass and the original Release artifact, exact checkout revision and member hashes are independently verified. A locally signed catalog also requires the separate membership and trust checks above.
+
+
+## Physical v0.0.5.0 result and v0.0.6.0 replacement
+
+On 2026-11-26 the physical Google Pujjo rev3 (PCI 8086:54c8, subsystem zero)
+successfully installed the locally signed v0.0.5.0 CI binary (build checkout
+`528e79b2570c3d1be9438c379001ab34735ebace`, SYS SHA-256
+`85d91d5481189c542862e4cf26d8116b2829b2bac648cd32a90f3b41817c87aa`)
+as `oem79.inf`. The disarmed device started; both signed fallbacks
+`oem81.inf` (0.0.3.0) and `oem80.inf` (0.0.2.0) remained available.
+A single authorized cold-start attempt emitted:
+
+```text
+[3] KMDF DriverEntry entered from FxDriverEntry!
+[Safety] Canary not armed (Token=1, File=1)! Safe Mode active (zero BSOD).
+[4] WdfDriverCreate returned 0x00000000
+[5] SofEvtDeviceAdd entered!
+[5-SafeStub] Forced-safe KMDF-only device creation; no DSP callbacks.
+[5-SafeStub] KMDF device created without DMA, IRQ or firmware boot.
+```
+
+After boot the canary was absent and both authorization DWORDs were zero.
+The physical probe did **not** execute. This is consistent with the two
+registry writes succeeding but the subsequent flush failing; the exact
+NTSTATUS was not captured, and the observations alone do not prove which
+operation failed.
+
+v0.0.6.0 separates the diagnostic authorization engine from the legacy
+watchdog entirely. It attempts both resets independently for incomplete
+or invalid requests; a reset failure cannot suppress the other reset.
+It logs each actual write and flush NTSTATUS, verifies both readbacks,
+requires exact STATUS_SUCCESS for the persistent operations, and grants
+no permit on failure. It also checks the DWORD type/size and query bounds,
+opens the diagnostic canary exclusively, logs open/delete/close statuses,
+and identifies this revision in fresh breadcrumbs. Ordinary disarmed
+starts do not flush the SYSTEM hive. The existing atomic prepare claim,
+PCI identity, and hardware locks are unchanged. Host fault injection
+executes the production disarm helper and exercises all status/readback
+combinations, including the reported failure pattern (both writes
+successful, flush failing).
+
+**Do not interpret a successful host/CI run as a physical fix of the
+unknown flush error.** Do not re-arm v0.0.5.0 or allow access without the
+successful persistent flush. If the verified replacement still rejects
+authorization, preserve the precise NTSTATUS and investigate; no
+automatic retry, bypass, or relaxation is permitted.
+
+A later, separately approved diagnostic may be started after Windows is
+fully booted rather than during startup, to isolate an early-boot flush
+problem. This is only a possible alternative, not an established fix:
+first install the exact verified replacement disarmed, confirm Problem
+Code 0, save the current log and signed fallbacks off-device, disable only
+the exact PCI DSP, and confirm both the device is disabled and the
+`sof_dsp` service is stopped/unloaded before creating a fresh one-shot
+request. If the service remains resident, abort and re-enable disarmed;
+do not force an unload or arm a resident driver. The next enable must
+run a fresh DriverEntry, which still requires both resets, the successful
+flush and zero readbacks before permission. Do not reboot with a leftover
+request. A failure consumes the attempt: clear any remaining authorization
+and preserve its logs before any further decision. Any subsequent reboot
+must be disarmed.
