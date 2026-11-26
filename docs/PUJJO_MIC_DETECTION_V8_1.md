@@ -1,0 +1,20 @@
+# Pujjo v0.0.8.1 microphone detection test
+
+The goal is to see a **Pujjo Internal Microphone (Detection test - recording disabled)** input in Windows Sound settings. This is a software-endpoint enumeration test, not functional microphone capture. Windows might decline to publish the endpoint, because opening a stream always fails. No firmware, DMA/IRQ object, codec or amplifier activation is permitted. The child cannot bind the regular audio adapter: it has a distinct PnP ID, service, catalog and bus GUID. The topology advertises only the verified native four-slot DMIC profile, 48 kHz, 32-bit, and marks the test endpoint ineligible for automatic default selection.
+
+## Build and signing
+
+Use only the `Pujjo-v0.0.8.1-MIC-DETECTION-UNSIGNED` artifact from a successful Release build and retain the original ZIP. Verify the artifact's SHA-256 and expected CI revision from the build, independently of the included manifest. Extract it on the signing VM. Run the included verifier with `-SubmissionDirectory` and `-ExpectedRevision` (the 40-character CI commit). The first run is read-only.
+
+Copy both `parent` and `child` directories to a separate signed directory; sign ONLY both catalogs with the already trusted Pujjo development certificate. Use the VM's SignTool, not the physical Chromebook. Then run the verifier again with the additional parameters `-SignedDirectory` and `-SignToolPath`. It requires the pinned certificate, successful Authenticode and SignTool /pa catalog and membership checks, and byte-identical original INF/SYS. Record every signed file's SHA-256 and match all six files on the Chromebook before any staging; also confirm both catalog signatures and thumbprints there. This is local development trust, not Microsoft release signing.
+
+## Physical test (only after successful CI, local verification and recovery readiness)
+
+Keep v0.0.6.0 and v0.0.2.0 recovery packages, the tested WinRE path and external recovery backup. Verify test mode and the same exact physical Pujjo rev3 identity as before. Use the previously verified real board procedure; do not use an unrelated machine. Confirm all six safety values are zero and no canary exists.
+
+1. Stage the signed child INF using `pnputil /add-driver <signed-directory>\child\pujjo_audio_detection.inf` (no /install). Install only the verified signed parent INF using `pnputil /add-driver <signed-directory>\parent\sof_dsp.inf /install`. Confirm the actual published INF and version 0.0.8.1; do not assume the oem number. Archive old C:\sof_entry.txt; confirm the fresh forced-safe v8.1 banner before proceeding.
+2. Use the v0.0.6.0 procedure: disable the exact DSP PCI instance, verify sof_dsp stopped and v8.1 is still bound, verify all safety defaults and no canary. Only then create the canary and set BootSafetyToken=1 and SafeBootPolicy=1, flush the registry, and enable the exact instance once. Ensure persistent disarm and canary deletion in finally, like v6. Do not set ArmedTesting, EnablePortCls, EnableS0Idle or EnableUsbOffload. Do not reboot while armed. The driver consumes authorization before discovery and publishes the child only after the bounded read-only resource probe and BAR unmap.
+3. Look for the [Detection] log, the MEDIA child whose hardware ID is PUJJO\AudioDmicDetectionTest, and an AudioEndpoint with the detection name. Open `ms-settings:sound` (Input) and `mmsys.cpl` (Recording). Do not select the test endpoint as default or attempt recording; this build returns DEVICE_NOT_READY from every capture open, even if Windows lists it.
+4. Save fresh parent logs plus PnP results and a screenshot of Sound settings. A successful parent log alone does not prove Windows AudioEndpoint enumeration. Disabling the parent withdraws the child; keep safety settings zero and remove the canary. Rebooting disarmed intentionally leaves only the safe parent stub. If detection fails, collect evidence rather than repeatedly arming.
+
+No changes to ChromeOS firmware, the existing WinRE, or recovery partitions are required.

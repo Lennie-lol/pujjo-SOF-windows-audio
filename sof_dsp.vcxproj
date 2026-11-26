@@ -142,6 +142,7 @@
     <ClCompile Include="src\driver\WaveRt.c" />
     <ClCompile Include="src\driver\Nhlt.c" />
     <ClCompile Include="src\driver\PujjoAudioBus.c" />
+    <ClCompile Include="src\driver\PujjoDmicDetection.c" />
     <ClCompile Include="src\driver\PujjoAnalog.c" />
     <ClCompile Include="src\driver\HdaVerb.c" />
     <ClCompile Include="src\driver\HdaBusInterface.c" />

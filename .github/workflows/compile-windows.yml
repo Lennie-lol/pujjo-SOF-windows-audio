@@ -128,6 +128,8 @@ jobs:
             @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_ENABLE_EXPERIMENTAL_AUDIO /DPUJJO_ENABLE_EXPERIMENTAL_ANALOG' },
             @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_DSP_BOOT_DIAGNOSTIC'; Name='dsp-boot-only' },
             @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_ENABLE_EXPERIMENTAL_AUDIO /DPUJJO_DMIC_ENUMERATION_CANDIDATE'; Name='dmic-enumeration-compile-only' },
+            @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_DSP_BOOT_DIAGNOSTIC /DPUJJO_DMIC_DETECTION_TEST'; Name='dmic-detection-parent' },
+            @{ Project='pujjo_audio'; Defines='/DPUJJO_DMIC_DETECTION_TEST_ADAPTER'; Name='dmic-detection-child' },
             @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_READONLY_PROBE'; Name='codec-identity' },
             @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_CONTROL'; Name='codec-runtime' },
             @{ Project='pujjo_rt1019_probe'; Defines='/DPJ1019_ENABLE_CONTROL'; Name='amp-runtime' }
@@ -145,7 +147,7 @@ jobs:
             if (!(Test-Path "$isolated/bin/$($case.Project).sys")) { throw "Missing guarded driver $variant" }
             $objects = Join-Path $isolated 'obj'
             if ($case.Project -eq 'sof_dsp') {
-              foreach ($object in @('PujjoAudioBus.obj', 'WaveRt.obj', 'PujjoAnalog.obj')) {
+              foreach ($object in @('PujjoAudioBus.obj', 'WaveRt.obj', 'PujjoAnalog.obj', 'PujjoDmicDetection.obj')) {
                 if (!(Get-ChildItem $objects -Filter $object -Recurse)) { throw "Missing guarded object $object" }
               }
             }
@@ -261,6 +263,21 @@ jobs:
         with:
           name: Pujjo-DMIC-endpoint-UNSIGNED-REVIEW
           path: ${{ runner.temp }}/pujjo-dmic-review/
+          if-no-files-found: error
+      - name: Stage and validate separate microphone detection test
+        if: matrix.configuration == 'Release'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $revision = (git rev-parse HEAD).Trim()
+          ./scripts/Stage-PujjoDmicDetection.ps1 -ParentBinaryDirectory "$env:RUNNER_TEMP/guarded-dmic-detection-parent/bin" -ChildBinaryDirectory "$env:RUNNER_TEMP/guarded-dmic-detection-child/bin" -OutputDirectory "$env:RUNNER_TEMP/pujjo-dmic-detection" -SourceRevision $revision
+          ./scripts/Verify-PujjoDmicDetection.ps1 -SubmissionDirectory "$env:RUNNER_TEMP/pujjo-dmic-detection" -ExpectedRevision $revision
+      - name: Upload unsigned microphone detection test
+        if: success() && matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pujjo-v0.0.8.1-MIC-DETECTION-UNSIGNED
+          path: ${{ runner.temp }}/pujjo-dmic-detection/
           if-no-files-found: error
       - name: Preserve logs even when checks or compilation fail
         if: always()

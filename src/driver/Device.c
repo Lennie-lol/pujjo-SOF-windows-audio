@@ -478,6 +478,13 @@ SofEvtDevicePrepareHardware(
     SofLogEmbeddedDmicProfile();
     SofLogResetCapability(Device);
     SofLogBreadcrumb("[Probe] Read-only resource discovery complete; DMA and firmware boot locked.\n");
+#ifdef PUJJO_DMIC_DETECTION_TEST
+    status = SofPublishDmicDetectionChild(ctx);
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[Detection] DMIC-only PDO publication status=0x%08x; recording disabled.\n", status);
+    SofLogBreadcrumb(msg);
+    if (!NT_SUCCESS(status)) goto PreparationFailed;
+#endif
     return STATUS_SUCCESS;
 #else
     WDF_INTERRUPT_CONFIG_INIT(&interruptConfig, SofEvtInterruptIsr, SofEvtInterruptDpc);
@@ -663,6 +670,9 @@ SofEvtDeviceReleaseHardware(
 #ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
     /* The probe allocates no IPC, IRQ or DMA state. Do not touch those
      * uninitialized subsystems on a failed or completed resource probe. */
+#ifdef PUJJO_DMIC_DETECTION_TEST
+    SofWithdrawDmicDetectionChild(Device);
+#endif
     SofUnmapPreparedBars(ctx);
     return STATUS_SUCCESS;
 #else

@@ -306,6 +306,9 @@ DriverEntry(
 #ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
     ULONG requestedPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
     SofLogBreadcrumb("[Safety] Pujjo resource diagnostic v0.0.8.0\n");
+#ifdef PUJJO_DMIC_DETECTION_TEST
+    SofLogBreadcrumb("[Safety] Pujjo microphone detection test v0.0.8.1; recording disabled.\n");
+#endif
     if (!NT_SUCCESS(regStatus)) {
         RtlStringCbPrintfA(msg, sizeof(msg),
             "[Safety] Open diagnostic parameters failed: 0x%08x\n", (ULONG)regStatus);
@@ -574,6 +577,9 @@ SofEvtDeviceAdd(
     pnpPowerCallbacks.EvtDeviceD0ExitPreInterruptsDisabled  = SofEvtDeviceD0Exit;
 #endif
 
+#ifdef PUJJO_DMIC_DETECTION_TEST
+    pnpPowerCallbacks.EvtDeviceSurpriseRemoval = SofEvtDetectionSurpriseRemoval;
+#endif
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpPowerCallbacks);
 
     /* Allocate Device Context */

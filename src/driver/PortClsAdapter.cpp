@@ -255,9 +255,16 @@ static const PCPIN_DESCRIPTOR DmicFourPins[] = {
     {1, 1, 0, nullptr, {0, nullptr, 0, nullptr, 1, DmicFourRanges,
         KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_SINK, &KSCATEGORY_AUDIO, nullptr, 0}}
 };
+#ifdef PUJJO_DMIC_DETECTION_TEST_ADAPTER
+DEFINE_GUID(GUID_PUJJO_DETECTION_PIN_NAME, 0xae810c69, 0x1a6d, 0x4cbe,
+            0xb0, 0x84, 0x9b, 0x9f, 0x7c, 0x11, 0xa2, 0x57);
+#define PUJJO_DMIC_PIN_NAME (&GUID_PUJJO_DETECTION_PIN_NAME)
+#else
+#define PUJJO_DMIC_PIN_NAME nullptr
+#endif
 static const PCPIN_DESCRIPTOR TopologyPins[] = {
     {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
-        KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_NONE, &KSNODETYPE_MICROPHONE_ARRAY, nullptr, 0}},
+        KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_NONE, &KSNODETYPE_MICROPHONE_ARRAY, PUJJO_DMIC_PIN_NAME, 0}},
     {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
         KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_NONE, &KSCATEGORY_AUDIO, nullptr, 0}}
 };
@@ -451,10 +458,15 @@ public:
             active.ContainerBits != m_format.ContainerBits || active.ValidBits != m_format.ValidBits ||
             active.Role != m_format.Role)
             return STATUS_DEVICE_NOT_READY;
+#ifdef PUJJO_DMIC_DETECTION_TEST_ADAPTER
+        /* Endpoint metadata is available, but never return a stream object. */
+        return STATUS_DEVICE_NOT_READY;
+#else
         auto stream = new (POOL_FLAG_NON_PAGED, AUDIO_POOL_TAG) DmicStream(m_bus, m_format);
         if (!stream) return STATUS_INSUFFICIENT_RESOURCES;
         *Out = stream;
         return STATUS_SUCCESS;
+#endif
     }
 };
 
@@ -599,7 +611,11 @@ static NTSTATUS QueryAudioBus(PDEVICE_OBJECT Device, PUJJO_AUDIO_BUS *Bus)
     PIO_STACK_LOCATION stack = IoGetNextIrpStackLocation(irp);
     stack->MajorFunction = IRP_MJ_PNP;
     stack->MinorFunction = IRP_MN_QUERY_INTERFACE;
+#ifdef PUJJO_DMIC_DETECTION_TEST_ADAPTER
+    stack->Parameters.QueryInterface.InterfaceType = &GUID_PUJJO_DMIC_DETECTION_BUS;
+#else
     stack->Parameters.QueryInterface.InterfaceType = &GUID_PUJJO_AUDIO_BUS;
+#endif
     stack->Parameters.QueryInterface.Size = static_cast<USHORT>(sizeof(*Bus));
     stack->Parameters.QueryInterface.Version = PUJJO_AUDIO_INTERFACE_VERSION;
     stack->Parameters.QueryInterface.Interface = &Bus->Header;
@@ -665,6 +681,11 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT Device, PIRP Irp, PRESOURCELIST Resou
         L"DmicWave", L"HeadphoneWave", L"HeadsetMicWave", L"SpeakerWave"
     };
     status = bus.GetFormat(bus.Header.Context, &format);
+#ifdef PUJJO_DMIC_DETECTION_TEST_ADAPTER
+    if (NT_SUCCESS(status) && (format.Role != PujjoAudioDmic || format.Rate != 48000 ||
+        format.Channels != 4 || format.ContainerBits != 32 || format.ValidBits != 32))
+        status = STATUS_NOT_SUPPORTED;
+#endif
     if (NT_SUCCESS(status) && (unsigned)format.Role >= RTL_NUMBER_OF(waveNames))
         status = STATUS_NOT_SUPPORTED;
     if (NT_SUCCESS(status)) {
@@ -691,6 +712,10 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT Device, PIRP Irp, PRESOURCELIST Resou
         if (wavePort) UnregisterPort(Device, wavePort);
         if (topologyPort) UnregisterPort(Device, topologyPort);
     }
+#ifdef PUJJO_DMIC_DETECTION_TEST_ADAPTER
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+        "[PujjoDetection] PortCls registration status=%08lx; capture disabled.\n", status);
+#endif
     if (wavePort) wavePort->Release();
     if (topologyPort) topologyPort->Release();
     if (wave) wave->Release();

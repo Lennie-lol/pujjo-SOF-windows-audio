@@ -5,6 +5,7 @@
 #include <guiddef.h>
 
 #define PUJJO_AUDIO_CHILD_ID L"PUJJO\\AudioDmic"
+#define PUJJO_DMIC_DETECTION_ID L"PUJJO\\AudioDmicDetectionTest"
 #define PUJJO_AUDIO_INTERFACE_VERSION 3
 #if defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG) && !defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO)
 #error The analog path requires the experimental audio guard
@@ -12,6 +13,10 @@
 
 DEFINE_GUID(GUID_PUJJO_AUDIO_BUS, 0xd18a381b, 0xaa4b, 0x4565,
             0x99, 0x89, 0x85, 0x9a, 0xdf, 0x80, 0x01, 0xd3);
+
+/* Separate interface GUID for the non-recording detection test. */
+DEFINE_GUID(GUID_PUJJO_DMIC_DETECTION_BUS, 0xe7dd257f, 0x35ce, 0x4f57,
+            0x82, 0x91, 0x7a, 0x73, 0x94, 0x22, 0x1e, 0x86);
 
 typedef enum {
     PujjoAudioDmic = 0,
@@ -57,6 +62,11 @@ extern "C" {
 struct _SOF_DEVICE_CONTEXT;
 NTSTATUS SofPublishAudioChild(struct _SOF_DEVICE_CONTEXT *Ctx);
 NTSTATUS SofDisconnectAudioChild(struct _SOF_DEVICE_CONTEXT *Ctx);
+#ifdef PUJJO_DMIC_DETECTION_TEST
+NTSTATUS SofPublishDmicDetectionChild(struct _SOF_DEVICE_CONTEXT *Ctx);
+VOID SofWithdrawDmicDetectionChild(WDFDEVICE Device);
+EVT_WDF_DEVICE_SURPRISE_REMOVAL SofEvtDetectionSurpriseRemoval;
+#endif
 #endif
 #endif
 #ifdef __cplusplus
