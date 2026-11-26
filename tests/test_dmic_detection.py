@@ -41,6 +41,7 @@ assert "WdfDeviceAddQueryInterface(child" in pdo and "WdfFdoAddStaticChild" in p
 assert pdo.index("WdfDeviceAddQueryInterface(child") < pdo.index("WdfFdoAddStaticChild")
 assert "SofWithdrawDmicDetectionChild(Device)" in device
 assert "pnpPowerCallbacks.EvtDeviceSurpriseRemoval = SofEvtDetectionSurpriseRemoval" in entry
+assert "#include <wdf.h>" in header.split("EVT_WDF_DEVICE_SURPRISE_REMOVAL")[0]
 assert "GUID_PUJJO_DMIC_DETECTION_BUS" in pdo and "GUID_PUJJO_DMIC_DETECTION_BUS" in port
 assert "GUID_PUJJO_AUDIO_BUS" not in pdo
 assert r'PUJJO\\AudioDmicDetectionTest' in header and r'PUJJO\AudioDmicDetectionTest' in inf

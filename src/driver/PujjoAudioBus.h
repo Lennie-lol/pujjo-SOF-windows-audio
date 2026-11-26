@@ -3,6 +3,9 @@
 
 #include <ntddk.h>
 #include <guiddef.h>
+#if defined(_KERNEL_MODE) && defined(PUJJO_DMIC_DETECTION_TEST) && !defined(PUJJO_AUDIO_PORTCLS)
+#include <wdf.h>
+#endif
 
 #define PUJJO_AUDIO_CHILD_ID L"PUJJO\\AudioDmic"
 #define PUJJO_DMIC_DETECTION_ID L"PUJJO\\AudioDmicDetectionTest"
