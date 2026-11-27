@@ -1330,14 +1330,17 @@ NTSTATUS SofRestoreBootController(_In_ PSOF_DEVICE_CONTEXT Ctx)
 /* Intel HD Audio rev 1.0a, section 3.3: audit all advertised stream
  * descriptors and the other bus-master engines before taking global DSP
  * processing ownership. This is a read-only idle snapshot, NOT a fence. */
-static NTSTATUS SofAuditColdBootOwnership(PSOF_DEVICE_CONTEXT Ctx)
+static NTSTATUS SofAuditColdBootOwnership(PSOF_DEVICE_CONTEXT Ctx, const char **Stage, ULONG *Index)
 {
     PUCHAR bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
+    *Stage = "BAR ranges";
+    *Index = MAXULONG;
     if (!bar0 || !Ctx->Bar4VirtualAddress || SofDeviceRemoved(Ctx) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar0Length, 0, SOF_HDA_ADSP_LOADER_BASE) ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPCS, sizeof(ULONG)))
         return STATUS_DEVICE_NOT_READY;
 
+    *Stage = "controller reset/flush";
     ULONG gctl = readl(bar0 + SOF_HDA_GCTL);
     ULONG gcap = readw(bar0 + SOF_HDA_GCAP);
     if (gctl == MAXULONG || gcap == 0xffffu || !(gctl & SOF_HDA_GCTL_RESET))
@@ -1346,12 +1349,15 @@ static NTSTATUS SofAuditColdBootOwnership(PSOF_DEVICE_CONTEXT Ctx)
     ULONG capture = (gcap >> 8) & 15u, playback = (gcap >> 12) & 15u;
     ULONG bidirectional = (gcap >> 3) & 31u;
     ULONG count = capture + playback + bidirectional;
+    *Stage = "descriptor geometry";
     if (!capture || !playback || capture != Ctx->NumCaptureStreams ||
         playback != Ctx->NumPlaybackStreams || count > 30u ||
         !pj_ipc4_mmio_span_valid(Ctx->Bar0Length, SOF_HDA_ADSP_LOADER_BASE,
             count * SOF_HDA_ADSP_SD_ENTRY_SIZE))
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     for (ULONG slot = 0; slot < count; ++slot) {
+        *Stage = "stream descriptor";
+        *Index = slot;
         PUCHAR regs = bar0 + SOF_HDA_ADSP_LOADER_BASE + slot * SOF_HDA_ADSP_SD_ENTRY_SIZE;
         ULONG ctl = SofCodeLoaderReadControl(regs);
         ULONG low = readl(regs + SOF_HDA_ADSP_REG_SD_BDLPL);
@@ -1364,23 +1370,30 @@ static NTSTATUS SofAuditColdBootOwnership(PSOF_DEVICE_CONTEXT Ctx)
     /* CORB/RIRB control DMA-enable (bit 1); base pairs; DMA position
      * base/enable. Even a stopped engine with foreign addresses is not
      * owned by this cold boot. Never clear them to acquire ownership. */
+    *Stage = "CORB/RIRB control";
+    *Index = MAXULONG;
     UCHAR corb = READ_REGISTER_UCHAR(bar0 + 0x4cu);
     UCHAR rirb = READ_REGISTER_UCHAR(bar0 + 0x5cu);
     if (corb == 0xffu || rirb == 0xffu) return STATUS_DEVICE_NOT_READY;
     if ((corb | rirb) & 2u) return STATUS_DEVICE_BUSY;
     const ULONG baseOffsets[] = { 0x40u, 0x44u, 0x50u, 0x54u, 0x70u, 0x74u };
     for (ULONG i = 0; i < RTL_NUMBER_OF(baseOffsets); ++i) {
+        *Stage = "controller DMA base offset";
+        *Index = baseOffsets[i];
         ULONG base = readl(bar0 + baseOffsets[i]);
         if (base == MAXULONG) return STATUS_DEVICE_NOT_READY;
         if (base) return STATUS_DEVICE_BUSY;
     }
 
+    *Stage = "DSP core power";
+    *Index = MAXULONG;
     ULONG core = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPCS);
     if (core == MAXULONG || SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
     /* A core held in reset can still belong to another power owner.
      * Cold rollback powers core zero off, so require it to start off. */
     if (core & (HDA_DSP_ADSPCS_SPA_MASK(0xffu) | HDA_DSP_ADSPCS_CPA_MASK(0xffu)))
         return STATUS_DEVICE_BUSY;
+    *Stage = "complete";
     return STATUS_SUCCESS;
 }
 
@@ -1388,9 +1401,14 @@ static NTSTATUS SofAuditColdBootOwnership(PSOF_DEVICE_CONTEXT Ctx)
 /* Same audit as the future loader, with no call into its write path. */
 VOID SofLogColdBootReadiness(PSOF_DEVICE_CONTEXT Ctx)
 {
-    NTSTATUS status = SofAuditColdBootOwnership(Ctx);
+    const char *stage;
+    ULONG index;
+    NTSTATUS status = SofAuditColdBootOwnership(Ctx, &stage, &index);
     ULONG pp = MAXULONG, core = MAXULONG, descriptors = 0;
     char message[192];
+    RtlStringCbPrintfA(message, sizeof(message),
+        "[ROM-preflight] audit stage=%s index=0x%08x status=0x%08x\n", stage, index, status);
+    SofLogBreadcrumb(message);
     if (!SofDeviceRemoved(Ctx) && Ctx->Bar0VirtualAddress &&
         pj_ipc4_mmio_span_valid(Ctx->Bar0Length, Ctx->PpCapOffset,
             SOF_HDA_REG_PP_PPCTL + sizeof(ULONG)) && Ctx->PpCapOffset)
@@ -1415,9 +1433,14 @@ static NTSTATUS SofAcquireBootProcessing(PSOF_DEVICE_CONTEXT Ctx)
     if (!Ctx->PpCapOffset || Ctx->PpCapOffset > Ctx->Bar0Length ||
         SOF_HDA_REG_PP_PPCTL + sizeof(ULONG) > Ctx->Bar0Length - Ctx->PpCapOffset)
         return STATUS_INVALID_BUFFER_SIZE;
-    NTSTATUS status = SofAuditColdBootOwnership(Ctx);
+    const char *stage;
+    ULONG index;
+    NTSTATUS status = SofAuditColdBootOwnership(Ctx, &stage, &index);
     if (status != STATUS_SUCCESS) {
-        SofLogBreadcrumb("[HDA] Cold boot idle ownership audit failed; no global write.\n");
+        char message[128];
+        RtlStringCbPrintfA(message, sizeof(message),
+            "[HDA] Cold boot audit failed: stage=%s index=0x%08x status=0x%08x\n", stage, index, status);
+        SofLogBreadcrumb(message);
         return status;
     }
     PUCHAR reg = bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL;

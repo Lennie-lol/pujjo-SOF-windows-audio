@@ -13,6 +13,7 @@ functions = loader[loader.index("static NTSTATUS SofLoaderDmaAddressesMatch("):
 shim = r"""
 #include <assert.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include "PujjoDmaPlan.h"
 typedef uint8_t UCHAR, BOOLEAN, *PUCHAR;
@@ -45,6 +46,7 @@ typedef int NTSTATUS;
 #define HDA_DSP_ADSPCS_CPA_MASK(c) ((c)<<24)
 #define HDA_DSP_ADSPCS_CRST_MASK(c) (c)
 #define SofLogBreadcrumb(s) ((void)(s))
+#define RtlStringCbPrintfA snprintf
 #define KeMemoryBarrier() ((void)0)
 #define PAGE_SIZE 4096u
 #define SOF_HDA_ADSP_LOADER_BASE 0x80u
@@ -125,6 +127,10 @@ int main(void) {
     writel(1,bar+SOF_HDA_GCTL);
     writew(0x1101,bar+SOF_HDA_GCAP);
     bar[0x80]=2;
+    const char *stage;
+    ULONG index;
+    assert(SofAuditColdBootOwnership(&c,&stage,&index)==STATUS_DEVICE_BUSY);
+    assert(!strcmp(stage,"stream descriptor") && index==0);
     assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
     bar[0x80]=0; writel(0x1000,bar+0xb8);
     assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
@@ -156,6 +162,8 @@ int main(void) {
     writel(8,bar+0x204);
     assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
     writel(0,bar+0x204);
+    assert(SofAuditColdBootOwnership(&c,&stage,&index)==STATUS_SUCCESS);
+    assert(!strcmp(stage,"complete") && index==MAXULONG);
     assert(SofAcquireBootProcessing(&c)==0 && c.BootPpBitsAdded==SOF_HDA_PPCTL_GPROCEN);
     assert(readl(bar+0x204)==SOF_HDA_PPCTL_GPROCEN);
     c.BootIntBitsAdded=1u<<31; writel(c.BootIntBitsAdded|2,bar+SOF_HDA_INTCTL);

@@ -8,6 +8,8 @@ Use only the unsigned v12 ROM-readiness submission after verifying its ZIP diges
 
 ## Conditions for a later boot experiment
 
+The updated readiness build retains the v12 diagnostic INF version. Identify it by the Actions run and ZIP SHA-256. In its audit breadcrumb, `stream descriptor` identifies the zero-based slot, `controller DMA base offset` identifies the BAR0 register offset, and `0xffffffff` means the stage has no index. No DMA address is logged. A powered primary core held in reset now fails the cold audit because its prior power owner is unknown.
+
 Even an idle v12 result cannot authorize address publication. Establish from the platform and Windows bus/DMA contracts which component exclusively owns these descriptors, which mechanism prevents new device requests, how outstanding transactions complete, and how mappings stay valid through orderly stop, rebalance and surprise loss. The zero reset type mask is an unresolved observation. Keep the admission gate closed until those conditions are independently demonstrated.
 
 Only after qualification, a separate ROM-only experiment must show ICCMAX preparation, PURGE acknowledgement, INIT_DONE, authenticated execution of the pinned image, FW_ENTERED after both loaders stop, IPC4 FW_READY and a matching four-field FW_CONFIG version. Record elapsed times, exact failure stage, final ownership ledger, controller restoration, DSP power-down and persistent disarm. A timeout, inaccessible register or uncertain detach ends that attempt. No automatic re-arm.
