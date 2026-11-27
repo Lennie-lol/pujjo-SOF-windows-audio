@@ -1195,6 +1195,7 @@ static NTSTATUS SofStopIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     if (Dma->Published) {
         ULONG ppctl;
         UCHAR ltrp, dmaStatus;
+        if (SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
         status = SofStopAndDetachBootStream(Dma->Registers, &dmaStatus);
         if (!NT_SUCCESS(status)) return status;
         Dma->Published = FALSE;
@@ -1770,8 +1771,10 @@ SofStartFirmwareBoot(
             status = STATUS_IO_DEVICE_ERROR;
             goto stop_dma;
         }
-        if (bootState == SOF_FW_BOOT_FAILED || statusReg == 0xFFFFFFFFu)
-            break;
+        if (bootState == SOF_FW_BOOT_FAILED || statusReg == 0xFFFFFFFFu) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto stop_dma;
+        }
         if (FSR_TO_STATE_CODE(statusReg) == FSR_STATE_FW_ENTERED) {
             DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                        "[SOF] *** FIRMWARE SUCCESSFULLY ENTERED (ROM Status: 0x%08x) ***\n",
@@ -1792,12 +1795,15 @@ SofStartFirmwareBoot(
         }
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
     }
+    if (FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED)
+        status = STATUS_IO_TIMEOUT;
 
 stop_dma:
     /* 7. Stop Code Loader DMA and disable SPIB */
     {
         UCHAR dmaStatus;
-        NTSTATUS stopStatus = SofStopAndDetachBootStream(streamRegs, &dmaStatus);
+        NTSTATUS stopStatus = SofDeviceRemoved(Ctx) ? STATUS_DEVICE_NOT_READY :
+            SofStopAndDetachBootStream(streamRegs, &dmaStatus);
         if (!NT_SUCCESS(stopStatus)) {
             status = stopStatus;
             goto dma_unconfirmed;

@@ -42,7 +42,7 @@ static PUCHAR SofWaveRtHdaDescriptor(PSOF_WAVERT_STREAM Stream)
         return NULL;
     ctx = Stream->DeviceContext;
     offset = SOF_HDA_STREAM_REG_OFFSET(Stream->StreamIndex);
-    if (!ctx->Bar0VirtualAddress || offset > ctx->Bar0Length ||
+    if (SofDeviceRemoved(ctx) || !ctx->Bar0VirtualAddress || offset > ctx->Bar0Length ||
         SOF_HDA_ADSP_SD_ENTRY_SIZE > ctx->Bar0Length - offset)
         return NULL;
     return (PUCHAR)ctx->Bar0VirtualAddress + offset;
@@ -897,7 +897,7 @@ NTSTATUS SofWaveRtGetPosition(
     ULONG offset, position;
     if (InterlockedCompareExchange(&Stream->DmaFaulted, 0, 0))
         return STATUS_IO_DEVICE_ERROR;
-    if (!ctx || !ctx->Bar0VirtualAddress || Stream->StreamIndex >= 30u ||
+    if (!ctx || SofDeviceRemoved(ctx) || !ctx->Bar0VirtualAddress || Stream->StreamIndex >= 30u ||
         !Stream->DescriptorPublished)
         return STATUS_DEVICE_NOT_READY;
     /* ADL-N decoupled host DMA position follows the Intel DPIB register. */
@@ -1096,7 +1096,7 @@ NTSTATUS SofWaveRtConfigureHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     USHORT format;
     NTSTATUS status;
 
-    if (!regs || !Stream->DescriptorReserved || !Stream->BdlPeriodCount)
+    if (!regs || !Stream->DescriptorReserved || Stream->DescriptorPublished || !Stream->BdlPeriodCount)
         return STATUS_DEVICE_NOT_READY;
     ctx = Stream->DeviceContext;
     if (!ctx->PpCapOffset || ctx->PpCapOffset > ctx->Bar0Length ||
@@ -1116,7 +1116,10 @@ NTSTATUS SofWaveRtConfigureHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     format = SofHdaComputeFormatWord(Stream->Format.SamplingFrequency,
         Stream->Format.ValidBitDepth, Stream->Format.ChannelsCount);
     if (!format) return STATUS_NOT_SUPPORTED;
-    status = SofWaveRtResetHdaStream(Stream);
+    /* An idle descriptor has passed the ownership checks above. */
+    status = SofWaveRtSetHdaControl(regs, SOF_HDA_SD_CTL_DMA_RESET, SOF_HDA_SD_CTL_DMA_RESET);
+    if (!NT_SUCCESS(status)) return status;
+    status = SofWaveRtSetHdaControl(regs, SOF_HDA_SD_CTL_DMA_RESET | SOF_HDA_SD_CTL_DMA_START, 0);
     if (!NT_SUCCESS(status)) return status;
 
     streamBit = 1u << Stream->StreamIndex;
@@ -1128,10 +1131,18 @@ NTSTATUS SofWaveRtConfigureHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     writel(Stream->BufferSizeBytes, regs + SOF_HDA_ADSP_REG_SD_CBL);
     writew((USHORT)(Stream->BdlPeriodCount - 1u), regs + SOF_HDA_ADSP_REG_SD_LVI);
     writew(format, regs + SOF_HDA_ADSP_REG_SD_FORMAT);
+    KeMemoryBarrier();
+    /* Either address write can expose the BDL, even if readback fails. */
+    Stream->DescriptorPublished = TRUE;
     writel(Stream->BdlPhysicalAddress.LowPart, regs + SOF_HDA_ADSP_REG_SD_BDLPL);
     writel((ULONG)Stream->BdlPhysicalAddress.HighPart, regs + SOF_HDA_ADSP_REG_SD_BDLPU);
     /* Keep controller stream IRQ disabled while the DPC polls real BCIS. */
-    Stream->DescriptorPublished = TRUE;
+    if (readl(regs + SOF_HDA_ADSP_REG_SD_BDLPL) != Stream->BdlPhysicalAddress.LowPart ||
+        readl(regs + SOF_HDA_ADSP_REG_SD_BDLPU) != (ULONG)Stream->BdlPhysicalAddress.HighPart ||
+        readl(regs + SOF_HDA_ADSP_REG_SD_CBL) != Stream->BufferSizeBytes ||
+        readw(regs + SOF_HDA_ADSP_REG_SD_LVI) != Stream->BdlPeriodCount - 1u ||
+        readw(regs + SOF_HDA_ADSP_REG_SD_FORMAT) != format)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
     return SofWaveRtSetHdaControl(regs, 0x00ffffffu, Stream->StreamTag << 20);
 #else
     UNREFERENCED_PARAMETER(Stream);
@@ -1161,6 +1172,7 @@ NTSTATUS SofWaveRtStartHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
 NTSTATUS SofWaveRtStopHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
 {
 #ifdef _KERNEL_MODE
+    if (!Stream->DescriptorPublished) return STATUS_SUCCESS;
     return SofWaveRtSetHdaControl(SofWaveRtHdaDescriptor(Stream), SOF_HDA_SD_CTL_DMA_START, 0);
 #else
     UNREFERENCED_PARAMETER(Stream);
@@ -1172,6 +1184,7 @@ NTSTATUS SofWaveRtResetHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
 {
 #ifdef _KERNEL_MODE
     PUCHAR regs = SofWaveRtHdaDescriptor(Stream);
+    if (!Stream->DescriptorPublished) return STATUS_SUCCESS;
     NTSTATUS status = SofWaveRtStopHdaStream(Stream);
     if (!NT_SUCCESS(status)) return status;
     status = SofWaveRtSetHdaControl(regs, SOF_HDA_SD_CTL_DMA_RESET, SOF_HDA_SD_CTL_DMA_RESET);
@@ -1181,7 +1194,10 @@ NTSTATUS SofWaveRtResetHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
         writel(0, regs + SOF_HDA_ADSP_REG_SD_BDLPL);
         writel(0, regs + SOF_HDA_ADSP_REG_SD_BDLPU);
         if (readl(regs + SOF_HDA_ADSP_REG_SD_BDLPL) ||
-            readl(regs + SOF_HDA_ADSP_REG_SD_BDLPU))
+            readl(regs + SOF_HDA_ADSP_REG_SD_BDLPU) ||
+            (readl(regs + SOF_HDA_ADSP_REG_SD_CTL) &
+                (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)) ||
+            SofDeviceRemoved(Stream->DeviceContext))
             return STATUS_DEVICE_NOT_READY;
         Stream->DescriptorPublished = FALSE;
     }
