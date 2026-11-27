@@ -129,6 +129,7 @@ jobs:
             @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_DSP_BOOT_DIAGNOSTIC'; Name='dsp-boot-only' },
             @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_ENABLE_EXPERIMENTAL_AUDIO /DPUJJO_DMIC_ENUMERATION_CANDIDATE'; Name='dmic-enumeration-compile-only' },
             @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_DSP_BOOT_DIAGNOSTIC /DPUJJO_DMIC_DETECTION_TEST'; Name='dmic-detection-parent' },
+            @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_DSP_BOOT_DIAGNOSTIC /DPUJJO_DMIC_DMA_PREFLIGHT'; Name='dmic-dma-preflight' },
             @{ Project='pujjo_audio'; Defines='/DPUJJO_DMIC_DETECTION_TEST_ADAPTER'; Name='dmic-detection-child' },
             @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_READONLY_PROBE'; Name='codec-identity' },
             @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_CONTROL'; Name='codec-runtime' },
@@ -278,6 +279,28 @@ jobs:
         with:
           name: Pujjo-v0.0.8.1-MIC-DETECTION-UNSIGNED
           path: ${{ runner.temp }}/pujjo-dmic-detection/
+          if-no-files-found: error
+      - name: Stage separate unsigned DMA admission preflight
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $revision = (git rev-parse HEAD).Trim()
+          ./scripts/Stage-PujjoDspBootDiagnostic.ps1 -BinaryDirectory "$env:RUNNER_TEMP/guarded-dmic-dma-preflight/bin" -OutputDirectory "$env:RUNNER_TEMP/pujjo-dmic-dma-preflight" -SourceRevision $revision -DmaPreflight
+          ./scripts/Verify-PujjoDspBootDiagnostic.ps1 -SubmissionDirectory "$env:RUNNER_TEMP/pujjo-dmic-dma-preflight" -ExpectedRevision $revision -DmaPreflight
+      - name: Verify DMA admission preflight under Windows PowerShell
+        if: matrix.configuration == 'Release'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $revision = (git rev-parse HEAD).Trim()
+          ./scripts/Verify-PujjoDspBootDiagnostic.ps1 -SubmissionDirectory "$env:RUNNER_TEMP/pujjo-dmic-dma-preflight" -ExpectedRevision $revision -DmaPreflight
+      - name: Upload unsigned DMA admission preflight
+        if: success() && matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pujjo-v0.0.9.0-DMA-PREFLIGHT-UNSIGNED
+          path: ${{ runner.temp }}/pujjo-dmic-dma-preflight/
           if-no-files-found: error
       - name: Preserve logs even when checks or compilation fail
         if: always()

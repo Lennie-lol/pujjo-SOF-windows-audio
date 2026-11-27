@@ -6,14 +6,15 @@ param(
     [Parameter(Mandatory)] [string]$SignedPackageDirectory,
     [Parameter(Mandatory)] [string]$SignToolPath,
     [string]$FirmwarePath,
-    [switch]$InspectLocalBoard
+    [switch]$InspectLocalBoard,
+    [switch]$DmaPreflight
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # Run the same provenance, manifest, target and INF safety checks as release CI.
 # The sibling script's optional signed-package path always enforces /kp.
-& (Join-Path $PSScriptRoot 'Verify-PujjoDspBootDiagnostic.ps1') -SubmissionDirectory $SubmissionDirectory -ExpectedRevision $ExpectedRevision -FirmwarePath $FirmwarePath -InspectLocalBoard:$InspectLocalBoard
+& (Join-Path $PSScriptRoot 'Verify-PujjoDspBootDiagnostic.ps1') -SubmissionDirectory $SubmissionDirectory -ExpectedRevision $ExpectedRevision -FirmwarePath $FirmwarePath -InspectLocalBoard:$InspectLocalBoard -DmaPreflight:$DmaPreflight
 
 $expectedSigner = '9B7476DECA7CA559F9B77CA9DEE19E38B9A9E9E5'
 $names = @('sof_dsp.inf', 'sof_dsp.sys', 'sof_dsp.cat')

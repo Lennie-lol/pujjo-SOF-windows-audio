@@ -137,6 +137,11 @@ typedef struct _SOF_DMA_BUFFER {
 #endif
 } SOF_DMA_BUFFER, *PSOF_DMA_BUFFER;
 
+#ifdef PUJJO_DMIC_DMA_PREFLIGHT
+/* One-shot host allocation admission only. No addresses are published. */
+NTSTATUS SofRunDmicDmaPreflight(_In_ PSOF_DEVICE_CONTEXT Ctx);
+#endif
+
 /* Image Parsing */
 
 /**

@@ -334,7 +334,8 @@ SofAllocateDmaBuffer(
     }
     DmaBuf->VirtualAddress = WdfCommonBufferGetAlignedVirtualAddress(DmaBuf->CommonBuffer);
     DmaBuf->PhysicalAddress = WdfCommonBufferGetAlignedLogicalAddress(DmaBuf->CommonBuffer);
-    if (!pj_hda_dma_span_valid(DmaBuf->PhysicalAddress.LowPart,
+    if (!DmaBuf->VirtualAddress || WdfCommonBufferGetLength(DmaBuf->CommonBuffer) < Size ||
+        !pj_hda_dma_span_valid(DmaBuf->PhysicalAddress.LowPart,
             (ULONG)DmaBuf->PhysicalAddress.HighPart, Size, Ctx->HdaDma64Bit)) {
         WdfObjectDelete(DmaBuf->CommonBuffer);
         RtlZeroMemory(DmaBuf, sizeof(*DmaBuf));
@@ -813,6 +814,150 @@ static NTSTATUS SofVerifyAdlNIpc4Candidate(PUCHAR Image, ULONG ImageBytes)
     if (!NT_SUCCESS(status)) return status;
     return RtlEqualMemory(expected, digest, sizeof(digest)) ?
            STATUS_SUCCESS : STATUS_INVALID_IMAGE_HASH;
+}
+#endif
+
+#ifdef PUJJO_DMIC_DMA_PREFLIGHT
+#if !defined(PUJJO_DSP_BOOT_DIAGNOSTIC) || !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) || \
+    !defined(PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED) || defined(PUJJO_DMIC_DETECTION_TEST) || \
+    defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO) || defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG)
+#error DMA admission preflight must be isolated from all active firmware and audio paths
+#endif
+
+/* Exercise the actual allocator and descriptor geometry without publishing
+ * any address to hardware. All six buffers coexist. No DMA transaction,
+ * interrupt, stream, or firmware execution can originate here. */
+static NTSTATUS SofStageUnpublishedDmicBuffers(PSOF_DEVICE_CONTEXT Ctx,
+    const UCHAR *Payload, ULONG PayloadBytes)
+{
+    SOF_DMA_BUFFER buffers[6] = {0};
+    ULONG sizes[] = {PayloadBytes, 4096u, 4096u, 4096u, 0u, 4096u};
+    ULONG ringBytes, periodMs, periodCount;
+    ULONG allocated = 0;
+    pj_dma_plan plan;
+    NTSTATUS status = STATUS_INVALID_BUFFER_SIZE;
+    char msg[192];
+
+    if (!Payload || PayloadBytes < 256u || PayloadBytes > PJ_DMA_MAX_BYTES ||
+        !pj_pcm_notification_ring(PJ_DMIC_RATE, PJ_DMIC_CHANNELS, PJ_DMIC_BITS,
+            PJ_DMIC_BITS, 15360u, &ringBytes, &periodMs))
+        return status;
+    sizes[4] = ringBytes;
+    for (ULONG i = 0; i < RTL_NUMBER_OF(buffers); ++i) {
+        status = SofAllocateDmaBuffer(Ctx, sizes[i], &buffers[i]);
+        if (!NT_SUCCESS(status)) goto Done;
+        ++allocated;
+        /* Zero is not a usable BDL base. Reject it for every allocation. */
+        if (buffers[i].PhysicalAddress.QuadPart == 0) {
+            status = STATUS_DEVICE_CONFIGURATION_ERROR;
+            goto Done;
+        }
+    }
+    status = STATUS_INVALID_BUFFER_SIZE;
+    if (!pj_dma_plan_pair(buffers[0].PhysicalAddress.LowPart,
+            (ULONG)buffers[0].PhysicalAddress.HighPart, PayloadBytes,
+            (PayloadBytes / 2u) & ~127u, &plan) ||
+        !pj_dma_plan_pair(buffers[2].PhysicalAddress.LowPart,
+            (ULONG)buffers[2].PhysicalAddress.HighPart, sizes[2],
+            sizes[2] / 2u, &plan) ||
+        !pj_dma_period_count(buffers[4].PhysicalAddress.LowPart,
+            (ULONG)buffers[4].PhysicalAddress.HighPart, ringBytes,
+            ringBytes / 2u, &periodCount) || periodCount != 2u)
+        goto Done;
+
+    RtlCopyMemory(buffers[0].VirtualAddress, Payload, PayloadBytes);
+    if (RtlCompareMemory(buffers[0].VirtualAddress, Payload, PayloadBytes) != PayloadBytes) {
+        status = STATUS_DATA_ERROR;
+        goto Done;
+    }
+    status = STATUS_SUCCESS;
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[DMA-preflight] Six unpublished allocations and CPU payload copy verified; capture=%u bytes, %u ms/period.\n",
+        ringBytes, periodMs);
+    SofLogBreadcrumb(msg);
+Done:
+    while (allocated) SofFreeDmaBuffer(Ctx, &buffers[--allocated]);
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[DMA-preflight] All allocated buffer deletion requests issued; status=0x%08x. No addresses published.\n", status);
+    SofLogBreadcrumb(msg);
+    return status;
+}
+
+/* This callback is reached only after the driver-wide one-shot resource
+ * probe has validated the exact board and unmapped both BARs. */
+NTSTATUS SofRunDmicDmaPreflight(PSOF_DEVICE_CONTEXT Ctx)
+{
+    static const PJ_BYTE copierUuid[16] = {
+        0x83,0x0c,0xa0,0x9b,0x12,0xca,0x83,0x4a,0x94,0x3c,0x1f,0xa2,0xe8,0x2f,0x9d,0xda
+    };
+    static const PJ_BYTE gainUuid[16] = {
+        0xa8,0xa9,0xbc,0x61,0xd0,0x18,0x18,0x4a,0x8e,0x7b,0x26,0x39,0x21,0x98,0x04,0xb7
+    };
+    PVOID raw = NULL, table = NULL;
+    ULONG bytes = 0, tableBytes = 0, copierPages, gainPages;
+    SOF_FW_IMAGE_INFO info = {0};
+    pj_dmic_profile profile;
+    pj_firmware_config record;
+    WDF_DMA_ENABLER_CONFIG config;
+    WDFDMAENABLER enabler = NULL;
+    NTSTATUS status;
+    char msg[160];
+
+    if (!Ctx || KeGetCurrentIrql() != PASSIVE_LEVEL ||
+        Ctx->Bar0VirtualAddress || Ctx->Bar4VirtualAddress || Ctx->DmaEnabler ||
+        Ctx->WdfInterrupt || Ctx->VendorId != 0x8086u || Ctx->DeviceId != 0x54c8u ||
+        !Ctx->NumCaptureStreams || !Ctx->NumPlaybackStreams)
+        return STATUS_INVALID_DEVICE_STATE;
+
+    status = SofLoadFirmwareFile(L"\\SystemRoot\\System32\\drivers\\intel\\sof-ipc4\\adl-n\\sof-adl-n.ri",
+        &raw, &bytes);
+    if (!NT_SUCCESS(status)) goto Done;
+    status = SofVerifyAdlNIpc4Candidate(raw, bytes);
+    if (!NT_SUCCESS(status)) goto Done;
+    status = SofParseFirmwareImage(raw, bytes, &info);
+    if (!NT_SUCCESS(status)) goto Done;
+    status = SofNhltQueryAcpiTable(&table, &tableBytes);
+    if (NT_SUCCESS(status))
+        status = SofNhltInspectPujjoDmic(table, tableBytes, &profile);
+    else if (status == STATUS_NOT_FOUND || status == STATUS_OBJECT_NAME_NOT_FOUND)
+        status = SofNhltInspectEmbeddedDmic(&profile);
+    if (!NT_SUCCESS(status)) goto Done;
+    if (profile.bytes > PJ_IPC4_MAX_MAILBOX_PAYLOAD -
+            (sizeof(struct sof_ipc4_copier_data) - sizeof(ULONG)) ||
+        pj_firmware_load_profile(raw, bytes, copierUuid, &Ctx->CopierProfile) != PJ_CATALOG_OK ||
+        pj_firmware_load_profile(raw, bytes, gainUuid, &Ctx->GainProfile) != PJ_CATALOG_OK ||
+        pj_firmware_plan_ll(&Ctx->CopierProfile, PJ_DMIC_CHUNK_BYTES, PJ_DMIC_CHUNK_BYTES,
+            &record, &copierPages) != PJ_CATALOG_OK ||
+        pj_firmware_plan_ll(&Ctx->GainProfile, PJ_DMIC_CHUNK_BYTES, PJ_DMIC_CHUNK_BYTES,
+            &record, &gainPages) != PJ_CATALOG_OK ||
+        copierPages > 10u || gainPages > 20u - 2u * copierPages) {
+        status = STATUS_NOT_SUPPORTED;
+        goto Done;
+    }
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[DMA-preflight] Pinned image parsed, DMIC route and module budgets verified; payload=%u bytes, copier=%u pages, gain=%u pages.\n",
+        info.PayloadSize, copierPages, gainPages);
+    SofLogBreadcrumb(msg);
+
+    WdfDeviceSetAlignmentRequirement(Ctx->WdfDevice, FILE_128_BYTE_ALIGNMENT);
+    WDF_DMA_ENABLER_CONFIG_INIT(&config, WdfDmaProfileScatterGather64, PJ_DMA_MAX_BYTES);
+    status = WdfDmaEnablerCreate(Ctx->WdfDevice, &config, WDF_NO_OBJECT_ATTRIBUTES, &enabler);
+    if (!NT_SUCCESS(status)) goto Done;
+    Ctx->DmaEnabler = enabler;
+    status = SofStageUnpublishedDmicBuffers(Ctx, (const UCHAR *)raw + info.PayloadOffset, info.PayloadSize);
+Done:
+    if (Ctx->DmaEnabler) {
+        WdfObjectDelete(Ctx->DmaEnabler);
+        Ctx->DmaEnabler = NULL;
+    }
+    SofNhltFreeAcpiTable(table);
+    SofFreeFirmwareBuffer(raw);
+    RtlZeroMemory(&Ctx->CopierProfile, sizeof(Ctx->CopierProfile));
+    RtlZeroMemory(&Ctx->GainProfile, sizeof(Ctx->GainProfile));
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[DMA-preflight] Admission status=0x%08x; DSP ROM, DMA execution and recording still locked.\n", status);
+    SofLogBreadcrumb(msg);
+    return status;
 }
 #endif
 

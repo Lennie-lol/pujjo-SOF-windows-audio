@@ -30,13 +30,16 @@ typedef struct {ULONG Size;void *VirtualAddress;void *CommonBuffer;ADDRESS Physi
 static int allocation_status;
 static unsigned allocations;
 static unsigned deletions;
+static size_t allocatedSize;
+static int nullAddress, shortBuffer;
 static void WdfObjectDelete(void *buffer) { ++deletions; free(buffer); }
 static NTSTATUS WdfCommonBufferCreate(void *enabler,ULONG size,void *attrs,void **out) {
  assert(enabler);(void)attrs;++allocations;
  if(allocation_status)return allocation_status;
- *out=malloc(size);assert(*out);memset(*out,0xa5,size);return 0;
+ allocatedSize=size; *out=malloc(size);assert(*out);memset(*out,0xa5,size);return 0;
 }
-static void *WdfCommonBufferGetAlignedVirtualAddress(void *buffer) {return buffer;}
+static void *WdfCommonBufferGetAlignedVirtualAddress(void *buffer) {return nullAddress ? NULL : buffer;}
+static size_t WdfCommonBufferGetLength(void *buffer) {assert(buffer); return allocatedSize-(shortBuffer?1u:0u);}
 static ADDRESS WdfCommonBufferGetAlignedLogicalAddress(void *buffer) {
  ADDRESS address={UINT64_C(0x12345678000)};assert(buffer);return address;
 }
@@ -55,7 +58,13 @@ int main(void) {
  allocation_status=0;
  assert(SofAllocateDmaBuffer(&ctx,64,&b)==STATUS_DEVICE_CONFIGURATION_ERROR);
  assert(deletions==1 && !b.Size && !b.VirtualAddress && !b.CommonBuffer);
- ctx.HdaDma64Bit=1;
+ ctx.HdaDma64Bit=1;nullAddress=1;
+ assert(SofAllocateDmaBuffer(&ctx,64,&b)==STATUS_DEVICE_CONFIGURATION_ERROR);
+ assert(deletions==2 && !b.CommonBuffer && !b.VirtualAddress);
+ nullAddress=0;shortBuffer=1;
+ assert(SofAllocateDmaBuffer(&ctx,64,&b)==STATUS_DEVICE_CONFIGURATION_ERROR);
+ assert(deletions==3 && !b.CommonBuffer && !b.VirtualAddress);
+ shortBuffer=0;
  assert(SofAllocateDmaBuffer(&ctx,64,&b)==STATUS_SUCCESS);
  assert(b.Size==64 && b.CommonBuffer==b.VirtualAddress);
  assert(b.PhysicalAddress.QuadPart==UINT64_C(0x12345678000));

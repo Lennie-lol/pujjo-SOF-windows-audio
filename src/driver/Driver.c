@@ -306,6 +306,9 @@ DriverEntry(
 #ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
     ULONG requestedPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
     SofLogBreadcrumb("[Safety] Pujjo resource diagnostic v0.0.8.0\n");
+#ifdef PUJJO_DMIC_DMA_PREFLIGHT
+    SofLogBreadcrumb("[Safety] Pujjo firmware/DMA admission v0.0.9.0; recording locked.\n");
+#endif
 #ifdef PUJJO_DMIC_DETECTION_TEST
     SofLogBreadcrumb("[Safety] Pujjo microphone detection test v0.0.8.1; recording disabled.\n");
 #endif
