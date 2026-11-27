@@ -299,7 +299,7 @@ jobs:
         if: success() && matrix.configuration == 'Release'
         uses: actions/upload-artifact@v4
         with:
-          name: Pujjo-v0.0.9.1-DMA-PREFLIGHT-UNSIGNED
+          name: Pujjo-v0.0.9.2-DMA-PREFLIGHT-UNSIGNED
           path: ${{ runner.temp }}/pujjo-dmic-dma-preflight/
           if-no-files-found: error
       - name: Preserve logs even when checks or compilation fail

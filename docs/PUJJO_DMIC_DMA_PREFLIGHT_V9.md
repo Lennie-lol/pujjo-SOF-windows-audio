@@ -1,4 +1,4 @@
-# Pujjo v0.0.9.1 — microphone hardware admission preflight
+# Pujjo v0.0.9.2 — microphone hardware admission preflight
 
 **Source candidate. Not a recording driver. No installation or activation authorization.**
 
@@ -82,3 +82,51 @@ FW_READY, mic-only IPC4 topology creation, capture position/notifications,
 actual non-silent samples and app-compatible PCM formats all need physical
 validation. Do not remove detection-only restrictions to make a fake
 recording endpoint selectable.
+
+## v0.0.9.2: independent backing-page experiment
+
+A WDF common buffer's deletion is tied to the DMA enabler. Merely retaining
+its handle in a per-device quarantine record cannot prove DMA safety on
+surprise removal. Microsoft documents a different backend,
+DMA_OPERATIONS.CreateCommonBufferFromMdl, in which the driver supplies
+resident, system-mapped pages and owns freeing those pages independently
+of the HAL common-buffer mapping.
+
+The isolated preflight now requests DMA interface version 3 and uses the
+borrowed WDM DMA adapter while its WDF enabler is still alive. After the
+original WDF probe it tries six simultaneous independently backed buffers
+with exactly the same firmware, ICCMAX and capture geometry. The MDLs use
+fully allocated, physically contiguous, page-aligned cached memory so
+systems without remapping can also attempt the test. The HAL supplies the
+logical address; the code checks the entire rounded span including its
+last byte, alignment, nonzero address and controller width. It never
+substitutes a PFN or CPU address. Neither geometry validation nor copying
+the pinned payload writes to the DSP.
+
+Each successful map is paired with FreeCommonBuffer using the actual
+round-up length, logical address and system VA before freeing MDL pages
+and the MDL itself. All six are released in reverse order before requesting
+enabler deletion. Missing versioned callbacks, partial allocation, failed
+CPU mapping, failed HAL mapping, invalid logical span, or failed payload
+comparison are reported, with cleanup of every acquired resource.
+
+Host regression exercises the production allocator and stage for both
+address widths, at each of six allocation positions and ten injected
+failure types. It checks exact unmap arguments, reverse-order cleanup,
+absence of leaks and unmap-before-page-free. These are simulated Windows
+calls only; the WDK build and physical allocation result are separate
+gates.
+
+This is not yet a replacement for the active DMA backend: retaining the
+pages independently does not prove an IOVA remains reserved, that the HAL
+adapter remains usable after device removal, or that outstanding bus writes
+have completed. No page or mapping is published to a descriptor. Active
+DMA, firmware, child publication and recording stay compile-time locked.
+A later active implementation must establish safe invalidation or
+quiescence before freeing published pages or permitting rebind.
+
+References:
+- https://learn.microsoft.com/windows-hardware/drivers/ddi/wdm/nc-wdm-pcreate-common-buffer-from-mdl
+- https://learn.microsoft.com/windows-hardware/drivers/ddi/wdm/nf-wdm-mmallocatepagesformdlex
+- https://learn.microsoft.com/windows-hardware/drivers/ddi/wdm/nc-wdm-pfree_common_buffer
+- https://learn.microsoft.com/windows-hardware/drivers/ddi/wdfdmaenabler/nf-wdfdmaenabler-wdfdmaenablerwdmgetdmaadapter

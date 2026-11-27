@@ -853,6 +853,130 @@ static NTSTATUS SofVerifyAdlNIpc4Candidate(PUCHAR Image, ULONG ImageBytes)
 #error DMA admission preflight must be isolated from all active firmware and audio paths
 #endif
 
+/* Driver-owned page backing, separate from HAL mapping ownership. This
+ * backend is deliberately restricted to UNPUBLISHED buffers. It does not
+ * establish that an IOVA will remain reserved after surprise removal. */
+typedef struct _SOF_MDL_DMA_BUFFER {
+    PMDL Pages;
+    PVOID SystemAddress;
+    PHYSICAL_ADDRESS LogicalAddress;
+    ULONG MappedBytes;
+    BOOLEAN MappingCreated;
+} SOF_MDL_DMA_BUFFER;
+
+static VOID SofReleaseUnpublishedMdlDma(PDMA_ADAPTER Adapter, SOF_MDL_DMA_BUFFER *Buffer)
+{
+    if (Buffer->MappingCreated) {
+        Adapter->DmaOperations->FreeCommonBuffer(Adapter, Buffer->MappedBytes,
+            Buffer->LogicalAddress, Buffer->SystemAddress, TRUE);
+        Buffer->MappingCreated = FALSE;
+    }
+    /* MmAllocatePagesForMdlEx pages and MDL are ours, not HAL's.
+     * MmFreePagesFromMdl also releases their CPU mapping on Windows 11. */
+    if (Buffer->Pages) {
+        MmFreePagesFromMdl(Buffer->Pages);
+        ExFreePool(Buffer->Pages);
+    }
+    RtlZeroMemory(Buffer, sizeof(*Buffer));
+}
+
+static NTSTATUS SofAllocateUnpublishedMdlDma(PDMA_ADAPTER Adapter, ULONG Bytes,
+    BOOLEAN Dma64, SOF_MDL_DMA_BUFFER *Buffer)
+{
+    PHYSICAL_ADDRESS low = {0}, high = {0}, skip = {0};
+    NTSTATUS status;
+
+    if (!Buffer) return STATUS_INVALID_PARAMETER;
+    RtlZeroMemory(Buffer, sizeof(*Buffer));
+    if (!Bytes || Bytes > PJ_DMA_MAX_BYTES) return STATUS_INVALID_PARAMETER;
+    /* The tail of this versioned DMA_OPERATIONS table is optional. */
+    if (!Adapter || !Adapter->DmaOperations ||
+        Adapter->DmaOperations->Size < FIELD_OFFSET(DMA_OPERATIONS, CreateCommonBufferFromMdl) +
+            sizeof(Adapter->DmaOperations->CreateCommonBufferFromMdl) ||
+        !Adapter->DmaOperations->CreateCommonBufferFromMdl ||
+        !Adapter->DmaOperations->FreeCommonBuffer)
+        return STATUS_NOT_SUPPORTED;
+
+    Buffer->MappedBytes = (ULONG)ROUND_TO_PAGES(Bytes);
+    high.QuadPart = Dma64 ? MAXLONGLONG : MAXULONG;
+    /* Contiguous backing permits testing even without DMA remapping. Never
+     * treat PFNs or the CPU address as a device-visible logical address. */
+    Buffer->Pages = MmAllocatePagesForMdlEx(low, high, skip, Buffer->MappedBytes,
+        MmCached, MM_ALLOCATE_FULLY_REQUIRED | MM_ALLOCATE_REQUIRE_CONTIGUOUS_CHUNKS);
+    status = STATUS_INSUFFICIENT_RESOURCES;
+    if (!Buffer->Pages) goto Failed;
+    if (MmGetMdlByteCount(Buffer->Pages) != Buffer->MappedBytes ||
+        MmGetMdlByteOffset(Buffer->Pages) || Buffer->Pages->Next) {
+        status = STATUS_INVALID_BUFFER_SIZE;
+        goto Failed;
+    }
+    Buffer->SystemAddress = MmGetSystemAddressForMdlSafe(Buffer->Pages,
+        NormalPagePriority | MdlMappingNoExecute);
+    if (!Buffer->SystemAddress) goto Failed;
+    status = Adapter->DmaOperations->CreateCommonBufferFromMdl(Adapter, Buffer->Pages,
+        NULL, 0, &Buffer->LogicalAddress);
+    if (!NT_SUCCESS(status)) goto Failed;
+    /* Set ownership before validating the returned address: invalid maps
+     * still need to be removed using the exact returned address and size. */
+    Buffer->MappingCreated = TRUE;
+    if (!Buffer->LogicalAddress.QuadPart ||
+        (Buffer->LogicalAddress.LowPart & (PAGE_SIZE - 1u)) ||
+        !pj_hda_dma_span_valid(Buffer->LogicalAddress.LowPart,
+            (ULONG)Buffer->LogicalAddress.HighPart, Buffer->MappedBytes, Dma64)) {
+        status = STATUS_DEVICE_CONFIGURATION_ERROR;
+        goto Failed;
+    }
+    RtlZeroMemory(Buffer->SystemAddress, Buffer->MappedBytes);
+    return STATUS_SUCCESS;
+Failed:
+    SofReleaseUnpublishedMdlDma(Adapter, Buffer);
+    return status;
+}
+
+/* Exercise firmware, ICCMAX and capture pairs simultaneously with the
+ * owned-backing backend. The adapter is borrowed from the live WDF enabler;
+ * all mappings are removed before that enabler can be deleted. */
+static NTSTATUS SofStageOwnedDmicBuffers(PDMA_ADAPTER Adapter, BOOLEAN Dma64,
+    const UCHAR *Payload, ULONG PayloadBytes)
+{
+    SOF_MDL_DMA_BUFFER buffers[6] = {0};
+    ULONG sizes[] = {PayloadBytes, PAGE_SIZE, PAGE_SIZE, PAGE_SIZE, 0u, PAGE_SIZE};
+    ULONG allocated = 0, periodCount = 0, periodMs;
+    pj_dma_plan plan;
+    NTSTATUS status = STATUS_INVALID_BUFFER_SIZE;
+    char msg[180];
+
+    if (!Payload || PayloadBytes < 256u || PayloadBytes > PJ_DMA_MAX_BYTES ||
+        !pj_dmic_voice_ring(3840u, &sizes[4], &periodMs))
+        return status;
+    for (ULONG i = 0; i < RTL_NUMBER_OF(buffers); ++i) {
+        status = SofAllocateUnpublishedMdlDma(Adapter, sizes[i], Dma64, &buffers[i]);
+        if (!NT_SUCCESS(status)) goto Done;
+        ++allocated;
+    }
+    status = STATUS_INVALID_BUFFER_SIZE;
+    if (!pj_dma_plan_pair(buffers[0].LogicalAddress.LowPart,
+            (ULONG)buffers[0].LogicalAddress.HighPart, PayloadBytes,
+            (PayloadBytes / 2u) & ~127u, &plan) ||
+        !pj_dma_plan_pair(buffers[2].LogicalAddress.LowPart,
+            (ULONG)buffers[2].LogicalAddress.HighPart, sizes[2], sizes[2] / 2u, &plan) ||
+        !pj_dma_period_count(buffers[4].LogicalAddress.LowPart,
+            (ULONG)buffers[4].LogicalAddress.HighPart, sizes[4], sizes[4] / 2u, &periodCount) ||
+        periodCount != 2u)
+        goto Done;
+    RtlCopyMemory(buffers[0].SystemAddress, Payload, PayloadBytes);
+    status = RtlCompareMemory(buffers[0].SystemAddress, Payload, PayloadBytes) == PayloadBytes ?
+        STATUS_SUCCESS : STATUS_DATA_ERROR;
+Done:
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[DMA-owned] stage=0x%08x; %u independently owned backing allocations; no address published.\n",
+        status, allocated);
+    SofLogBreadcrumb(msg);
+    while (allocated) SofReleaseUnpublishedMdlDma(Adapter, &buffers[--allocated]);
+    SofLogBreadcrumb("[DMA-owned] Unpublished mappings removed before backing pages freed.\n");
+    return status;
+}
+
 /* Inspect the exact PDO before allocating the WDF enabler. This diagnostic
  * owns only a query token. It never creates, attaches or switches a domain. */
 static NTSTATUS SofInspectDmicDmaDomains(PSOF_DEVICE_CONTEXT Ctx)
@@ -1008,10 +1132,20 @@ NTSTATUS SofRunDmicDmaPreflight(PSOF_DEVICE_CONTEXT Ctx)
     if (!NT_SUCCESS(status)) goto Done;
     WdfDeviceSetAlignmentRequirement(Ctx->WdfDevice, FILE_128_BYTE_ALIGNMENT);
     WDF_DMA_ENABLER_CONFIG_INIT(&config, WdfDmaProfileScatterGather64, PJ_DMA_MAX_BYTES);
+    config.WdmDmaVersionOverride = 3;
+    if (!Ctx->HdaDma64Bit) config.AddressWidthOverride = 32;
     status = WdfDmaEnablerCreate(Ctx->WdfDevice, &config, WDF_NO_OBJECT_ATTRIBUTES, &enabler);
     if (!NT_SUCCESS(status)) goto Done;
     Ctx->DmaEnabler = enabler;
     status = SofStageUnpublishedDmicBuffers(Ctx, (const UCHAR *)raw + info.PayloadOffset, info.PayloadSize);
+    if (NT_SUCCESS(status)) {
+        /* No WDF or MDL address is published, and no DMA engine runs.
+         * A capture-capable system needs an actual device-visible mapping,
+         * not merely physical memory allocated independently of KMDF. */
+        PDMA_ADAPTER adapter = WdfDmaEnablerWdmGetDmaAdapter(enabler, WdfDmaDirectionReadFromDevice);
+        status = SofStageOwnedDmicBuffers(adapter, Ctx->HdaDma64Bit,
+            (const UCHAR *)raw + info.PayloadOffset, info.PayloadSize);
+    }
 Done:
     if (Ctx->DmaEnabler) {
         WdfObjectDelete(Ctx->DmaEnabler);
