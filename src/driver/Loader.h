@@ -105,8 +105,8 @@ typedef struct _SOF_FW_IMAGE_INFO {
  * @struct _SOF_DMA_BUFFER
  * @brief DMA buffer descriptor encapsulating virtual and physical addresses for hardware transfers.
  *
- * Supports both KMDF Common Buffer allocation (with full IOMMU / VT-d support)
- * and contiguous physical memory fallback.
+ * Supports KMDF common buffers and independently owned MDL-backed common
+ * buffers. Never substitute a CPU physical address for the HAL logical address.
  */
 typedef struct _SOF_DMA_BUFFER {
     /**
@@ -125,19 +125,21 @@ typedef struct _SOF_DMA_BUFFER {
     ULONG               Size;
 
 #ifdef _KERNEL_MODE
-    /**
-     * @brief Optional Memory Descriptor List (MDL) for cache flushing.
-     */
+    /* MDL-owned backing is independent of KMDF object deletion. The HAL
+     * mapping is valid only while the borrowed DMA adapter is valid. */
     PMDL                Mdl;
-
-    /**
-     * @brief KMDF Common Buffer object handle (NULL if using contiguous fallback).
-     */
+    PDMA_ADAPTER        OwnedAdapter;
+    ULONG               OwnedMappedBytes;
     WDFCOMMONBUFFER     CommonBuffer;
+    /* Set BEFORE either BDL register is written, clear only after checked
+     * descriptor stop/reset/detach. A published buffer cannot be freed. */
+    BOOLEAN             Published;
 #endif
 } SOF_DMA_BUFFER, *PSOF_DMA_BUFFER;
 
 #ifdef _KERNEL_MODE
+NTSTATUS SofAllocateOwnedDmaBuffer(PSOF_DEVICE_CONTEXT Ctx, ULONG Size,
+    WDF_DMA_DIRECTION Direction, PSOF_DMA_BUFFER DmaBuf);
 VOID SofRetainDmaPair(PSOF_DEVICE_CONTEXT Ctx, ULONG Slot, PSOF_DMA_BUFFER Data, PSOF_DMA_BUFFER Bdl);
 VOID SofRetryRetainedDma(PSOF_DEVICE_CONTEXT Ctx);
 #endif
@@ -197,8 +199,7 @@ VOID SofFreeFirmwareBuffer(
 /**
  * @brief Allocates a DMA buffer suitable for bus-mastering hardware transfer.
  *
- * Attempts allocation via WdfCommonBufferCreate first (to leverage IOMMU / VT-d mapping).
- * If unavailable, falls back to MmAllocateContiguousNodeMemory (< 4GB boundary).
+ * Allocates a framework common buffer; no physical-address fallback.
  *
  * @param[in]  Ctx    Pointer to the SOF device context.
  * @param[in]  Size   Number of bytes to allocate.
@@ -214,7 +215,8 @@ NTSTATUS SofAllocateDmaBuffer(
 /**
  * @brief Releases a DMA buffer allocated by SofAllocateDmaBuffer.
  *
- * Deletes the WDFCOMMONBUFFER or calls MmFreeContiguousMemory depending on how it was allocated.
+ * Releases only unpublished or verified-detached buffers; for MDL backing,
+ * remove the HAL mapping before releasing driver-owned pages.
  *
  * @param[in]    Ctx    Pointer to the SOF device context.
  * @param[in,out] DmaBuf Pointer to SOF_DMA_BUFFER structure to free and clear.
@@ -246,8 +248,8 @@ VOID SofFreeDmaBuffer(
  */
 NTSTATUS SofConfigureCodeLoaderDma(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
-    _In_ PSOF_DMA_BUFFER FwDmaBuf,
-    _In_ PSOF_DMA_BUFFER BdlDmaBuf,
+    _Inout_ PSOF_DMA_BUFFER FwDmaBuf,
+    _Inout_ PSOF_DMA_BUFFER BdlDmaBuf,
     _In_ ULONG StreamTag,
     _Out_opt_ PULONG OutStreamIndex
 );

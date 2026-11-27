@@ -58,10 +58,10 @@ typedef int NTSTATUS;
 #define SOF_HDA_SD_STS_DMA_ERRORS 0x18u
 #define SOF_HDA_CL_DMA_SD_INT_MASK 0x1cu
 typedef struct { ULONG AddrLow, AddrHigh, Size, Ioc; } BDL, *PSOF_INTEL_DSP_BDL;
-typedef struct { void *VirtualAddress, *CommonBuffer; struct {ULONG LowPart, HighPart;} PhysicalAddress; } SOF_DMA_BUFFER, *PSOF_DMA_BUFFER;
+typedef struct { void *VirtualAddress, *CommonBuffer; struct {ULONG LowPart, HighPart;} PhysicalAddress; BOOLEAN Published; } SOF_DMA_BUFFER, *PSOF_DMA_BUFFER;
 typedef struct { PUCHAR Bar0VirtualAddress; ULONG Bar0Length, NumCaptureStreams,
     NumPlaybackStreams, PpCapOffset, BootPpBitsAdded, BootIntBitsAdded;
-    BOOLEAN Removed, DspNeedsPowerDown, BootDmaStopUnconfirmed, IrqMaskNeeded;
+    BOOLEAN Removed, DspNeedsPowerDown, BootDmaStopUnconfirmed, IrqMaskNeeded, AudioDmaFaulted;
     struct { SOF_DMA_BUFFER Data,Bdl; } RetainedDma[30];
     PUCHAR Bar4VirtualAddress; ULONG Bar4Length;
 } CTX, *PSOF_DEVICE_CONTEXT;
@@ -89,15 +89,17 @@ static void SofCodeLoaderWriteControl(PUCHAR p, ULONG v) {
     if (p != drop) *p=(UCHAR)v;
 }
 static void KeStallExecutionProcessor(unsigned us) { assert(us == 10); }
-static NTSTATUS SofAllocateDmaBuffer(CTX *c, ULONG n, SOF_DMA_BUFFER *b) {
-    assert(c && allocs<2 && n==PAGE_SIZE);
+#define WdfDmaDirectionReadFromDevice 1
+#define WdfDmaDirectionWriteToDevice 2
+static NTSTATUS SofAllocateOwnedDmaBuffer(CTX *c, ULONG n, int direction, SOF_DMA_BUFFER *b) {
+    assert(c && allocs<2 && n==PAGE_SIZE && direction==(allocs ? 2 : 1));
     b->CommonBuffer=b->VirtualAddress=storage[allocs++]; b->PhysicalAddress.LowPart=allocs*PAGE_SIZE;
     return 0;
 }
 static void SofFreeDmaBuffer(CTX *c, SOF_DMA_BUFFER *b) {
     assert(c);
     if (b->VirtualAddress) {
-        assert(!(bar[0x80]&2) && !readl(bar+0x98) && !readl(bar+0x9c));
+        assert(!b->Published && !(bar[0x80]&2) && !readl(bar+0x98) && !readl(bar+0x9c));
         ++frees; b->CommonBuffer=b->VirtualAddress=NULL;
     }
 }
@@ -167,7 +169,7 @@ int main(void) {
         SOF_ICCMAX_DMA d={0};
         memset(bar,0,sizeof(bar)); drop=NULL; allocs=frees=starts=0;
         assert(SofStartIccmaxDma(&c,&d)==0);
-        ctl_reads=0; poison_ctl_read=4;
+        ctl_reads=0; poison_ctl_read=5;
         assert(SofStopIccmaxDma(&c,&d)==STATUS_DEVICE_NOT_READY);
         assert(d.Published && frees==0);
         poison_ctl_read=0;
@@ -181,6 +183,23 @@ int main(void) {
         assert(SofStopIccmaxDma(&c,&d)==STATUS_DEVICE_NOT_READY);
         assert(d.Published && frees==0);
         bar[0x83]=0;
+        assert(SofStopIccmaxDma(&c,&d)==0 && frees==2);
+    }
+    /* A foreign BDL cannot be reset by this owner's teardown. */
+    {
+        SOF_ICCMAX_DMA d={0};
+        memset(bar,0,sizeof(bar)); drop=NULL; allocs=frees=starts=0;
+        assert(SofStartIccmaxDma(&c,&d)==0);
+        writel(0xa000,bar+0x98);
+        assert(SofStopIccmaxDma(&c,&d)==STATUS_DEVICE_NOT_READY);
+        assert(d.Published && d.Data.Published && d.Bdl.Published && !frees);
+        assert(bar[0x80]==2 && readl(bar+0x98)==0xa000);
+        writel(8192,bar+0x98);
+        /* With RUN already clear, an ignored RESET assertion still blocks free. */
+        bar[0x80]=0; drop=bar+0x80;
+        assert(SofStopIccmaxDma(&c,&d)==STATUS_IO_TIMEOUT && !frees);
+        assert(d.Published && d.Data.Published && d.Bdl.Published);
+        drop=NULL;
         assert(SofStopIccmaxDma(&c,&d)==0 && frees==2);
     }
     for (unsigned i=0;i<2;++i) {

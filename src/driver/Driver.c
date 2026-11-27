@@ -618,6 +618,7 @@ SofEvtDeviceAdd(
         WDF_DMA_ENABLER_CONFIG dmaConfig;
         WdfDeviceSetAlignmentRequirement(device, FILE_128_BYTE_ALIGNMENT);
         WDF_DMA_ENABLER_CONFIG_INIT(&dmaConfig, WdfDmaProfileScatterGather64, 16 * 1024 * 1024);
+        dmaConfig.WdmDmaVersionOverride = 3;
         status = WdfDmaEnablerCreate(device, &dmaConfig, WDF_NO_OBJECT_ATTRIBUTES, &deviceContext->DmaEnabler);
         RtlStringCbPrintfA(msg, sizeof(msg), "[6a] WdfDmaEnablerCreate: status=0x%08x (Enabler=%p)\n",
                            status, deviceContext->DmaEnabler);

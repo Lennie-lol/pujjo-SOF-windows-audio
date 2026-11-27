@@ -65,7 +65,7 @@ assert d0.index("return bootStatus;") < d0.index("SofPublishAudioChild(") < d0.i
 assert d0.index("if (!NT_SUCCESS(portStatus))") < d0.index("NTSTATUS restoreStatus = SofRestoreBootController(ctx)") < d0.index("return NT_SUCCESS(restoreStatus) ? portStatus : restoreStatus;")
 assert "SofSdwEnumerateChildren(" not in device and "SofHdaSendVerb(" not in device
 assert "SofVerifyAdlNIpc4Candidate(rawFw, rawFwSize)" in boot
-assert boot.index("SofVerifyAdlNIpc4Candidate(rawFw, rawFwSize)") < boot.index("SofAllocateDmaBuffer(")
+assert boot.index("SofVerifyAdlNIpc4Candidate(rawFw, rawFwSize)") < boot.index("SofAllocateOwnedDmaBuffer(")
 assert boot.index("SofQueryBootedFirmwareVersion(Ctx, &fwInfo)") < boot.index("return STATUS_SUCCESS;")
 assert d0.count("ipcFaulted = ctx->IpcFaulted || ctx->FwState != SOF_FW_BOOT_COMPLETE;") == 1
 assert d0.index("return STATUS_DEVICE_NOT_READY;",d0.index("bootStatus =")) < d0.index("WdfTimerStart(")
@@ -241,7 +241,7 @@ assert boot.index('dmaConfigured = TRUE;') < boot.index('SofLoaderDmaAddressesMa
 assert detach.index('writel(0, Registers + SOF_HDA_ADSP_REG_SD_BDLPU)') < detach.index('SofLoaderDmaAddressesMatch(Registers, 0, 0)') < detach.rindex('SofCodeLoaderReadControl(Registers)')
 assert stop.index('SofStopAndDetachBootStream(') < stop.index('dmaConfigured = FALSE;')
 assert 'goto dma_unconfirmed;' in stop.split('SofStopAndDetachBootStream(',1)[1].split('dmaConfigured = FALSE;',1)[0]
-assert iccmax.index('SofStopAndDetachBootStream(Dma->Registers, &dmaStatus)') < iccmax.index('Dma->Published = FALSE;')
+assert iccmax.index('SofStopAndDetachBootStream(Ctx, Dma->Registers, &Dma->Bdl, &dmaStatus)') < iccmax.index('Dma->Published = FALSE;')
 iccmax_start=loader.split('static NTSTATUS SofStartIccmaxDma(',1)[1].split('static NTSTATUS SofStopIccmaxDma(',1)[0]
 assert iccmax_start.index('SofLoaderDmaAddressesMatch(Dma->Registers,') < iccmax_start.index('SofCodeLoaderWriteControl(Dma->Registers, SOF_HDA_SD_CTL_DMA_START)')
 print('PASS: loader and ICCMAX BDL publication and detachment readback')

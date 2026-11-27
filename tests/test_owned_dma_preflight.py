@@ -7,10 +7,12 @@ import os, shlex, subprocess, tempfile
 root = Path(__file__).resolve().parents[1]
 loader = (root / "src/driver/Loader.c").read_text()
 start = loader.index("typedef struct _SOF_MDL_DMA_BUFFER")
-end = loader.index("/* Inspect the exact PDO", start)
-body = loader[start:end]
+end = loader.index("/* Use the same allocation primitive", start)
+stage = loader.index("/* Exercise firmware, ICCMAX and capture pairs simultaneously")
+stage_end = loader.index("/* Inspect the exact PDO", stage)
+body = loader[start:end] + loader[stage:stage_end]
 guard = loader.index("#ifdef PUJJO_DMIC_DMA_PREFLIGHT", loader.index("static NTSTATUS SofVerifyAdlNIpc4Candidate"))
-assert guard < start < end
+assert start < end < guard < stage < stage_end
 assert "SofStageOwnedDmicBuffers" in loader[loader.index("NTSTATUS SofRunDmicDmaPreflight"):loader.index("/* Remove only bits raised")]
 for forbidden in ("WRITE_REGISTER", "writel(", "MmMapIoSpace", "WdfDmaTransaction", "SofStartFirmwareBoot", "MmGetPhysicalAddress"):
     assert forbidden not in body, forbidden
@@ -121,6 +123,30 @@ static size_t RtlCompareMemory(void *a,const void *b,size_t n) {
  return !compareFault && !memcmp(a,b,n)?n:0;
 }
 '''
+# Exercise the actual production wrapper and release guard, not only staging.
+wrapper = loader[loader.index("NTSTATUS SofAllocateOwnedDmaBuffer("):loader.index("\n}", loader.index("NTSTATUS SofAllocateOwnedDmaBuffer("))+2]
+release_start = loader.index("VOID\nSofFreeDmaBuffer(")
+release = loader[release_start:loader.index("\n}", release_start)+2]
+body += r"""
+#define _In_
+#define _Inout_
+#define STATUS_INVALID_DEVICE_STATE -7
+typedef int WDF_DMA_DIRECTION;
+typedef struct {
+ PMDL Mdl; PDMA_ADAPTER OwnedAdapter; ULONG OwnedMappedBytes, Size;
+ PVOID VirtualAddress, CommonBuffer; PHYSICAL_ADDRESS PhysicalAddress;
+ BOOLEAN Published;
+} SOF_DMA_BUFFER, *PSOF_DMA_BUFFER;
+typedef struct {
+ PDMA_ADAPTER DmaEnabler;
+ BOOLEAN HdaDma64Bit, BootDmaStopUnconfirmed, AudioDmaFaulted, Removed;
+} CTX, *PSOF_DEVICE_CONTEXT;
+static int SofDeviceRemoved(CTX *c) {return c->Removed;}
+static PDMA_ADAPTER WdfDmaEnablerWdmGetDmaAdapter(PDMA_ADAPTER a, int direction) {
+ assert(direction==0 || direction==1); return a;
+}
+static void WdfObjectDelete(PVOID p) { (void)p; assert(0); }
+""" + wrapper + release
 cases = r'''
 static void reset(void) {
  assert(!count);
@@ -161,6 +187,26 @@ int main(void) {
   ops.FreeCommonBuffer=unmap;
   assert(!attempts);
  }
+ reset();
+ CTX c={.DmaEnabler=&adapter,.HdaDma64Bit=1};
+ SOF_DMA_BUFFER b={0};
+ test64=1;
+ assert(SofAllocateOwnedDmaBuffer(&c,7001,0,&b)==0);
+ assert(b.Mdl && b.VirtualAddress && b.OwnedMappedBytes==8192 && !b.CommonBuffer);
+ assert(b.Size==7001 && b.OwnedAdapter==&adapter);
+ b.Published=1;
+ SofFreeDmaBuffer(&c,&b);
+ assert(!released && !unmapped && b.Published && b.Mdl);
+ assert(c.BootDmaStopUnconfirmed && c.AudioDmaFaulted);
+ SOF_DMA_BUFFER other={0};
+ assert(SofAllocateOwnedDmaBuffer(&c,4096,1,&other)==STATUS_INVALID_DEVICE_STATE);
+ b.Published=0; /* Only after the descriptor proof, modeled here. */
+ SofFreeDmaBuffer(&c,&b); check();
+ assert(!b.Mdl && !b.VirtualAddress);
+ SofFreeDmaBuffer(&c,&b); check();
+ c.BootDmaStopUnconfirmed=c.AudioDmaFaulted=0;
+ c.Removed=1;
+ assert(SofAllocateOwnedDmaBuffer(&c,4096,1,&other)==STATUS_INVALID_DEVICE_STATE);
  free(payload);
  puts("PASS: MDL-backed common buffers; both address widths; missing APIs; injected partial allocation, mapping failure, invalid logical spans; reverse unmap-before-page-free");
 }

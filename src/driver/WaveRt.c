@@ -392,10 +392,18 @@ static NTSTATUS SofWaveRtCreateStreamCore(
         }
         /* PortCls can map whole pages. Keep every mapped byte within the
          * zeroed ring allocation, including the padding of its last page. */
-        status = SofAllocateDmaBuffer(Ctx, (ULONG)ROUND_TO_PAGES(BufferSizeBytes),
-                                      &stream->RingAllocation);
-        if (NT_SUCCESS(status))
-            status = SofAllocateDmaBuffer(Ctx, PAGE_SIZE, &stream->BdlAllocation);
+        if (EndpointType == SOF_ENDPOINT_DMIC_PDM) {
+            status = SofAllocateOwnedDmaBuffer(Ctx, (ULONG)ROUND_TO_PAGES(BufferSizeBytes),
+                WdfDmaDirectionReadFromDevice, &stream->RingAllocation);
+            if (NT_SUCCESS(status))
+                status = SofAllocateOwnedDmaBuffer(Ctx, PAGE_SIZE,
+                    WdfDmaDirectionWriteToDevice, &stream->BdlAllocation);
+        } else {
+            status = SofAllocateDmaBuffer(Ctx, (ULONG)ROUND_TO_PAGES(BufferSizeBytes),
+                &stream->RingAllocation);
+            if (NT_SUCCESS(status))
+                status = SofAllocateDmaBuffer(Ctx, PAGE_SIZE, &stream->BdlAllocation);
+        }
         if (NT_SUCCESS(status)) {
             stream->KernelBuffer = stream->RingAllocation.VirtualAddress;
             stream->PhysicalAddress = stream->RingAllocation.PhysicalAddress;
@@ -668,7 +676,7 @@ NTSTATUS SofWaveRtFreeStream(
     } else {
         /* Direct analog leases have separate WDF references. A DMIC lease
          * only maps CPU pages, so its DMA ownership can move independently. */
-        if (Stream->EndpointType == SOF_ENDPOINT_DMIC_PDM && Stream->BdlAllocation.CommonBuffer)
+        if (Stream->EndpointType == SOF_ENDPOINT_DMIC_PDM && Stream->BdlAllocation.VirtualAddress)
             SofRetainDmaPair(ctx, Stream->StreamIndex, &Stream->RingAllocation, &Stream->BdlAllocation);
         ctx->AudioDmaFaulted = TRUE;
         status = STATUS_DEVICE_NOT_READY;
@@ -710,7 +718,7 @@ NTSTATUS SofWaveRtDetachStream(PSOF_WAVERT_STREAM Stream)
     }
     if (Stream->DescriptorPublished)
         Stream->DeviceContext->AudioDmaFaulted = TRUE;
-    if (Stream->VoiceBuffer && Stream->DescriptorPublished && Stream->BdlAllocation.CommonBuffer)
+    if (Stream->VoiceBuffer && Stream->DescriptorPublished && Stream->BdlAllocation.VirtualAddress)
         SofRetainDmaPair(Stream->DeviceContext, Stream->StreamIndex,
                          &Stream->RingAllocation, &Stream->BdlAllocation);
     if (Stream->VoiceBuffer && !Stream->DescriptorPublished) {
@@ -1203,6 +1211,8 @@ NTSTATUS SofWaveRtConfigureHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     KeMemoryBarrier();
     /* Either address write can expose the BDL, even if readback fails. */
     Stream->DescriptorPublished = TRUE;
+    Stream->RingAllocation.Published = TRUE;
+    Stream->BdlAllocation.Published = TRUE;
     writel(Stream->BdlPhysicalAddress.LowPart, regs + SOF_HDA_ADSP_REG_SD_BDLPL);
     writel((ULONG)Stream->BdlPhysicalAddress.HighPart, regs + SOF_HDA_ADSP_REG_SD_BDLPU);
     /* Keep controller stream IRQ disabled while the DPC polls real BCIS. */
@@ -1254,6 +1264,15 @@ NTSTATUS SofWaveRtResetHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
 #ifdef _KERNEL_MODE
     PUCHAR regs = SofWaveRtHdaDescriptor(Stream);
     if (!Stream->DescriptorPublished) return STATUS_SUCCESS;
+    if (!regs) return STATUS_DEVICE_NOT_READY;
+    ULONG low = readl(regs + SOF_HDA_ADSP_REG_SD_BDLPL);
+    ULONG high = readl(regs + SOF_HDA_ADSP_REG_SD_BDLPU);
+    ULONG ctl = readl(regs + SOF_HDA_ADSP_REG_SD_CTL);
+    if (low == MAXULONG || high == MAXULONG || ctl == MAXULONG ||
+        ((low != Stream->BdlPhysicalAddress.LowPart ||
+          high != (ULONG)Stream->BdlPhysicalAddress.HighPart) &&
+         (low || high || (ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)))))
+        return STATUS_DEVICE_NOT_READY;
     NTSTATUS status = SofWaveRtStopHdaStream(Stream);
     if (!NT_SUCCESS(status)) return status;
     status = SofWaveRtSetHdaControl(regs, SOF_HDA_SD_CTL_DMA_RESET, SOF_HDA_SD_CTL_DMA_RESET);
@@ -1269,6 +1288,8 @@ NTSTATUS SofWaveRtResetHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
             SofDeviceRemoved(Stream->DeviceContext))
             return STATUS_DEVICE_NOT_READY;
         Stream->DescriptorPublished = FALSE;
+        Stream->RingAllocation.Published = FALSE;
+        Stream->BdlAllocation.Published = FALSE;
     }
     return status;
 #else

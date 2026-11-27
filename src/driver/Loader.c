@@ -308,6 +308,112 @@ static VOID SofPreflightBufferDestroyed(WDFOBJECT Object)
 }
 #endif
 
+/* Driver-owned page backing, separate from HAL mapping ownership. This
+ * primitive is valid for unpublished or verified-detached buffers. It
+ * does not establish that an IOVA remains reserved after surprise removal. */
+typedef struct _SOF_MDL_DMA_BUFFER {
+    PMDL Pages;
+    PVOID SystemAddress;
+    PHYSICAL_ADDRESS LogicalAddress;
+    ULONG MappedBytes;
+    BOOLEAN MappingCreated;
+} SOF_MDL_DMA_BUFFER;
+
+static VOID SofReleaseUnpublishedMdlDma(PDMA_ADAPTER Adapter, SOF_MDL_DMA_BUFFER *Buffer)
+{
+    if (Buffer->MappingCreated) {
+        Adapter->DmaOperations->FreeCommonBuffer(Adapter, Buffer->MappedBytes,
+            Buffer->LogicalAddress, Buffer->SystemAddress, TRUE);
+        Buffer->MappingCreated = FALSE;
+    }
+    /* MmAllocatePagesForMdlEx pages and MDL are ours, not HAL's.
+     * MmFreePagesFromMdl also releases their CPU mapping on Windows 11. */
+    if (Buffer->Pages) {
+        MmFreePagesFromMdl(Buffer->Pages);
+        ExFreePool(Buffer->Pages);
+    }
+    RtlZeroMemory(Buffer, sizeof(*Buffer));
+}
+
+static NTSTATUS SofAllocateUnpublishedMdlDma(PDMA_ADAPTER Adapter, ULONG Bytes,
+    BOOLEAN Dma64, SOF_MDL_DMA_BUFFER *Buffer)
+{
+    PHYSICAL_ADDRESS low = {0}, high = {0}, skip = {0};
+    NTSTATUS status;
+
+    if (!Buffer) return STATUS_INVALID_PARAMETER;
+    RtlZeroMemory(Buffer, sizeof(*Buffer));
+    if (!Bytes || Bytes > PJ_DMA_MAX_BYTES) return STATUS_INVALID_PARAMETER;
+    /* The tail of this versioned DMA_OPERATIONS table is optional. */
+    if (!Adapter || !Adapter->DmaOperations ||
+        Adapter->DmaOperations->Size < FIELD_OFFSET(DMA_OPERATIONS, CreateCommonBufferFromMdl) +
+            sizeof(Adapter->DmaOperations->CreateCommonBufferFromMdl) ||
+        !Adapter->DmaOperations->CreateCommonBufferFromMdl ||
+        !Adapter->DmaOperations->FreeCommonBuffer)
+        return STATUS_NOT_SUPPORTED;
+
+    Buffer->MappedBytes = (ULONG)ROUND_TO_PAGES(Bytes);
+    high.QuadPart = Dma64 ? MAXLONGLONG : MAXULONG;
+    /* Contiguous backing permits testing even without DMA remapping. Never
+     * treat PFNs or the CPU address as a device-visible logical address. */
+    Buffer->Pages = MmAllocatePagesForMdlEx(low, high, skip, Buffer->MappedBytes,
+        MmCached, MM_ALLOCATE_FULLY_REQUIRED | MM_ALLOCATE_REQUIRE_CONTIGUOUS_CHUNKS);
+    status = STATUS_INSUFFICIENT_RESOURCES;
+    if (!Buffer->Pages) goto Failed;
+    if (MmGetMdlByteCount(Buffer->Pages) != Buffer->MappedBytes ||
+        MmGetMdlByteOffset(Buffer->Pages) || Buffer->Pages->Next) {
+        status = STATUS_INVALID_BUFFER_SIZE;
+        goto Failed;
+    }
+    Buffer->SystemAddress = MmGetSystemAddressForMdlSafe(Buffer->Pages,
+        NormalPagePriority | MdlMappingNoExecute);
+    if (!Buffer->SystemAddress) goto Failed;
+    status = Adapter->DmaOperations->CreateCommonBufferFromMdl(Adapter, Buffer->Pages,
+        NULL, 0, &Buffer->LogicalAddress);
+    if (!NT_SUCCESS(status)) goto Failed;
+    /* Set ownership before validating the returned address: invalid maps
+     * still need to be removed using the exact returned address and size. */
+    Buffer->MappingCreated = TRUE;
+    if (!Buffer->LogicalAddress.QuadPart ||
+        (Buffer->LogicalAddress.LowPart & (PAGE_SIZE - 1u)) ||
+        !pj_hda_dma_span_valid(Buffer->LogicalAddress.LowPart,
+            (ULONG)Buffer->LogicalAddress.HighPart, Buffer->MappedBytes, Dma64)) {
+        status = STATUS_DEVICE_CONFIGURATION_ERROR;
+        goto Failed;
+    }
+    RtlZeroMemory(Buffer->SystemAddress, Buffer->MappedBytes);
+    return STATUS_SUCCESS;
+Failed:
+    SofReleaseUnpublishedMdlDma(Adapter, Buffer);
+    return status;
+}
+
+/* Use the same allocation primitive that passed the physical v9.2 probe.
+ * Only this wrapper has permission to populate a production descriptor;
+ * the candidate firmware entrypoint itself remains compile-time blocked. */
+NTSTATUS SofAllocateOwnedDmaBuffer(PSOF_DEVICE_CONTEXT Ctx, ULONG Size,
+    WDF_DMA_DIRECTION Direction, PSOF_DMA_BUFFER DmaBuf)
+{
+    SOF_MDL_DMA_BUFFER owned = {0};
+    NTSTATUS status;
+    PDMA_ADAPTER adapter;
+    if (!DmaBuf) return STATUS_INVALID_PARAMETER;
+    RtlZeroMemory(DmaBuf, sizeof(*DmaBuf));
+    if (!Ctx || !Ctx->DmaEnabler || Ctx->BootDmaStopUnconfirmed ||
+        Ctx->AudioDmaFaulted || SofDeviceRemoved(Ctx))
+        return STATUS_INVALID_DEVICE_STATE;
+    adapter = WdfDmaEnablerWdmGetDmaAdapter(Ctx->DmaEnabler, Direction);
+    status = SofAllocateUnpublishedMdlDma(adapter, Size, Ctx->HdaDma64Bit, &owned);
+    if (!NT_SUCCESS(status)) return status;
+    DmaBuf->Mdl = owned.Pages;
+    DmaBuf->VirtualAddress = owned.SystemAddress;
+    DmaBuf->PhysicalAddress = owned.LogicalAddress;
+    DmaBuf->OwnedMappedBytes = owned.MappedBytes;
+    DmaBuf->OwnedAdapter = adapter;
+    DmaBuf->Size = Size;
+    return STATUS_SUCCESS;
+}
+
 /**
  * @brief Allocates a physically contiguous or IOMMU-mapped DMA buffer for bus mastering.
  *
@@ -377,7 +483,8 @@ SofAllocateDmaBuffer(
 /**
  * @brief Releases memory associated with a SOF_DMA_BUFFER structure.
  *
- * Handles both KMDF Common Buffer deletion and MmFreeContiguousMemory.
+ * Handles framework common buffers and driver-owned MDL mappings.
+ * Never free an address still exposed to the controller.
  *
  * @param[in]    Ctx    Pointer to the SOF device context.
  * @param[in,out] DmaBuf Pointer to SOF_DMA_BUFFER descriptor to free.
@@ -388,21 +495,36 @@ SofFreeDmaBuffer(
     _Inout_ PSOF_DMA_BUFFER DmaBuf
 )
 {
-    UNREFERENCED_PARAMETER(Ctx);
-
     if (!DmaBuf || !DmaBuf->VirtualAddress)
         return;
-
-    if (DmaBuf->CommonBuffer != NULL) {
-        WdfObjectDelete(DmaBuf->CommonBuffer);
-        DmaBuf->CommonBuffer = NULL;
-    } else {
-        MmFreeContiguousMemory(DmaBuf->VirtualAddress);
+    if (DmaBuf->Published) {
+        /* Never turn caller error into unmapping/reuse of a live BDL.
+         * Parent-owned mappings still require an independent PnP proof. */
+        Ctx->AudioDmaFaulted = TRUE;
+        Ctx->BootDmaStopUnconfirmed = TRUE;
+        SofLogBreadcrumb("[DMA] Refusing to free published buffer. Session faulted.\n");
+        return;
     }
-
-    DmaBuf->VirtualAddress = NULL;
-    DmaBuf->PhysicalAddress.QuadPart = 0;
-    DmaBuf->Size = 0;
+    if (DmaBuf->Mdl) {
+        SOF_MDL_DMA_BUFFER owned = {0};
+        if (!DmaBuf->OwnedAdapter || !DmaBuf->OwnedMappedBytes) {
+            Ctx->AudioDmaFaulted = TRUE;
+            Ctx->BootDmaStopUnconfirmed = TRUE;
+            return;
+        }
+        owned.Pages = DmaBuf->Mdl;
+        owned.SystemAddress = DmaBuf->VirtualAddress;
+        owned.LogicalAddress = DmaBuf->PhysicalAddress;
+        owned.MappedBytes = DmaBuf->OwnedMappedBytes;
+        owned.MappingCreated = TRUE;
+        SofReleaseUnpublishedMdlDma(DmaBuf->OwnedAdapter, &owned);
+    } else if (DmaBuf->CommonBuffer) {
+        WdfObjectDelete(DmaBuf->CommonBuffer);
+    } else {
+        Ctx->AudioDmaFaulted = TRUE;
+        return;
+    }
+    RtlZeroMemory(DmaBuf, sizeof(*DmaBuf));
 }
 
 /* Core 0 only, using the cAVS sequence in src/core/intel/hda-dsp.c.
@@ -590,8 +712,8 @@ static VOID SofCodeLoaderWriteControl(_In_ PUCHAR StreamRegs, _In_ ULONG Value)
 NTSTATUS
 SofConfigureCodeLoaderDma(
     _In_ PSOF_DEVICE_CONTEXT Ctx,
-    _In_ PSOF_DMA_BUFFER FwDmaBuf,
-    _In_ PSOF_DMA_BUFFER BdlDmaBuf,
+    _Inout_ PSOF_DMA_BUFFER FwDmaBuf,
+    _Inout_ PSOF_DMA_BUFFER BdlDmaBuf,
     _In_ ULONG StreamTag,
     _Out_opt_ PULONG OutStreamIndex
 )
@@ -615,7 +737,9 @@ SofConfigureCodeLoaderDma(
 
     if (OutStreamIndex) *OutStreamIndex = 0;
     if (!Ctx || !Ctx->Bar0VirtualAddress || !FwDmaBuf || !BdlDmaBuf ||
-        !FwDmaBuf->CommonBuffer || !BdlDmaBuf->CommonBuffer ||
+        !FwDmaBuf->Mdl || !BdlDmaBuf->Mdl ||
+        !FwDmaBuf->OwnedAdapter || !BdlDmaBuf->OwnedAdapter ||
+        FwDmaBuf->Published || BdlDmaBuf->Published ||
         !FwDmaBuf->VirtualAddress || !BdlDmaBuf->VirtualAddress ||
         BdlDmaBuf->Size < 2u * sizeof(SOF_INTEL_DSP_BDL) ||
         (BdlDmaBuf->PhysicalAddress.LowPart & 127u) != 0u ||
@@ -764,7 +888,11 @@ SofConfigureCodeLoaderDma(
     /* 5. Program Last Valid Index (2 entries => index 1) */
     WRITE_REGISTER_USHORT((PUSHORT)(streamRegs + SOF_HDA_ADSP_REG_SD_LVI), 1);
 
-    /* 6. Program BDL Physical Base Address (64-bit split across BDLPL and BDLPU) */
+    /* 6. Program BDL base. Record both owners and the slot before the first
+     * address write, including partial publication on surprise removal. */
+    FwDmaBuf->Published = TRUE;
+    BdlDmaBuf->Published = TRUE;
+    if (OutStreamIndex) *OutStreamIndex = streamIndex;
     WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_BDLPL),
                          BdlDmaBuf->PhysicalAddress.LowPart);
     WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_BDLPU),
@@ -852,86 +980,6 @@ static NTSTATUS SofVerifyAdlNIpc4Candidate(PUCHAR Image, ULONG ImageBytes)
     defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO) || defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG)
 #error DMA admission preflight must be isolated from all active firmware and audio paths
 #endif
-
-/* Driver-owned page backing, separate from HAL mapping ownership. This
- * backend is deliberately restricted to UNPUBLISHED buffers. It does not
- * establish that an IOVA will remain reserved after surprise removal. */
-typedef struct _SOF_MDL_DMA_BUFFER {
-    PMDL Pages;
-    PVOID SystemAddress;
-    PHYSICAL_ADDRESS LogicalAddress;
-    ULONG MappedBytes;
-    BOOLEAN MappingCreated;
-} SOF_MDL_DMA_BUFFER;
-
-static VOID SofReleaseUnpublishedMdlDma(PDMA_ADAPTER Adapter, SOF_MDL_DMA_BUFFER *Buffer)
-{
-    if (Buffer->MappingCreated) {
-        Adapter->DmaOperations->FreeCommonBuffer(Adapter, Buffer->MappedBytes,
-            Buffer->LogicalAddress, Buffer->SystemAddress, TRUE);
-        Buffer->MappingCreated = FALSE;
-    }
-    /* MmAllocatePagesForMdlEx pages and MDL are ours, not HAL's.
-     * MmFreePagesFromMdl also releases their CPU mapping on Windows 11. */
-    if (Buffer->Pages) {
-        MmFreePagesFromMdl(Buffer->Pages);
-        ExFreePool(Buffer->Pages);
-    }
-    RtlZeroMemory(Buffer, sizeof(*Buffer));
-}
-
-static NTSTATUS SofAllocateUnpublishedMdlDma(PDMA_ADAPTER Adapter, ULONG Bytes,
-    BOOLEAN Dma64, SOF_MDL_DMA_BUFFER *Buffer)
-{
-    PHYSICAL_ADDRESS low = {0}, high = {0}, skip = {0};
-    NTSTATUS status;
-
-    if (!Buffer) return STATUS_INVALID_PARAMETER;
-    RtlZeroMemory(Buffer, sizeof(*Buffer));
-    if (!Bytes || Bytes > PJ_DMA_MAX_BYTES) return STATUS_INVALID_PARAMETER;
-    /* The tail of this versioned DMA_OPERATIONS table is optional. */
-    if (!Adapter || !Adapter->DmaOperations ||
-        Adapter->DmaOperations->Size < FIELD_OFFSET(DMA_OPERATIONS, CreateCommonBufferFromMdl) +
-            sizeof(Adapter->DmaOperations->CreateCommonBufferFromMdl) ||
-        !Adapter->DmaOperations->CreateCommonBufferFromMdl ||
-        !Adapter->DmaOperations->FreeCommonBuffer)
-        return STATUS_NOT_SUPPORTED;
-
-    Buffer->MappedBytes = (ULONG)ROUND_TO_PAGES(Bytes);
-    high.QuadPart = Dma64 ? MAXLONGLONG : MAXULONG;
-    /* Contiguous backing permits testing even without DMA remapping. Never
-     * treat PFNs or the CPU address as a device-visible logical address. */
-    Buffer->Pages = MmAllocatePagesForMdlEx(low, high, skip, Buffer->MappedBytes,
-        MmCached, MM_ALLOCATE_FULLY_REQUIRED | MM_ALLOCATE_REQUIRE_CONTIGUOUS_CHUNKS);
-    status = STATUS_INSUFFICIENT_RESOURCES;
-    if (!Buffer->Pages) goto Failed;
-    if (MmGetMdlByteCount(Buffer->Pages) != Buffer->MappedBytes ||
-        MmGetMdlByteOffset(Buffer->Pages) || Buffer->Pages->Next) {
-        status = STATUS_INVALID_BUFFER_SIZE;
-        goto Failed;
-    }
-    Buffer->SystemAddress = MmGetSystemAddressForMdlSafe(Buffer->Pages,
-        NormalPagePriority | MdlMappingNoExecute);
-    if (!Buffer->SystemAddress) goto Failed;
-    status = Adapter->DmaOperations->CreateCommonBufferFromMdl(Adapter, Buffer->Pages,
-        NULL, 0, &Buffer->LogicalAddress);
-    if (!NT_SUCCESS(status)) goto Failed;
-    /* Set ownership before validating the returned address: invalid maps
-     * still need to be removed using the exact returned address and size. */
-    Buffer->MappingCreated = TRUE;
-    if (!Buffer->LogicalAddress.QuadPart ||
-        (Buffer->LogicalAddress.LowPart & (PAGE_SIZE - 1u)) ||
-        !pj_hda_dma_span_valid(Buffer->LogicalAddress.LowPart,
-            (ULONG)Buffer->LogicalAddress.HighPart, Buffer->MappedBytes, Dma64)) {
-        status = STATUS_DEVICE_CONFIGURATION_ERROR;
-        goto Failed;
-    }
-    RtlZeroMemory(Buffer->SystemAddress, Buffer->MappedBytes);
-    return STATUS_SUCCESS;
-Failed:
-    SofReleaseUnpublishedMdlDma(Adapter, Buffer);
-    return status;
-}
 
 /* Exercise firmware, ICCMAX and capture pairs simultaneously with the
  * owned-backing backend. The adapter is borrowed from the live WDF enabler;
@@ -1264,12 +1312,19 @@ static NTSTATUS SofLoaderDmaAddressesMatch(PUCHAR registers, ULONG low, ULONG hi
  * and ownership failure are distinct: a stopped DMA can report a transfer
  * error, but only verified RUN/reset/address state permits freeing its buffers.
  * The caller owns the mapped descriptor and must not race another start. */
-static NTSTATUS SofStopAndDetachBootStream(PUCHAR Registers, UCHAR *DmaStatus)
+static NTSTATUS SofStopAndDetachBootStream(PSOF_DEVICE_CONTEXT Ctx, PUCHAR Registers,
+    PSOF_DMA_BUFFER Bdl, UCHAR *DmaStatus)
 {
     ULONG ctl, attempt;
-    if (!Registers || !DmaStatus) return STATUS_DEVICE_NOT_READY;
+    if (!Registers || !DmaStatus || !Bdl || SofDeviceRemoved(Ctx))
+        return STATUS_DEVICE_NOT_READY;
     ctl = SofCodeLoaderReadControl(Registers);
-    if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
+    ULONG low = readl(Registers + SOF_HDA_ADSP_REG_SD_BDLPL);
+    ULONG high = readl(Registers + SOF_HDA_ADSP_REG_SD_BDLPU);
+    if (ctl == MAXULONG || low == MAXULONG || high == MAXULONG ||
+        ((low != Bdl->PhysicalAddress.LowPart || high != (ULONG)Bdl->PhysicalAddress.HighPart) &&
+         (low || high || (ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)))))
+        return STATUS_DEVICE_NOT_READY;
     SofCodeLoaderWriteControl(Registers, ctl & ~SOF_HDA_SD_CTL_DMA_START);
     for (attempt = 0; attempt < 500u; ++attempt) {
         ctl = SofCodeLoaderReadControl(Registers);
@@ -1280,10 +1335,25 @@ static NTSTATUS SofStopAndDetachBootStream(PUCHAR Registers, UCHAR *DmaStatus)
     if (attempt == 500u) return STATUS_IO_TIMEOUT;
     *DmaStatus = READ_REGISTER_UCHAR(Registers + SOF_HDA_ADSP_REG_SD_STS);
     if (*DmaStatus == 0xffu) return STATUS_DEVICE_NOT_READY;
+    /* Require reset assertion and deassertion, not just RUN clear. */
+    if (SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
+    SofCodeLoaderWriteControl(Registers, SOF_HDA_SD_CTL_DMA_RESET);
+    for (attempt = 0; attempt < 500u; ++attempt) {
+        ctl = SofCodeLoaderReadControl(Registers);
+        if (ctl == MAXULONG || SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
+        if ((ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)) ==
+            SOF_HDA_SD_CTL_DMA_RESET) break;
+        KeStallExecutionProcessor(10);
+    }
+    if (attempt == 500u) return STATUS_IO_TIMEOUT;
     SofCodeLoaderWriteControl(Registers, 0);
-    ctl = SofCodeLoaderReadControl(Registers);
-    if (ctl == MAXULONG || (ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)))
-        return STATUS_DEVICE_NOT_READY;
+    for (attempt = 0; attempt < 500u; ++attempt) {
+        ctl = SofCodeLoaderReadControl(Registers);
+        if (ctl == MAXULONG || SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
+        if (!(ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET))) break;
+        KeStallExecutionProcessor(10);
+    }
+    if (attempt == 500u) return STATUS_IO_TIMEOUT;
     WRITE_REGISTER_UCHAR(Registers + SOF_HDA_ADSP_REG_SD_STS, SOF_HDA_CL_DMA_SD_INT_MASK);
     writel(0, Registers + SOF_HDA_ADSP_REG_SD_BDLPL);
     writel(0, Registers + SOF_HDA_ADSP_REG_SD_BDLPU);
@@ -1348,9 +1418,9 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     if (dmaStatus == 0xffu) return STATUS_DEVICE_NOT_READY;
     if (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS) return STATUS_IO_DEVICE_ERROR;
 
-    status = SofAllocateDmaBuffer(Ctx, PAGE_SIZE, &Dma->Data);
+    status = SofAllocateOwnedDmaBuffer(Ctx, PAGE_SIZE, WdfDmaDirectionReadFromDevice, &Dma->Data);
     if (!NT_SUCCESS(status)) return status;
-    status = SofAllocateDmaBuffer(Ctx, PAGE_SIZE, &Dma->Bdl);
+    status = SofAllocateOwnedDmaBuffer(Ctx, PAGE_SIZE, WdfDmaDirectionWriteToDevice, &Dma->Bdl);
     if (!NT_SUCCESS(status)) return status;
     if ((Dma->Bdl.PhysicalAddress.LowPart & 127u) ||
         !pj_dma_plan_pair(Dma->Data.PhysicalAddress.LowPart,
@@ -1369,6 +1439,8 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     Dma->OriginalGuardband = ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK;
     Dma->OriginalDecoupled = (ppctl & 1u) != 0;
     Dma->Published = TRUE;
+    Dma->Data.Published = TRUE;
+    Dma->Bdl.Published = TRUE;
     Dma->RestorePending = TRUE;
     writel(Dma->Bdl.PhysicalAddress.LowPart, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPL);
     writel((ULONG)Dma->Bdl.PhysicalAddress.HighPart, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPU);
@@ -1403,8 +1475,11 @@ static NTSTATUS SofStopIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     if (Dma->Published) {
         UCHAR dmaStatus;
         if (SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
-        status = SofStopAndDetachBootStream(Dma->Registers, &dmaStatus);
+        status = SofStopAndDetachBootStream(Ctx, Dma->Registers, &Dma->Bdl, &dmaStatus);
         if (!NT_SUCCESS(status)) return status;
+        if (SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
+        Dma->Data.Published = FALSE;
+        Dma->Bdl.Published = FALSE;
         Dma->Published = FALSE;
         if (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS) status = STATUS_IO_DEVICE_ERROR;
     }
@@ -1469,8 +1544,18 @@ static NTSTATUS SofCheckPostDmaRomState(ULONG RomStatus, SOF_FW_BOOT_STATE BootS
  * Transfer the handles before the stack/stream that allocated them goes away. */
 VOID SofRetainDmaPair(PSOF_DEVICE_CONTEXT Ctx, ULONG Slot, PSOF_DMA_BUFFER Data, PSOF_DMA_BUFFER Bdl)
 {
-    NT_ASSERT(Slot < RTL_NUMBER_OF(Ctx->RetainedDma));
-    NT_ASSERT(!Ctx->RetainedDma[Slot].Bdl.CommonBuffer);
+    /* Never overwrite an existing retained owner in a Release build.
+     * If this invariant fails, keep pages resident and permanently fault
+     * the session instead of risking a use-after-free or array overrun.
+     * Recovery after loss of the adapter is not qualified. */
+    if (Slot >= RTL_NUMBER_OF(Ctx->RetainedDma) ||
+        Ctx->RetainedDma[Slot].Bdl.VirtualAddress ||
+        Ctx->RetainedDma[Slot].Data.VirtualAddress) {
+        Ctx->BootDmaStopUnconfirmed = TRUE;
+        Ctx->AudioDmaFaulted = TRUE;
+        SofLogBreadcrumb("[DMA] Quarantine slot unavailable; backing retained, recovery blocked.\n");
+        return;
+    }
     Ctx->RetainedDma[Slot].Data = *Data;
     Ctx->RetainedDma[Slot].Bdl = *Bdl;
     RtlZeroMemory(Data, sizeof(*Data));
@@ -1485,7 +1570,7 @@ VOID SofRetryRetainedDma(PSOF_DEVICE_CONTEXT Ctx)
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT
     for (ULONG slot = 0; slot < RTL_NUMBER_OF(Ctx->RetainedDma); ++slot) {
         PSOF_DMA_BUFFER bdl = &Ctx->RetainedDma[slot].Bdl;
-        if (!bdl->CommonBuffer) continue;
+        if (!bdl->VirtualAddress) continue;
         ULONG offset = SOF_HDA_ADSP_LOADER_BASE + slot * SOF_HDA_ADSP_SD_ENTRY_SIZE;
         if (SofDeviceRemoved(Ctx) || !Ctx->Bar0VirtualAddress ||
             !pj_ipc4_mmio_span_valid(Ctx->Bar0Length, offset, SOF_HDA_ADSP_SD_ENTRY_SIZE))
@@ -1499,8 +1584,10 @@ VOID SofRetryRetainedDma(PSOF_DEVICE_CONTEXT Ctx)
             (!same && (low || high || (ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)))))
             continue;
         UCHAR dmaStatus;
-        if (!NT_SUCCESS(SofStopAndDetachBootStream(regs, &dmaStatus)) || SofDeviceRemoved(Ctx))
+        if (!NT_SUCCESS(SofStopAndDetachBootStream(Ctx, regs, bdl, &dmaStatus)) || SofDeviceRemoved(Ctx))
             continue;
+        bdl->Published = FALSE;
+        Ctx->RetainedDma[slot].Data.Published = FALSE;
         SofFreeDmaBuffer(Ctx, bdl);
         SofFreeDmaBuffer(Ctx, &Ctx->RetainedDma[slot].Data);
     }
@@ -1545,7 +1632,8 @@ SofStartFirmwareBoot(
     return STATUS_NOT_SUPPORTED;
 #else
 #ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE
-    /* Source-only candidate: no physical DMA ownership qualification. */
+    /* v0.0.10.0 source-only candidate: independent backing is integrated,
+     * but active DMA and PnP/adapter lifetime are not qualified. */
     UNREFERENCED_PARAMETER(Ctx);
     UNREFERENCED_PARAMETER(OptionalFwPath);
     SofLogBreadcrumb("[Safety] DMIC candidate: DMA lifetime not qualified; firmware boot blocked.\n");
@@ -1667,7 +1755,7 @@ SofStartFirmwareBoot(
     }
 
     /* Allocate Contiguous DMA Buffer for Firmware Payload */
-    status = SofAllocateDmaBuffer(Ctx, fwInfo.PayloadSize, &fwDma);
+    status = SofAllocateOwnedDmaBuffer(Ctx, fwInfo.PayloadSize, WdfDmaDirectionWriteToDevice, &fwDma);
     if (!NT_SUCCESS(status)) {
         char err[128];
         RtlStringCbPrintfA(err, sizeof(err), "[12-ERR] Failed to allocate FW DMA buffer: 0x%08x\n", status);
@@ -1677,7 +1765,7 @@ SofStartFirmwareBoot(
     }
 
     /* Allocate BDL Descriptor List Buffer (4096 bytes) */
-    status = SofAllocateDmaBuffer(Ctx, 4096, &bdlDma);
+    status = SofAllocateOwnedDmaBuffer(Ctx, 4096, WdfDmaDirectionWriteToDevice, &bdlDma);
     if (!NT_SUCCESS(status)) {
         char err[128];
         RtlStringCbPrintfA(err, sizeof(err), "[12-ERR] Failed to allocate BDL DMA buffer: 0x%08x\n", status);
@@ -1711,6 +1799,9 @@ SofStartFirmwareBoot(
 
     /* Configure Code Loader stream on BAR0 */
     status = SofConfigureCodeLoaderDma(Ctx, &fwDma, &bdlDma, streamTag, &streamIndex);
+    dmaConfigured = fwDma.Published || bdlDma.Published;
+    if (dmaConfigured)
+        streamRegs = bar0 + SOF_HDA_ADSP_LOADER_BASE + streamIndex * SOF_HDA_ADSP_SD_ENTRY_SIZE;
     if (!NT_SUCCESS(status)) {
         char err[128];
         RtlStringCbPrintfA(err, sizeof(err), "[12-ERR] SofConfigureCodeLoaderDma failed: 0x%08x\n", status);
@@ -2061,11 +2152,13 @@ stop_dma:
     {
         UCHAR dmaStatus;
         NTSTATUS stopStatus = SofDeviceRemoved(Ctx) ? STATUS_DEVICE_NOT_READY :
-            SofStopAndDetachBootStream(streamRegs, &dmaStatus);
-        if (!NT_SUCCESS(stopStatus)) {
-            status = stopStatus;
+            SofStopAndDetachBootStream(Ctx, streamRegs, &bdlDma, &dmaStatus);
+        if (!NT_SUCCESS(stopStatus) || SofDeviceRemoved(Ctx)) {
+            status = NT_SUCCESS(stopStatus) ? STATUS_DEVICE_NOT_READY : stopStatus;
             goto dma_unconfirmed;
         }
+        fwDma.Published = FALSE;
+        bdlDma.Published = FALSE;
         if (NT_SUCCESS(status) && (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS))
             status = STATUS_IO_DEVICE_ERROR;
         dmaConfigured = FALSE;
@@ -2215,8 +2308,8 @@ boot_failed:
     SofFreeDmaBuffer(Ctx, &bdlDma);
     SofFreeDmaBuffer(Ctx, &fwDma);
 dma_unconfirmed:
-    /* On an unconfirmed stop the common buffers stay parented to the WDF
-     * DMA enabler for device destruction. Latch the fault to exclude reuse. */
+    /* Do not free owned backing on unconfirmed stop. The HAL mapping and
+     * adapter lifetime during PnP loss still need qualification. */
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
     Ctx->FwState = SOF_FW_BOOT_FAILED;
     Ctx->IpcFaulted = TRUE;

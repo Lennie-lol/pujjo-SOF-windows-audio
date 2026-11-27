@@ -1,6 +1,7 @@
 """Run the WaveRT register programming paths against an instrumented HDA descriptor."""
 from pathlib import Path
 import os
+import shlex
 import subprocess
 import tempfile
 
@@ -54,6 +55,7 @@ typedef struct { Device *DeviceContext; int DescriptorReserved,DescriptorPublish
  ULONG BdlPeriodCount, StreamIndex, BufferSizeBytes, StreamTag;
  struct {ULONG SamplingFrequency,ValidBitDepth,ChannelsCount;} Format;
  struct {ULONG LowPart,HighPart;} BdlPhysicalAddress;
+ struct {int Published;} RingAllocation,BdlAllocation;
 } Stream,*PSOF_WAVERT_STREAM;
 static unsigned char bar[256];
 static PUCHAR drop;
@@ -74,14 +76,21 @@ static void writew(USHORT v,PUCHAR p) {++writes; if(p!=drop) memcpy(p,&v,2);}
 cases = r"""
 int main(void) {
  Device d={bar,sizeof(bar),128,0};
- Stream s={&d,1,0,2,0,15360,1,{48000,32,4},{4096,1}};
+ Stream s={&d,1,0,2,0,15360,1,{48000,32,4},{4096,1},{0},{0}};
  int offsets[]={8,12,18,24,28};
  for(unsigned i=0;i<sizeof(offsets)/sizeof(offsets[0]);++i) {
    drop=bar+offsets[i];
    assert(SofWaveRtConfigureHdaStream(&s)==STATUS_DEVICE_CONFIGURATION_ERROR);
    assert(s.DescriptorPublished && !(bar[0]&2));
+   assert(s.RingAllocation.Published && s.BdlAllocation.Published);
    drop=NULL;
+   if(offsets[i]==24 || offsets[i]==28) {
+     writes=0;
+     assert(SofWaveRtResetHdaStream(&s)<0 && s.DescriptorPublished && !writes);
+     writel(4096,bar+24); writel(1,bar+28);
+   }
    assert(SofWaveRtResetHdaStream(&s)==0 && !s.DescriptorPublished);
+   assert(!s.RingAllocation.Published && !s.BdlAllocation.Published);
    memset(bar,0,sizeof(bar));
  }
  bar[0]=2; writes=0;
@@ -94,6 +103,7 @@ int main(void) {
  late_fault=0; d.removed=1; writes=0;
  assert(SofWaveRtResetHdaStream(&s)<0 && s.DescriptorPublished && !writes);
  d.removed=0;
+ bar[0]=0; /* zero-detached descriptor must also be idle */
  assert(SofWaveRtResetHdaStream(&s)==0 && !s.DescriptorPublished);
 }
 """
@@ -102,5 +112,5 @@ with tempfile.TemporaryDirectory() as tmp:
     path.write_text("\n".join([fixture, *functions, cases]))
     binary = path.with_suffix("")
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
-                    str(path), "-o", str(binary)], check=True)
+                    *shlex.split(os.environ.get("CFLAGS","")), str(path), "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)
