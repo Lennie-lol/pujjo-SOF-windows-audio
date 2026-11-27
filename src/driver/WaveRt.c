@@ -666,7 +666,10 @@ NTSTATUS SofWaveRtFreeStream(
             SofFreeDmaBuffer(ctx, &Stream->RingAllocation);
         }
     } else {
-        /* Quarantine this descriptor and both allocations for device removal. */
+        /* Direct analog leases have separate WDF references. A DMIC lease
+         * only maps CPU pages, so its DMA ownership can move independently. */
+        if (Stream->EndpointType == SOF_ENDPOINT_DMIC_PDM && Stream->BdlAllocation.CommonBuffer)
+            SofRetainDmaPair(ctx, Stream->StreamIndex, &Stream->RingAllocation, &Stream->BdlAllocation);
         ctx->AudioDmaFaulted = TRUE;
         status = STATUS_DEVICE_NOT_READY;
     }
@@ -707,6 +710,9 @@ NTSTATUS SofWaveRtDetachStream(PSOF_WAVERT_STREAM Stream)
     }
     if (Stream->DescriptorPublished)
         Stream->DeviceContext->AudioDmaFaulted = TRUE;
+    if (Stream->VoiceBuffer && Stream->DescriptorPublished && Stream->BdlAllocation.CommonBuffer)
+        SofRetainDmaPair(Stream->DeviceContext, Stream->StreamIndex,
+                         &Stream->RingAllocation, &Stream->BdlAllocation);
     if (Stream->VoiceBuffer && !Stream->DescriptorPublished) {
         /* PortCls still owns its CPU pages. DMA has no mapping into them. */
         SofFreeDmaBuffer(Stream->DeviceContext, &Stream->BdlAllocation);

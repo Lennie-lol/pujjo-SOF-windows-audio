@@ -18,6 +18,10 @@ typedef uint8_t UCHAR, BOOLEAN, *PUCHAR;
 typedef uint32_t ULONG;
 typedef int NTSTATUS;
 #define MAXULONG UINT32_MAX
+#define VOID void
+#define PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT
+#define NT_ASSERT assert
+#define RtlZeroMemory(p,n) memset(p,0,n)
 #define TRUE 1
 #define FALSE 0
 #define STATUS_SUCCESS 0
@@ -54,10 +58,11 @@ typedef int NTSTATUS;
 #define SOF_HDA_SD_STS_DMA_ERRORS 0x18u
 #define SOF_HDA_CL_DMA_SD_INT_MASK 0x1cu
 typedef struct { ULONG AddrLow, AddrHigh, Size, Ioc; } BDL, *PSOF_INTEL_DSP_BDL;
-typedef struct { void *VirtualAddress; struct {ULONG LowPart, HighPart;} PhysicalAddress; } SOF_DMA_BUFFER;
+typedef struct { void *VirtualAddress, *CommonBuffer; struct {ULONG LowPart, HighPart;} PhysicalAddress; } SOF_DMA_BUFFER, *PSOF_DMA_BUFFER;
 typedef struct { PUCHAR Bar0VirtualAddress; ULONG Bar0Length, NumCaptureStreams,
     NumPlaybackStreams, PpCapOffset, BootPpBitsAdded, BootIntBitsAdded;
     BOOLEAN Removed, DspNeedsPowerDown, BootDmaStopUnconfirmed, IrqMaskNeeded;
+    struct { SOF_DMA_BUFFER Data,Bdl; } RetainedDma[30];
     PUCHAR Bar4VirtualAddress; ULONG Bar4Length;
 } CTX, *PSOF_DEVICE_CONTEXT;
 static int SofDeviceRemoved(CTX *c) { return c->Removed; }
@@ -86,14 +91,14 @@ static void SofCodeLoaderWriteControl(PUCHAR p, ULONG v) {
 static void KeStallExecutionProcessor(unsigned us) { assert(us == 10); }
 static NTSTATUS SofAllocateDmaBuffer(CTX *c, ULONG n, SOF_DMA_BUFFER *b) {
     assert(c && allocs<2 && n==PAGE_SIZE);
-    b->VirtualAddress=storage[allocs++]; b->PhysicalAddress.LowPart=allocs*PAGE_SIZE;
+    b->CommonBuffer=b->VirtualAddress=storage[allocs++]; b->PhysicalAddress.LowPart=allocs*PAGE_SIZE;
     return 0;
 }
 static void SofFreeDmaBuffer(CTX *c, SOF_DMA_BUFFER *b) {
     assert(c);
     if (b->VirtualAddress) {
         assert(!(bar[0x80]&2) && !readl(bar+0x98) && !readl(bar+0x9c));
-        ++frees; b->VirtualAddress=NULL;
+        ++frees; b->CommonBuffer=b->VirtualAddress=NULL;
     }
 }
 """
@@ -149,6 +154,10 @@ int main(void) {
             drop=NULL; assert(SofStopIccmaxDma(&c,&d)==0);
         }
         assert(!d.Published && frees==2);
+        if(offset==0x204 || offset==0x1048) {
+            assert(d.RestorePending);
+            drop=NULL; assert(SofStopIccmaxDma(&c,&d)==0 && !d.RestorePending && frees==2);
+        }
         if (offset!=0x204) assert(readl(bar+0x204)==0x40000000u);
         if (offset!=0x1048) assert(bar[0x1048]==0x43);
     }
@@ -180,6 +189,25 @@ int main(void) {
         assert(SofStartIccmaxDma(&c,&d)==(i ? STATUS_DEVICE_NOT_READY : STATUS_IO_DEVICE_ERROR));
         assert(!allocs && !starts);
     }
+    {
+        SOF_ICCMAX_DMA d={0};
+        memset(bar,0,sizeof(bar)); drop=NULL; allocs=frees=starts=0;
+        assert(SofStartIccmaxDma(&c,&d)==0);
+        drop=bar+0x80;
+        assert(SofStopIccmaxDma(&c,&d)==STATUS_IO_TIMEOUT && !frees);
+        SofRetainDmaPair(&c,0,&d.Data,&d.Bdl);
+        assert(!d.Data.CommonBuffer && !d.Bdl.CommonBuffer);
+        SofRetryRetainedDma(&c); assert(!frees);
+        drop=NULL; c.Removed=1;
+        unsigned previous=ctl_reads;
+        SofRetryRetainedDma(&c); assert(!frees && ctl_reads==previous);
+        c.Removed=0;
+        writel(0xa000,bar+0x98);
+        SofRetryRetainedDma(&c); assert(!frees && readl(bar+0x98)==0xa000 && bar[0x80]==2);
+        writel(8192,bar+0x98);
+        SofRetryRetainedDma(&c); assert(frees==2 && !c.RetainedDma[0].Bdl.CommonBuffer);
+        SofRetryRetainedDma(&c); assert(frees==2);
+    }
     return 0;
 }
 """
@@ -190,7 +218,8 @@ with tempfile.TemporaryDirectory() as temp:
                      loader.index("#ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT\nstatic NTSTATUS SofAcquireBootProcessing")]
     acquire = loader[loader.index("static NTSTATUS SofAcquireBootProcessing("):
                      loader.index("/* Confirm both halves of the descriptor address")]
-    src.write_text(shim + restore + acquire + functions + cases)
+    retained = loader[loader.index("VOID SofRetainDmaPair("):loader.index("/**", loader.index("VOID SofRetryRetainedDma("))]
+    src.write_text(shim + restore + acquire + functions + retained + cases)
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra",
                     "-Werror", *shlex.split(os.environ.get("CFLAGS", "")),
                     "-I", str(driver), str(src), str(driver / "PujjoDmaPlan.c"),

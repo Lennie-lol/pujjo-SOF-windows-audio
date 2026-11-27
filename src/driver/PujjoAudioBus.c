@@ -92,9 +92,7 @@ static NTSTATUS AudioAllocate(PVOID Context, ULONG RequestedBytes, PUJJO_AUDIO_B
     format.ChannelMap = SOF_IPC4_CH_MAP_QUAD;
     format.ChannelConfig = SOF_IPC4_CHANNEL_CONFIG_3_POINT_1;
     format.ValidBitDepth = PJ_DMIC_BITS;
-    if (!RequestedBytes || RequestedBytes > 9600u ||
-        !pj_pcm_notification_ring(PJ_DMIC_RATE, PJ_DMIC_CHANNELS, PJ_DMIC_BITS,
-            PJ_DMIC_BITS, max(RequestedBytes, 3840u) * 8u, &size, &periodMs)) {
+    if (!pj_dmic_voice_ring(RequestedBytes, &size, &periodMs)) {
         status = STATUS_INVALID_BUFFER_SIZE;
         goto Done;
     }

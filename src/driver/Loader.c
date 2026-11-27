@@ -290,6 +290,24 @@ SofFreeFirmwareBuffer(
     }
 }
 
+#ifdef PUJJO_DMIC_DMA_PREFLIGHT
+typedef struct {
+    PSOF_DEVICE_CONTEXT Device;
+} SOF_PREFLIGHT_BUFFER_CONTEXT;
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(SOF_PREFLIGHT_BUFFER_CONTEXT, SofPreflightBufferContext)
+
+static EVT_WDF_OBJECT_CONTEXT_DESTROY SofPreflightBufferDestroyed;
+static VOID SofPreflightBufferDestroyed(WDFOBJECT Object)
+{
+    PSOF_DEVICE_CONTEXT ctx = SofPreflightBufferContext(Object)->Device;
+    if (ctx) {
+        LONG count = InterlockedIncrement(&ctx->PreflightBuffersDestroyed);
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+                   "[Pujjo] Preflight WDF common buffer destroyed (%ld).\n", count);
+    }
+}
+#endif
+
 /**
  * @brief Allocates a physically contiguous or IOMMU-mapped DMA buffer for bus mastering.
  *
@@ -326,15 +344,26 @@ SofAllocateDmaBuffer(
         RtlZeroMemory(DmaBuf, sizeof(*DmaBuf));
         return STATUS_INVALID_DEVICE_STATE;
     }
+#ifdef PUJJO_DMIC_DMA_PREFLIGHT
+    WDF_OBJECT_ATTRIBUTES attributes;
+    WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, SOF_PREFLIGHT_BUFFER_CONTEXT);
+    attributes.EvtDestroyCallback = SofPreflightBufferDestroyed;
+    status = WdfCommonBufferCreate(Ctx->DmaEnabler, Size, &attributes, &DmaBuf->CommonBuffer);
+#else
     status = WdfCommonBufferCreate(Ctx->DmaEnabler, Size,
                                    WDF_NO_OBJECT_ATTRIBUTES, &DmaBuf->CommonBuffer);
+#endif
     if (!NT_SUCCESS(status)) {
         RtlZeroMemory(DmaBuf, sizeof(*DmaBuf));
         return status;
     }
+#ifdef PUJJO_DMIC_DMA_PREFLIGHT
+    SofPreflightBufferContext(DmaBuf->CommonBuffer)->Device = Ctx;
+    InterlockedIncrement(&Ctx->PreflightBuffersCreated);
+#endif
     DmaBuf->VirtualAddress = WdfCommonBufferGetAlignedVirtualAddress(DmaBuf->CommonBuffer);
     DmaBuf->PhysicalAddress = WdfCommonBufferGetAlignedLogicalAddress(DmaBuf->CommonBuffer);
-    if (!DmaBuf->VirtualAddress || WdfCommonBufferGetLength(DmaBuf->CommonBuffer) < Size ||
+    if (!DmaBuf->VirtualAddress || !DmaBuf->PhysicalAddress.QuadPart || WdfCommonBufferGetLength(DmaBuf->CommonBuffer) < Size ||
         !pj_hda_dma_span_valid(DmaBuf->PhysicalAddress.LowPart,
             (ULONG)DmaBuf->PhysicalAddress.HighPart, Size, Ctx->HdaDma64Bit)) {
         WdfObjectDelete(DmaBuf->CommonBuffer);
@@ -839,8 +868,7 @@ static NTSTATUS SofStageUnpublishedDmicBuffers(PSOF_DEVICE_CONTEXT Ctx,
     char msg[192];
 
     if (!Payload || PayloadBytes < 256u || PayloadBytes > PJ_DMA_MAX_BYTES ||
-        !pj_pcm_notification_ring(PJ_DMIC_RATE, PJ_DMIC_CHANNELS, PJ_DMIC_BITS,
-            PJ_DMIC_BITS, 15360u, &ringBytes, &periodMs))
+        !pj_dmic_voice_ring(3840u, &ringBytes, &periodMs))
         return status;
     sizes[4] = ringBytes;
     for (ULONG i = 0; i < RTL_NUMBER_OF(buffers); ++i) {
@@ -950,6 +978,11 @@ Done:
         WdfObjectDelete(Ctx->DmaEnabler);
         Ctx->DmaEnabler = NULL;
     }
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[DMA-preflight] WDF buffers created=%ld destroyed-so-far=%ld.\n",
+        InterlockedCompareExchange(&Ctx->PreflightBuffersCreated, 0, 0),
+        InterlockedCompareExchange(&Ctx->PreflightBuffersDestroyed, 0, 0));
+    SofLogBreadcrumb(msg);
     SofNhltFreeAcpiTable(table);
     SofFreeFirmwareBuffer(raw);
     RtlZeroMemory(&Ctx->CopierProfile, sizeof(Ctx->CopierProfile));
@@ -1105,6 +1138,7 @@ typedef struct _SOF_ICCMAX_DMA {
     PUCHAR Ltrp;
     UCHAR OriginalGuardband;
     BOOLEAN OriginalDecoupled;
+    BOOLEAN RestorePending;
     BOOLEAN Published;
 } SOF_ICCMAX_DMA;
 
@@ -1162,6 +1196,7 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     Dma->OriginalGuardband = ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK;
     Dma->OriginalDecoupled = (ppctl & 1u) != 0;
     Dma->Published = TRUE;
+    Dma->RestorePending = TRUE;
     writel(Dma->Bdl.PhysicalAddress.LowPart, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPL);
     writel((ULONG)Dma->Bdl.PhysicalAddress.HighPart, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPU);
     writel(PAGE_SIZE, Dma->Registers + SOF_HDA_ADSP_REG_SD_CBL);
@@ -1193,14 +1228,16 @@ static NTSTATUS SofStopIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
 {
     NTSTATUS status = STATUS_SUCCESS;
     if (Dma->Published) {
-        ULONG ppctl;
-        UCHAR ltrp, dmaStatus;
+        UCHAR dmaStatus;
         if (SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
         status = SofStopAndDetachBootStream(Dma->Registers, &dmaStatus);
         if (!NT_SUCCESS(status)) return status;
         Dma->Published = FALSE;
         if (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS) status = STATUS_IO_DEVICE_ERROR;
-        ppctl = readl(Dma->Ppctl);
+    }
+    if (Dma->RestorePending && !SofDeviceRemoved(Ctx)) {
+        ULONG ppctl = readl(Dma->Ppctl);
+        UCHAR ltrp;
         if (ppctl != MAXULONG) {
             writel((ppctl & ~1u) | (Dma->OriginalDecoupled ? 1u : 0u), Dma->Ppctl);
             ppctl = readl(Dma->Ppctl);
@@ -1214,6 +1251,10 @@ static NTSTATUS SofStopIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
         if (ppctl == MAXULONG || ((ppctl & 1u) != 0) != Dma->OriginalDecoupled ||
             ltrp == 0xffu || (ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK) != Dma->OriginalGuardband)
             status = STATUS_DEVICE_NOT_READY;
+        else
+            Dma->RestorePending = FALSE;
+    } else if (Dma->RestorePending) {
+        status = STATUS_DEVICE_NOT_READY;
     }
     SofFreeDmaBuffer(Ctx, &Dma->Bdl);
     SofFreeDmaBuffer(Ctx, &Dma->Data);
@@ -1250,6 +1291,50 @@ static NTSTATUS SofCheckPostDmaRomState(ULONG RomStatus, SOF_FW_BOOT_STATE BootS
     return STATUS_SUCCESS;
 }
 #endif
+
+/* Device-start and audio teardown serialize access to each reserved slot.
+ * Transfer the handles before the stack/stream that allocated them goes away. */
+VOID SofRetainDmaPair(PSOF_DEVICE_CONTEXT Ctx, ULONG Slot, PSOF_DMA_BUFFER Data, PSOF_DMA_BUFFER Bdl)
+{
+    NT_ASSERT(Slot < RTL_NUMBER_OF(Ctx->RetainedDma));
+    NT_ASSERT(!Ctx->RetainedDma[Slot].Bdl.CommonBuffer);
+    Ctx->RetainedDma[Slot].Data = *Data;
+    Ctx->RetainedDma[Slot].Bdl = *Bdl;
+    RtlZeroMemory(Data, sizeof(*Data));
+    RtlZeroMemory(Bdl, sizeof(*Bdl));
+}
+
+/* Called only in the original D0 interval, before core power-down. Never
+ * use a new BAR mapping or touch a descriptor that points at another BDL.
+ * Leave the session faulted even after reclaiming the allocations. */
+VOID SofRetryRetainedDma(PSOF_DEVICE_CONTEXT Ctx)
+{
+#ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT
+    for (ULONG slot = 0; slot < RTL_NUMBER_OF(Ctx->RetainedDma); ++slot) {
+        PSOF_DMA_BUFFER bdl = &Ctx->RetainedDma[slot].Bdl;
+        if (!bdl->CommonBuffer) continue;
+        ULONG offset = SOF_HDA_ADSP_LOADER_BASE + slot * SOF_HDA_ADSP_SD_ENTRY_SIZE;
+        if (SofDeviceRemoved(Ctx) || !Ctx->Bar0VirtualAddress ||
+            !pj_ipc4_mmio_span_valid(Ctx->Bar0Length, offset, SOF_HDA_ADSP_SD_ENTRY_SIZE))
+            return;
+        PUCHAR regs = (PUCHAR)Ctx->Bar0VirtualAddress + offset;
+        ULONG low = readl(regs + SOF_HDA_ADSP_REG_SD_BDLPL);
+        ULONG high = readl(regs + SOF_HDA_ADSP_REG_SD_BDLPU);
+        ULONG ctl = SofCodeLoaderReadControl(regs);
+        BOOLEAN same = low == bdl->PhysicalAddress.LowPart && high == (ULONG)bdl->PhysicalAddress.HighPart;
+        if (ctl == MAXULONG || low == MAXULONG || high == MAXULONG ||
+            (!same && (low || high || (ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)))))
+            continue;
+        UCHAR dmaStatus;
+        if (!NT_SUCCESS(SofStopAndDetachBootStream(regs, &dmaStatus)) || SofDeviceRemoved(Ctx))
+            continue;
+        SofFreeDmaBuffer(Ctx, bdl);
+        SofFreeDmaBuffer(Ctx, &Ctx->RetainedDma[slot].Data);
+    }
+#else
+    UNREFERENCED_PARAMETER(Ctx);
+#endif
+}
 
 /**
  * @brief Complete DSP firmware load, hardware initialization, and execution orchestrator.
@@ -1966,9 +2051,12 @@ dma_unconfirmed:
     /* ICCMAX must stop even when the code-loader descriptor was lost. */
     if (!NT_SUCCESS(SofStopIccmaxDma(Ctx, &iccmax)))
         SofLogBreadcrumb("[Power] ICCMAX rollback could not be confirmed.\n");
-    if (dmaConfigured || iccmax.Published) {
+    if (dmaConfigured || iccmax.Published || iccmax.RestorePending) {
         Ctx->BootDmaStopUnconfirmed = TRUE;
-        SofLogBreadcrumb("[DMA] Stop or BDL detach unconfirmed. Retaining common buffers.\n");
+        if (dmaConfigured) SofRetainDmaPair(Ctx, streamIndex, &fwDma, &bdlDma);
+        if (iccmax.Published) SofRetainDmaPair(Ctx, 0, &iccmax.Data, &iccmax.Bdl);
+        SofRetryRetainedDma(Ctx);
+        SofLogBreadcrumb("[DMA] DMA detach failed. Session quarantined.\n");
     }
     if (Ctx->DspNeedsPowerDown) {
         NTSTATUS rollbackStatus;

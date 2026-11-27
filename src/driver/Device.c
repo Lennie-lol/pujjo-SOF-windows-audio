@@ -375,6 +375,10 @@ SofEvtDevicePrepareHardware(
         return STATUS_NOT_SUPPORTED;
 #endif
 
+    /* Quarantined DMA records can only be inspected under the mapping that
+     * published them. A resources rebalance must never adopt an old slot. */
+    if (ctx->BootDmaStopUnconfirmed || ctx->AudioDmaFaulted)
+        return STATUS_DEVICE_NOT_READY;
     /* Pujjo-only fork. Fail closed before touching PCI registers. */
     if (!PujjoBoardIdentityMatches()) {
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
@@ -677,6 +681,14 @@ SofEvtDeviceReleaseHardware(
 #ifdef PUJJO_DMIC_DETECTION_TEST
     SofWithdrawDmicDetectionChild(Device);
 #endif
+#ifdef PUJJO_DMIC_DMA_PREFLIGHT
+    char counts[128];
+    RtlStringCbPrintfA(counts, sizeof(counts),
+        "[DMA-preflight] ReleaseHardware: WDF created=%ld destroyed=%ld.\n",
+        InterlockedCompareExchange(&ctx->PreflightBuffersCreated, 0, 0),
+        InterlockedCompareExchange(&ctx->PreflightBuffersDestroyed, 0, 0));
+    SofLogBreadcrumb(counts);
+#endif
     SofUnmapPreparedBars(ctx);
     return STATUS_SUCCESS;
 #else
@@ -909,6 +921,12 @@ SofEvtDeviceD0Exit(
     NTSTATUS streamStatus = SofDisconnectAudioChild(ctx);
     NTSTATUS otherStatus = SofQuiesceDeviceStreams(ctx, FALSE);
     if (NT_SUCCESS(streamStatus)) streamStatus = otherStatus;
+
+    /* The child is offline and its timer is drained. Free may still return
+     * the CPU mapping concurrently, so serialize access to retained pairs. */
+    KeWaitForSingleObject(&ctx->AudioMutex, Executive, KernelMode, FALSE, NULL);
+    SofRetryRetainedDma(ctx);
+    KeReleaseMutex(&ctx->AudioMutex, FALSE);
 
     /* Stop device IRQs and drain the DPC and IPC senders before core reset. */
     ctx->CurrentPowerState = PowerDeviceUnspecified;

@@ -1,4 +1,4 @@
-# Pujjo v0.0.9.0 — microphone hardware admission preflight
+# Pujjo v0.0.9.1 — microphone hardware admission preflight
 
 **Source candidate. Not a recording driver. No installation or activation authorization.**
 
@@ -34,9 +34,13 @@ After the resource probe unmaps both BARs, it:
   The production common-buffer allocator requires the device-visible logical
   address to be aligned and within the reported HDA DMA width.
 - Validates two-segment firmware and ICCMAX geometry and a two-period
-  15360-byte capture ring (10 ms each), copies the payload using the CPU and
+  30720-byte capture ring (20 ms each), copies the payload using the CPU and
   checks it. No descriptor address is written to hardware. Releases all
-  allocated buffers in reverse order, requests deletion of the enabler.
+  allocated buffers in reverse order and requests deletion of the enabler.
+  The allocator counts successful WDF creates and actual destroy callbacks.
+  The log records both counts after preflight and again in ReleaseHardware.
+  Destruction may be deferred. Six creates and six destroys demonstrate
+  framework cleanup of these unpublished buffers only.
 - Never invokes firmware boot, DMA transactions, IRQ creation, production
   PortCls publication, codec or amplifier control.
 
@@ -51,6 +55,17 @@ The unsigned package includes the existing release and local-signature
 verifiers with the explicit -DmaPreflight switch. Local signing is performed
 on the VM, with the pinned development certificate; the Chromebook does
 not need SignTool. Microsoft release signing remains a different gate.
+
+## Experimental recording source
+
+The firmware route uses the four-slot DMIC configuration above. The WaveRT
+path averages the four signed 32-bit slots into mono 16-bit PCM at 48 kHz.
+It copies a completed DMA period into private staging, checks the hardware
+cursor and elapsed time, then publishes the period to a CPU-owned PortCls
+ring. The packet interface reports the sequence and a cursor-derived QPC
+timestamp. Debug and Release compilation and host-injected failures exercise
+this code. Timing, slot polarity, amplitude and app behavior require hardware
+evidence. This diagnostic package contains no recording endpoint.
 
 ## What remains before Discord
 

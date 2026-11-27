@@ -56,8 +56,8 @@ $infText = Get-Content -LiteralPath (Join-Path $package 'sof_dsp.inf') -Raw
 $versionLines = @($infText -split '\r?\n' | Where-Object { $_ -match '^\s*DriverVer\s*=' })
 Require ($versionLines.Count -eq 1) 'Expected exactly one DriverVer line'
 if ($DmaPreflight) {
-    Require ($versionLines[0].Trim() -eq 'DriverVer=11/27/2026,0.0.9.0') 'Wrong DMA admission package version; expected 0.0.9.0'
-    Require ($notice.Contains('Package version 0.0.9.0;') -and $notice.Contains('unpublished common buffers only')) 'Missing DMA admission notice'
+    Require ($versionLines[0].Trim() -eq 'DriverVer=11/27/2026,0.0.9.1') 'Wrong DMA admission package version; expected 0.0.9.1'
+    Require ($notice.Contains('Package version 0.0.9.1;') -and $notice.Contains('unpublished common buffers only')) 'Missing DMA admission notice'
 } else {
     Require ($versionLines[0].Trim() -eq 'DriverVer=11/26/2026,0.0.8.0') 'Wrong diagnostic package version; expected 0.0.8.0'
     Require ($notice.Contains('Package version 0.0.8.0;')) 'Missing diagnostic package version in notice'

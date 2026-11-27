@@ -60,7 +60,7 @@ static NTSTATUS SofAllocateDmaBuffer(CTX *ctx, ULONG n, SOF_DMA_BUFFER *b) {
     ++attempts;
     if (attempts == failAt) return -100;
     assert(live<6);
-    assert(n==(attempts==1?700000u:attempts==5?15360u:4096u));
+    assert(n==(attempts==1?700000u:attempts==5?30720u:4096u));
     b->VirtualAddress=calloc(n,1);
     assert(b->VirtualAddress);
     b->PhysicalAddress.QuadPart=attempts==zeroAt ? 0 : 0x100000000ULL + attempts*0x100000ULL;
