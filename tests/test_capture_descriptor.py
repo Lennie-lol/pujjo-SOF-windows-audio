@@ -4,6 +4,7 @@ import os
 import shlex
 import subprocess
 import tempfile
+from dma_publication_fixture import ledger
 
 root = Path(__file__).resolve().parents[1]
 source = (root / "src/driver/WaveRt.c").read_text()
@@ -46,11 +47,12 @@ fixture = r"""
 #define SOF_HDA_SD_STS_DMA_ERRORS 24
 #define KeMemoryBarrier() ((void)0)
 #define KeStallExecutionProcessor(x) ((void)(x))
-typedef int NTSTATUS;
+typedef int NTSTATUS, BOOLEAN;
+#define VOID void
 typedef uint32_t ULONG;
 typedef uint16_t USHORT;
 typedef unsigned char *PUCHAR;
-typedef struct { PUCHAR Bar0VirtualAddress; ULONG Bar0Length, PpCapOffset; int removed; } Device,*PSOF_DEVICE_CONTEXT;
+typedef struct { PUCHAR Bar0VirtualAddress; ULONG Bar0Length, PpCapOffset; int removed, HardwarePrepared, BootDmaStopUnconfirmed, AudioDmaFaulted; volatile int32_t DmaPublicationState; } Device,*PSOF_DEVICE_CONTEXT;
 typedef struct { Device *DeviceContext; int DescriptorReserved,DescriptorPublished;
  ULONG BdlPeriodCount, StreamIndex, BufferSizeBytes, StreamTag;
  struct {ULONG SamplingFrequency,ValidBitDepth,ChannelsCount;} Format;
@@ -75,7 +77,8 @@ static void writew(USHORT v,PUCHAR p) {++writes; if(p!=drop) memcpy(p,&v,2);}
 """
 cases = r"""
 int main(void) {
- Device d={bar,sizeof(bar),128,0};
+ Device d={.Bar0VirtualAddress=bar,.Bar0Length=sizeof(bar),.PpCapOffset=128,.HardwarePrepared=1};
+ assert(SofOpenDmaPublicationGate(&d));
  Stream s={&d,1,0,2,0,15360,1,{48000,32,4},{4096,1},{0},{0}};
  int offsets[]={8,12,18,24,28};
  for(unsigned i=0;i<sizeof(offsets)/sizeof(offsets[0]);++i) {
@@ -90,7 +93,7 @@ int main(void) {
      writel(4096,bar+24); writel(1,bar+28);
    }
    assert(SofWaveRtResetHdaStream(&s)==0 && !s.DescriptorPublished);
-   assert(!s.RingAllocation.Published && !s.BdlAllocation.Published);
+   assert(!s.RingAllocation.Published && !s.BdlAllocation.Published && !SofDmaPublishedSlots(&d));
    memset(bar,0,sizeof(bar));
  }
  bar[0]=2; writes=0;
@@ -105,11 +108,19 @@ int main(void) {
  d.removed=0;
  bar[0]=0; /* zero-detached descriptor must also be idle */
  assert(SofWaveRtResetHdaStream(&s)==0 && !s.DescriptorPublished);
+ memset(bar,0,sizeof(bar));
+ assert(SofWaveRtConfigureHdaStream(&s)==0);
+ SofInvalidateDmaPublicationGate(&d); /* same CAS as surprise removal */
+ writes=0;
+ /* Even if the bus remains readable, no retirement of its DMA lease. */
+ assert(SofWaveRtResetHdaStream(&s)<0 && s.DescriptorPublished);
+ assert(!writes && SofDmaPublishedSlots(&d)==1 && s.RingAllocation.Published);
+ assert(!SofOpenDmaPublicationGate(&d));
 }
 """
 with tempfile.TemporaryDirectory() as tmp:
     path = Path(tmp) / "descriptor.c"
-    path.write_text("\n".join([fixture, *functions, cases]))
+    path.write_text("\n".join([fixture, ledger, *functions, cases]))
     binary = path.with_suffix("")
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
                     *shlex.split(os.environ.get("CFLAGS","")), str(path), "-o", str(binary)], check=True)

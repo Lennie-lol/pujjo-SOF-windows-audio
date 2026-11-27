@@ -45,10 +45,15 @@ NTSYSAPI NTSTATUS NTAPI ZwFlushKey(_In_ HANDLE KeyHandle);
 #if defined(PUJJO_DMIC_ENUMERATION_CANDIDATE) && ( \
     !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) || \
     !defined(PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED) || \
-    !defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO) || \
+    (!defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO) && !defined(PUJJO_DMIC_ROM_BOOT_CANDIDATE)) || \
     defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG) || \
     defined(PUJJO_REVIEWED_TOPOLOGY_NHLT) || defined(PUJJO_DSP_BOOT_DIAGNOSTIC))
 #error The DMIC-only development candidate must not include analog or diagnostic activation
+#endif
+
+#if defined(PUJJO_DMIC_ROM_BOOT_CANDIDATE) && (!defined(PUJJO_DMIC_ENUMERATION_CANDIDATE) || \
+    defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO) || defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG))
+#error ROM boot candidate is compile-only and must not include any audio activation
 #endif
 
 static BOOLEAN SofHardwareDevelopmentAllowed(VOID)
@@ -377,7 +382,8 @@ SofEvtDevicePrepareHardware(
 
     /* Quarantined DMA records can only be inspected under the mapping that
      * published them. A resources rebalance must never adopt an old slot. */
-    if (ctx->BootDmaStopUnconfirmed || ctx->AudioDmaFaulted)
+    if (ctx->BootDmaStopUnconfirmed || ctx->AudioDmaFaulted ||
+        InterlockedCompareExchange(&ctx->DmaPublicationState, 0, 0) != 0)
         return STATUS_DEVICE_NOT_READY;
     /* Pujjo-only fork. Fail closed before touching PCI registers. */
     if (!PujjoBoardIdentityMatches()) {
@@ -696,6 +702,7 @@ SofEvtDeviceReleaseHardware(
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] SofEvtDeviceReleaseHardware starting...\n");
     SofLogBreadcrumb("[Teardown] SofEvtDeviceReleaseHardware starting...\n");
+    SofCloseDmaPublicationGate(ctx);
 
     NTSTATUS status = SofDisconnectAudioChild(ctx);
     NTSTATUS streamStatus = SofQuiesceDeviceStreams(ctx, TRUE);
@@ -717,7 +724,7 @@ SofEvtDeviceReleaseHardware(
 
     ctx->HardwarePrepared = FALSE;
     if (ctx->BootDmaStopUnconfirmed || ctx->DspNeedsPowerDown ||
-        ctx->BootPpBitsAdded || ctx->BootIntBitsAdded)
+        ctx->BootPpBitsAdded || ctx->BootIntBitsAdded || SofDmaPublishedSlots(ctx))
         return STATUS_DEVICE_NOT_READY;
     return status;
 #endif
@@ -817,6 +824,23 @@ SofEvtDeviceD0Entry(
         return STATUS_DEVICE_NOT_READY;
     }
 
+#ifdef PUJJO_DMIC_ROM_BOOT_CANDIDATE
+    /* Future one-shot test ends after authenticated ROM entry, FW_READY
+     * and the version IPC performed by the loader. No audio child/stream,
+     * watchdog, dump or ongoing powered session is part of this candidate. */
+    SofCloseDmaPublicationGate(ctx);
+    BOOLEAN masked = SofIpcDisableInterrupts(ctx);
+    SofIpcQuiesce(ctx);
+    NTSTATUS shutdownStatus = SofDeviceRemoved(ctx) ?
+        STATUS_DEVICE_REMOVED : SofPowerDownDsp(ctx);
+    if (!NT_SUCCESS(shutdownStatus)) return shutdownStatus;
+    shutdownStatus = SofRestoreBootController(ctx);
+    if (!NT_SUCCESS(shutdownStatus)) return shutdownStatus;
+    if (!masked || SofDmaPublishedSlots(ctx) || ctx->BootDmaStopUnconfirmed ||
+        ctx->AudioDmaFaulted || SofDeviceRemoved(ctx)) return STATUS_DEVICE_NOT_READY;
+    SofLogBreadcrumb("[ROM] FW_READY/version IPC and shutdown complete; journal remains dirty. No audio.\n");
+    return STATUS_SUCCESS;
+#else
     if (g_CanaryArmed && ctx->ArmedTesting != 0 && ctx->EnablePortCls != 0) {
         NTSTATUS portStatus = SofPublishAudioChild(ctx);
         if (portStatus == STATUS_NOT_FOUND) {
@@ -867,6 +891,7 @@ SofEvtDeviceD0Entry(
     /* Pujjo USB offload is not a verified part of cold boot. */
     SofLogBreadcrumb("[17] SofEvtDeviceD0Entry completed successfully!\n");
     return STATUS_SUCCESS;
+#endif /* PUJJO_DMIC_ROM_BOOT_CANDIDATE */
 #endif /* PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT */
 }
 
@@ -890,6 +915,7 @@ SofEvtDeviceD0Exit(
 {
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
     if (!SofHardwareDevelopmentAllowed() || !ctx->HardwarePrepared) return STATUS_SUCCESS;
+    SofCloseDmaPublicationGate(ctx);
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] EvtDeviceD0Exit: Transitioning from D0 to Target State %d\n",
@@ -978,6 +1004,7 @@ SofEvtDeviceSurpriseRemoval(_In_ WDFDEVICE Device)
 
     /* The device can already be absent. Close the software IRQ gate without
      * touching registers, and release any outstanding IPC waiters. */
+    SofInvalidateDmaPublicationGate(ctx);
     InterlockedExchange(&ctx->SurpriseRemoved, 1);
     SofIpcDisableInterrupts(ctx);
     SofIpcQuiesce(ctx);

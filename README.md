@@ -140,6 +140,14 @@ A PnP node or a successful mock resource validator is not proof a real Windows `
 
 ### 4. Intel SOF firmware, DMA and Windows audio endpoints
 
+**Pujjo v0.0.11.0 source checkpoint (2026-11-27):** a durable one-shot
+DMA journal, atomic descriptor ownership ledger, cold-controller ownership
+audit and separate ROM-only compile candidate advance the firmware loader.
+The platform DMA isolation/drain contract remains unqualified; the ROM
+candidate refuses DriverEntry and the loader gate stays closed. No new
+installable package or recording endpoint is provided.
+See [v11 ROM boot review](docs/PUJJO_ROM_BOOT_V11.md).
+
 **Pujjo v0.0.10.0 source checkpoint (2026-11-27):** the physical v9.2
 allocation/preflight passed; the active firmware and DMIC capture source
 now uses independent MDL backing with checked descriptor ownership and

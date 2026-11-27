@@ -1176,6 +1176,7 @@ NTSTATUS SofWaveRtConfigureHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     if (!regs || !Stream->DescriptorReserved || Stream->DescriptorPublished || !Stream->BdlPeriodCount)
         return STATUS_DEVICE_NOT_READY;
     ctx = Stream->DeviceContext;
+    if (!SofDmaPublicationGateOpen(ctx)) return STATUS_DEVICE_NOT_READY;
     if (!ctx->PpCapOffset || ctx->PpCapOffset > ctx->Bar0Length ||
         SOF_HDA_REG_PP_PPCTL + sizeof(ULONG) > ctx->Bar0Length - ctx->PpCapOffset)
         return STATUS_INVALID_BUFFER_SIZE;
@@ -1210,9 +1211,11 @@ NTSTATUS SofWaveRtConfigureHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     writew(format, regs + SOF_HDA_ADSP_REG_SD_FORMAT);
     KeMemoryBarrier();
     /* Either address write can expose the BDL, even if readback fails. */
+    if (!SofClaimDmaPublication(ctx, Stream->StreamIndex)) return STATUS_DEVICE_NOT_READY;
     Stream->DescriptorPublished = TRUE;
     Stream->RingAllocation.Published = TRUE;
     Stream->BdlAllocation.Published = TRUE;
+    if (!SofDmaPublicationGateOpen(ctx)) return STATUS_DEVICE_NOT_READY;
     writel(Stream->BdlPhysicalAddress.LowPart, regs + SOF_HDA_ADSP_REG_SD_BDLPL);
     writel((ULONG)Stream->BdlPhysicalAddress.HighPart, regs + SOF_HDA_ADSP_REG_SD_BDLPU);
     /* Keep controller stream IRQ disabled while the DPC polls real BCIS. */
@@ -1240,6 +1243,7 @@ NTSTATUS SofWaveRtStartHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     }
     if (InterlockedCompareExchange(&Stream->DmaFaulted, 0, 0))
         return STATUS_IO_DEVICE_ERROR;
+    if (!SofDmaPublicationGateOpen(Stream->DeviceContext)) return STATUS_DEVICE_NOT_READY;
     return SofWaveRtSetHdaControl(SofWaveRtHdaDescriptor(Stream),
         SOF_HDA_SD_CTL_DMA_START, SOF_HDA_SD_CTL_DMA_START);
 #else
@@ -1252,6 +1256,7 @@ NTSTATUS SofWaveRtStopHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
 {
 #ifdef _KERNEL_MODE
     if (!Stream->DescriptorPublished) return STATUS_SUCCESS;
+    if (!SofDmaDetachLeaseOwned(Stream->DeviceContext, Stream->StreamIndex)) return STATUS_DEVICE_NOT_READY;
     return SofWaveRtSetHdaControl(SofWaveRtHdaDescriptor(Stream), SOF_HDA_SD_CTL_DMA_START, 0);
 #else
     UNREFERENCED_PARAMETER(Stream);
@@ -1264,7 +1269,8 @@ NTSTATUS SofWaveRtResetHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
 #ifdef _KERNEL_MODE
     PUCHAR regs = SofWaveRtHdaDescriptor(Stream);
     if (!Stream->DescriptorPublished) return STATUS_SUCCESS;
-    if (!regs) return STATUS_DEVICE_NOT_READY;
+    if (!regs || !SofDmaDetachLeaseOwned(Stream->DeviceContext, Stream->StreamIndex))
+        return STATUS_DEVICE_NOT_READY;
     ULONG low = readl(regs + SOF_HDA_ADSP_REG_SD_BDLPL);
     ULONG high = readl(regs + SOF_HDA_ADSP_REG_SD_BDLPU);
     ULONG ctl = readl(regs + SOF_HDA_ADSP_REG_SD_CTL);
@@ -1286,6 +1292,8 @@ NTSTATUS SofWaveRtResetHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
             (readl(regs + SOF_HDA_ADSP_REG_SD_CTL) &
                 (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)) ||
             SofDeviceRemoved(Stream->DeviceContext))
+            return STATUS_DEVICE_NOT_READY;
+        if (!SofConfirmDmaDetached(Stream->DeviceContext, Stream->StreamIndex))
             return STATUS_DEVICE_NOT_READY;
         Stream->DescriptorPublished = FALSE;
         Stream->RingAllocation.Published = FALSE;

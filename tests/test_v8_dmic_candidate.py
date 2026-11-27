@@ -36,7 +36,7 @@ assert "return STATUS_NOT_SUPPORTED;" in entry
 for forbidden in ("WdfDriverCreate", "SofCheckAndConsumeCanaryFile", "ZwOpenKey"):
     assert forbidden not in entry
 boot = loader.split("SofStartFirmwareBoot(", 1)[1].split(
-    "#ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE", 1)[1].split("#else", 1)[0]
+    "#if defined(PUJJO_DMIC_ENUMERATION_CANDIDATE) && !defined(PUJJO_DMIC_ROM_BOOT_CANDIDATE)", 1)[1].split("#else", 1)[0]
 assert "return STATUS_NOT_SUPPORTED;" in boot
 assert "SofNhltQueryPujjoDmicFallback(nhltStatus," in device
 assert "SofNhltInspectPujjoDmic(nhltBuffer, nhltSize" in device

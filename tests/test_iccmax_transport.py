@@ -4,6 +4,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import tempfile
+from dma_publication_fixture import ledger
 
 driver = Path(__file__).resolve().parents[1] / "src/driver"
 loader = (driver / "Loader.c").read_text()
@@ -34,6 +35,7 @@ typedef int NTSTATUS;
 #define NT_SUCCESS(s) ((s) >= 0)
 #define _In_
 #define RTL_NUMBER_OF(a) (sizeof(a)/sizeof((a)[0]))
+#define SOF_HDA_GCAP 0u
 #define SOF_HDA_GCTL 8u
 #define SOF_HDA_GCTL_RESET 1u
 #define SOF_HDA_INTCTL 32u
@@ -62,6 +64,8 @@ typedef struct { void *VirtualAddress, *CommonBuffer; struct {ULONG LowPart, Hig
 typedef struct { PUCHAR Bar0VirtualAddress; ULONG Bar0Length, NumCaptureStreams,
     NumPlaybackStreams, PpCapOffset, BootPpBitsAdded, BootIntBitsAdded;
     BOOLEAN Removed, DspNeedsPowerDown, BootDmaStopUnconfirmed, IrqMaskNeeded, AudioDmaFaulted;
+    BOOLEAN HardwarePrepared;
+    volatile int32_t DmaPublicationState;
     struct { SOF_DMA_BUFFER Data,Bdl; } RetainedDma[30];
     PUCHAR Bar4VirtualAddress; ULONG Bar4Length;
 } CTX, *PSOF_DEVICE_CONTEXT;
@@ -115,20 +119,43 @@ int main(void) {
     UCHAR dsp[8]={0};
     CTX c={.Bar0VirtualAddress=bar,.Bar0Length=sizeof(bar),.Bar4VirtualAddress=dsp,
            .Bar4Length=sizeof(dsp),.NumCaptureStreams=1,
-           .NumPlaybackStreams=1,.PpCapOffset=0x200};
+           .NumPlaybackStreams=1,.PpCapOffset=0x200,.HardwarePrepared=1};
+    assert(SofOpenDmaPublicationGate(&c));
     assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_NOT_READY); /* controller held in reset */
     writel(1,bar+SOF_HDA_GCTL);
+    writew(0x1101,bar+SOF_HDA_GCAP);
     bar[0x80]=2;
     assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
     bar[0x80]=0; writel(0x1000,bar+0xb8);
     assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
     writel(0,bar+0xb8); writel(0x01010000,dsp+4);
-    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && c.BootPpBitsAdded);
-    assert(SofRestoreBootController(&c)==0 && readl(bar+0x204)==0);
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
+    assert(readl(bar+0x204)==0);
+    writel(0,dsp+4);
+    /* Each engine/foreign address and an extra bidirectional stream
+       must prevent any global PP write. */
+    unsigned offsets[]={0x40,0x44,0x50,0x54,0x70,0x74};
+    for(unsigned i=0;i<sizeof(offsets)/sizeof(offsets[0]);++i) {
+        writel(0x1000,bar+offsets[i]);
+        assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !readl(bar+0x204));
+        writel(0,bar+offsets[i]);
+        writel(MAXULONG,bar+offsets[i]);
+        assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_NOT_READY && !readl(bar+0x204));
+        writel(0,bar+offsets[i]);
+    }
+    bar[0x4c]=2; assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY); bar[0x4c]=0;
+    bar[0x5c]=2; assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY); bar[0x5c]=0;
+    writew(0x1109,bar+SOF_HDA_GCAP); bar[0xc0]=2;
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !readl(bar+0x204));
+    bar[0xc0]=0; writew(0x1101,bar+SOF_HDA_GCAP);
+    writel(0x02000000,dsp+4);
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !readl(bar+0x204));
     writel(0,dsp+4);
     writel(8,bar+0x204);
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
+    writel(0,bar+0x204);
     assert(SofAcquireBootProcessing(&c)==0 && c.BootPpBitsAdded==SOF_HDA_PPCTL_GPROCEN);
-    assert(readl(bar+0x204)==(8|SOF_HDA_PPCTL_GPROCEN));
+    assert(readl(bar+0x204)==SOF_HDA_PPCTL_GPROCEN);
     c.BootIntBitsAdded=1u<<31; writel(c.BootIntBitsAdded|2,bar+SOF_HDA_INTCTL);
     c.BootDmaStopUnconfirmed=1;
     assert(SofRestoreBootController(&c)==STATUS_DEVICE_NOT_READY && c.BootIntBitsAdded);
@@ -136,7 +163,7 @@ int main(void) {
     assert(SofRestoreBootController(&c)==STATUS_DEVICE_NOT_READY && c.BootPpBitsAdded);
     assert(!c.BootIntBitsAdded && readl(bar+SOF_HDA_INTCTL)==2);
     drop=NULL;
-    assert(SofRestoreBootController(&c)==0 && readl(bar+0x204)==8);
+    assert(SofRestoreBootController(&c)==0 && readl(bar+0x204)==0);
     writel(SOF_HDA_PPCTL_GPROCEN,bar+0x204);
     assert(SofAcquireBootProcessing(&c)==0 && !c.BootPpBitsAdded);
     assert(SofRestoreBootController(&c)==0 && readl(bar+0x204)==SOF_HDA_PPCTL_GPROCEN);
@@ -155,7 +182,7 @@ int main(void) {
             assert(d.Published && frees==0);
             drop=NULL; assert(SofStopIccmaxDma(&c,&d)==0);
         }
-        assert(!d.Published && frees==2);
+        assert(!d.Published && frees==2 && !SofDmaPublishedSlots(&c));
         if(offset==0x204 || offset==0x1048) {
             assert(d.RestorePending);
             drop=NULL; assert(SofStopIccmaxDma(&c,&d)==0 && !d.RestorePending && frees==2);
@@ -234,11 +261,11 @@ with tempfile.TemporaryDirectory() as temp:
     src = Path(temp) / "iccmax.c"
     exe = Path(temp) / ("iccmax.exe" if os.name == "nt" else "iccmax")
     restore = loader[loader.index("NTSTATUS SofRestoreBootController("):
-                     loader.index("#ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT\nstatic NTSTATUS SofAcquireBootProcessing")]
-    acquire = loader[loader.index("static NTSTATUS SofAcquireBootProcessing("):
+                     loader.index("#ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT\n/* Intel HD Audio rev 1.0a")]
+    acquire = loader[loader.index("static NTSTATUS SofAuditColdBootOwnership("):
                      loader.index("/* Confirm both halves of the descriptor address")]
-    retained = loader[loader.index("VOID SofRetainDmaPair("):loader.index("/**", loader.index("VOID SofRetryRetainedDma("))]
-    src.write_text(shim + restore + acquire + functions + retained + cases)
+    retained = loader[loader.index("VOID SofRetainDmaPair("):loader.index("#if defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) && !defined(PUJJO_DSP_BOOT_DIAGNOSTIC)", loader.index("VOID SofRetryRetainedDma("))]
+    src.write_text(shim + ledger + restore + acquire + functions + retained + cases)
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra",
                     "-Werror", *shlex.split(os.environ.get("CFLAGS", "")),
                     "-I", str(driver), str(src), str(driver / "PujjoDmaPlan.c"),

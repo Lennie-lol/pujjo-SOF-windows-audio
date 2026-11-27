@@ -141,6 +141,49 @@ SofWriteRegistryDword(
     return ZwSetValueKey(KeyHandle, &uName, 0, REG_DWORD, &Value, sizeof(ULONG));
 }
 
+/* One driver-wide attempt even across concurrent device objects. The durable
+ * marker is deliberately never cleared by DriverEntry, watchdog, D0 exit,
+ * registry defaults, rollback or driver unload. A review/cold recovery is
+ * required before a future authorized experiment. It is not a DMA fence. */
+static volatile LONG g_DmaJournalAttempted;
+
+NTSTATUS SofBeginDmaJournal(PSOF_DEVICE_CONTEXT Ctx)
+{
+    WDFKEY key = NULL;
+    UNICODE_STRING name;
+    ULONG value = MAXULONG;
+    NTSTATUS status;
+    if (!Ctx || KeGetCurrentIrql() != PASSIVE_LEVEL || KeAreAllApcsDisabled() ||
+        !Ctx->HardwarePrepared || SofDeviceRemoved(Ctx) ||
+        InterlockedCompareExchange(&g_DmaJournalAttempted, 1, 0) != 0)
+        return STATUS_INVALID_DEVICE_STATE;
+    RtlInitUnicodeString(&name, L"DmaSessionDirty");
+    status = WdfDriverOpenParametersRegistryKey(WdfGetDriver(), KEY_READ | KEY_WRITE,
+        WDF_NO_OBJECT_ATTRIBUTES, &key);
+    if (status != STATUS_SUCCESS) return STATUS_DEVICE_NOT_READY;
+    status = WdfRegistryQueryULong(key, &name, &value);
+    if (status != STATUS_SUCCESS || value != 0) {
+        status = STATUS_DEVICE_NOT_READY;
+        goto Done;
+    }
+    status = WdfRegistryAssignULong(key, &name, 1);
+    if (status != STATUS_SUCCESS) goto Done;
+    status = ZwFlushKey(WdfRegistryWdmGetHandle(key));
+    if (status != STATUS_SUCCESS) goto Done;
+    value = MAXULONG;
+    status = WdfRegistryQueryULong(key, &name, &value);
+    if (status != STATUS_SUCCESS || value != 1 ||
+        !SofOpenDmaPublicationGate(Ctx))
+        status = STATUS_DEVICE_NOT_READY;
+Done:
+    WdfRegistryClose(key);
+    if (status == STATUS_SUCCESS)
+        SofLogBreadcrumb("[DMA-journal] Durable dirty marker verified; one device generation admitted.\n");
+    else
+        SofLogBreadcrumb("[DMA-journal] Admission refused; no retry or automatic journal reset.\n");
+    return status == STATUS_SUCCESS ? STATUS_SUCCESS : STATUS_DEVICE_NOT_READY;
+}
+
 #ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
 /* The diagnostic never interprets a partial disarm as authorization. Even
  * an incomplete/invalid request is retired where possible, and both writes

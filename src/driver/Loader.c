@@ -308,6 +308,88 @@ static VOID SofPreflightBufferDestroyed(WDFOBJECT Object)
 }
 #endif
 
+/* A single CAS word couples admission and ownership. A close cannot race a
+ * new claim into an open slot. Claims already made before surprise removal
+ * stay owned; this is a software ledger, not a hardware DMA drain. */
+BOOLEAN SofOpenDmaPublicationGate(PSOF_DEVICE_CONTEXT Ctx)
+{
+    if (!Ctx || !Ctx->HardwarePrepared || SofDeviceRemoved(Ctx)) return FALSE;
+    return InterlockedCompareExchange(&Ctx->DmaPublicationState,
+        (LONG)SOF_DMA_JOURNAL_OPEN, 0) == 0;
+}
+
+VOID SofCloseDmaPublicationGate(PSOF_DEVICE_CONTEXT Ctx)
+{
+    if (Ctx) InterlockedOr(&Ctx->DmaPublicationState, (LONG)SOF_DMA_JOURNAL_CLOSED);
+}
+
+/* Unlike orderly close, surprise removal revokes the right to confirm
+ * descriptor detachment as well. Preserve the slot bits in the same CAS. */
+VOID SofInvalidateDmaPublicationGate(PSOF_DEVICE_CONTEXT Ctx)
+{
+    ULONG state;
+    if (!Ctx) return;
+    do {
+        state = (ULONG)InterlockedCompareExchange(&Ctx->DmaPublicationState, 0, 0);
+    } while ((ULONG)InterlockedCompareExchange(&Ctx->DmaPublicationState,
+        (LONG)((state | SOF_DMA_JOURNAL_CLOSED) & ~SOF_DMA_JOURNAL_OPEN), (LONG)state) != state);
+}
+
+BOOLEAN SofDmaPublicationGateOpen(PSOF_DEVICE_CONTEXT Ctx)
+{
+    ULONG state;
+    if (!Ctx || !Ctx->HardwarePrepared || Ctx->BootDmaStopUnconfirmed ||
+        Ctx->AudioDmaFaulted || SofDeviceRemoved(Ctx)) return FALSE;
+    state = (ULONG)InterlockedCompareExchange(&Ctx->DmaPublicationState, 0, 0);
+    return (state & (SOF_DMA_JOURNAL_OPEN | SOF_DMA_JOURNAL_CLOSED)) == SOF_DMA_JOURNAL_OPEN;
+}
+
+ULONG SofDmaPublishedSlots(PSOF_DEVICE_CONTEXT Ctx)
+{
+    return (ULONG)InterlockedCompareExchange(&Ctx->DmaPublicationState, 0, 0) & SOF_DMA_SLOT_MASK;
+}
+
+BOOLEAN SofClaimDmaPublication(PSOF_DEVICE_CONTEXT Ctx, ULONG Slot)
+{
+    ULONG state, bit;
+    if (!Ctx || Slot >= 30u || !Ctx->HardwarePrepared ||
+        Ctx->BootDmaStopUnconfirmed || Ctx->AudioDmaFaulted || SofDeviceRemoved(Ctx))
+        return FALSE;
+    bit = 1u << Slot;
+    for (;;) {
+        state = (ULONG)InterlockedCompareExchange(&Ctx->DmaPublicationState, 0, 0);
+        if ((state & (SOF_DMA_JOURNAL_OPEN | SOF_DMA_JOURNAL_CLOSED)) != SOF_DMA_JOURNAL_OPEN ||
+            (state & bit)) return FALSE;
+        if ((ULONG)InterlockedCompareExchange(&Ctx->DmaPublicationState,
+            (LONG)(state | bit), (LONG)state) == state)
+            return TRUE;
+    }
+}
+
+BOOLEAN SofDmaDetachLeaseOwned(PSOF_DEVICE_CONTEXT Ctx, ULONG Slot)
+{
+    ULONG state;
+    if (!Ctx || Slot >= 30u || SofDeviceRemoved(Ctx) || !Ctx->HardwarePrepared) return FALSE;
+    state = (ULONG)InterlockedCompareExchange(&Ctx->DmaPublicationState, 0, 0);
+    return (state & SOF_DMA_JOURNAL_OPEN) && (state & (1u << Slot));
+}
+
+/* Called only after checked stop/reset/detach of this exact BDL in the
+ * original mapping. After surprise loss, do not retire a claimed slot. */
+BOOLEAN SofConfirmDmaDetached(PSOF_DEVICE_CONTEXT Ctx, ULONG Slot)
+{
+    ULONG state, bit;
+    if (!Ctx || Slot >= 30u || SofDeviceRemoved(Ctx) || !Ctx->HardwarePrepared) return FALSE;
+    bit = 1u << Slot;
+    for (;;) {
+        state = (ULONG)InterlockedCompareExchange(&Ctx->DmaPublicationState, 0, 0);
+        if (!(state & SOF_DMA_JOURNAL_OPEN) || !(state & bit) || SofDeviceRemoved(Ctx)) return FALSE;
+        if ((ULONG)InterlockedCompareExchange(&Ctx->DmaPublicationState,
+            (LONG)(state & ~bit), (LONG)state) == state)
+            return TRUE;
+    }
+}
+
 /* Driver-owned page backing, separate from HAL mapping ownership. This
  * primitive is valid for unpublished or verified-detached buffers. It
  * does not establish that an IOVA remains reserved after surprise removal. */
@@ -736,6 +818,7 @@ SofConfigureCodeLoaderDma(
     char bmsg[256];
 
     if (OutStreamIndex) *OutStreamIndex = 0;
+    if (!SofDmaPublicationGateOpen(Ctx)) return STATUS_DEVICE_NOT_READY;
     if (!Ctx || !Ctx->Bar0VirtualAddress || !FwDmaBuf || !BdlDmaBuf ||
         !FwDmaBuf->Mdl || !BdlDmaBuf->Mdl ||
         !FwDmaBuf->OwnedAdapter || !BdlDmaBuf->OwnedAdapter ||
@@ -890,9 +973,11 @@ SofConfigureCodeLoaderDma(
 
     /* 6. Program BDL base. Record both owners and the slot before the first
      * address write, including partial publication on surprise removal. */
+    if (!SofClaimDmaPublication(Ctx, streamIndex)) return STATUS_DEVICE_NOT_READY;
     FwDmaBuf->Published = TRUE;
     BdlDmaBuf->Published = TRUE;
     if (OutStreamIndex) *OutStreamIndex = streamIndex;
+    if (!SofDmaPublicationGateOpen(Ctx)) return STATUS_DEVICE_NOT_READY;
     WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_BDLPL),
                          BdlDmaBuf->PhysicalAddress.LowPart);
     WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_BDLPU),
@@ -1219,7 +1304,7 @@ Done:
  * engines are quiet. Preserve unrelated fields on the shared controller. */
 NTSTATUS SofRestoreBootController(_In_ PSOF_DEVICE_CONTEXT Ctx)
 {
-    if (Ctx->BootDmaStopUnconfirmed) return STATUS_DEVICE_NOT_READY;
+    if (Ctx->BootDmaStopUnconfirmed || SofDmaPublishedSlots(Ctx)) return STATUS_DEVICE_NOT_READY;
     if (!Ctx->BootIntBitsAdded && !Ctx->BootPpBitsAdded) return STATUS_SUCCESS;
     if (Ctx->DspNeedsPowerDown || Ctx->IrqMaskNeeded ||
         !Ctx->Bar0VirtualAddress || SofDeviceRemoved(Ctx))
@@ -1242,55 +1327,88 @@ NTSTATUS SofRestoreBootController(_In_ PSOF_DEVICE_CONTEXT Ctx)
 }
 
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT
+/* Intel HD Audio rev 1.0a, section 3.3: audit all advertised stream
+ * descriptors and the other bus-master engines before taking global DSP
+ * processing ownership. This is a read-only idle snapshot, NOT a fence. */
+static NTSTATUS SofAuditColdBootOwnership(PSOF_DEVICE_CONTEXT Ctx)
+{
+    PUCHAR bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
+    if (!bar0 || !Ctx->Bar4VirtualAddress || SofDeviceRemoved(Ctx) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar0Length, 0, SOF_HDA_ADSP_LOADER_BASE) ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPCS, sizeof(ULONG)))
+        return STATUS_DEVICE_NOT_READY;
+
+    ULONG gctl = readl(bar0 + SOF_HDA_GCTL);
+    ULONG gcap = readw(bar0 + SOF_HDA_GCAP);
+    if (gctl == MAXULONG || gcap == 0xffffu || !(gctl & SOF_HDA_GCTL_RESET))
+        return STATUS_DEVICE_NOT_READY;
+    if (gctl & 2u) return STATUS_DEVICE_BUSY; /* GCTL.FCNTL */
+    ULONG capture = (gcap >> 8) & 15u, playback = (gcap >> 12) & 15u;
+    ULONG bidirectional = (gcap >> 3) & 31u;
+    ULONG count = capture + playback + bidirectional;
+    if (!capture || !playback || capture != Ctx->NumCaptureStreams ||
+        playback != Ctx->NumPlaybackStreams || count > 30u ||
+        !pj_ipc4_mmio_span_valid(Ctx->Bar0Length, SOF_HDA_ADSP_LOADER_BASE,
+            count * SOF_HDA_ADSP_SD_ENTRY_SIZE))
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    for (ULONG slot = 0; slot < count; ++slot) {
+        PUCHAR regs = bar0 + SOF_HDA_ADSP_LOADER_BASE + slot * SOF_HDA_ADSP_SD_ENTRY_SIZE;
+        ULONG ctl = SofCodeLoaderReadControl(regs);
+        ULONG low = readl(regs + SOF_HDA_ADSP_REG_SD_BDLPL);
+        ULONG high = readl(regs + SOF_HDA_ADSP_REG_SD_BDLPU);
+        if (ctl == MAXULONG || low == MAXULONG || high == MAXULONG || SofDeviceRemoved(Ctx))
+            return STATUS_DEVICE_NOT_READY;
+        if ((ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)) || low || high)
+            return STATUS_DEVICE_BUSY;
+    }
+    /* CORB/RIRB control DMA-enable (bit 1); base pairs; DMA position
+     * base/enable. Even a stopped engine with foreign addresses is not
+     * owned by this cold boot. Never clear them to acquire ownership. */
+    UCHAR corb = READ_REGISTER_UCHAR(bar0 + 0x4cu);
+    UCHAR rirb = READ_REGISTER_UCHAR(bar0 + 0x5cu);
+    if (corb == 0xffu || rirb == 0xffu) return STATUS_DEVICE_NOT_READY;
+    if ((corb | rirb) & 2u) return STATUS_DEVICE_BUSY;
+    const ULONG baseOffsets[] = { 0x40u, 0x44u, 0x50u, 0x54u, 0x70u, 0x74u };
+    for (ULONG i = 0; i < RTL_NUMBER_OF(baseOffsets); ++i) {
+        ULONG base = readl(bar0 + baseOffsets[i]);
+        if (base == MAXULONG) return STATUS_DEVICE_NOT_READY;
+        if (base) return STATUS_DEVICE_BUSY;
+    }
+
+    ULONG core = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPCS);
+    if (core == MAXULONG || SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
+    const ULONG powered = HDA_DSP_ADSPCS_SPA_MASK(1) | HDA_DSP_ADSPCS_CPA_MASK(1);
+    const ULONG otherPowered = HDA_DSP_ADSPCS_SPA_MASK(0xfeu) | HDA_DSP_ADSPCS_CPA_MASK(0xfeu);
+    if ((core & otherPowered) || ((core & powered) && !(core & HDA_DSP_ADSPCS_CRST_MASK(1))))
+        return STATUS_DEVICE_BUSY;
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS SofAcquireBootProcessing(PSOF_DEVICE_CONTEXT Ctx)
 {
     PUCHAR bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
     if (Ctx->BootDmaStopUnconfirmed || Ctx->BootIntBitsAdded || Ctx->BootPpBitsAdded ||
-        SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
-    if (!pj_ipc4_mmio_span_valid(Ctx->Bar0Length, SOF_HDA_GCTL, sizeof(ULONG)) ||
-        !pj_ipc4_mmio_span_valid(Ctx->Bar0Length, SOF_HDA_INTCTL, sizeof(ULONG)) ||
-        !Ctx->PpCapOffset || Ctx->PpCapOffset > Ctx->Bar0Length ||
+        !SofDmaPublicationGateOpen(Ctx)) return STATUS_DEVICE_NOT_READY;
+    if (!Ctx->PpCapOffset || Ctx->PpCapOffset > Ctx->Bar0Length ||
         SOF_HDA_REG_PP_PPCTL + sizeof(ULONG) > Ctx->Bar0Length - Ctx->PpCapOffset)
         return STATUS_INVALID_BUFFER_SIZE;
-    ULONG gctl = readl(bar0 + SOF_HDA_GCTL);
-    if (gctl == MAXULONG || !(gctl & SOF_HDA_GCTL_RESET)) {
-        SofLogBreadcrumb("[HDA] Controller unavailable or held in reset before DSP access.\n");
-        return STATUS_DEVICE_NOT_READY;
-    }
-    /* Both descriptors must be available before even the first core reset.
-     * Each setup function checks again immediately before taking its slot. */
-    for (ULONG capture = 0; capture <= 1; ++capture) {
-        ULONG slot;
-        if (!pj_hda_stream_slot(Ctx->NumCaptureStreams, Ctx->NumPlaybackStreams,
-                capture, 0, Ctx->Bar0Length, &slot)) return STATUS_DEVICE_CONFIGURATION_ERROR;
-        PUCHAR regs = bar0 + SOF_HDA_ADSP_LOADER_BASE + slot * SOF_HDA_ADSP_SD_ENTRY_SIZE;
-        ULONG ctl = SofCodeLoaderReadControl(regs);
-        if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
-        if ((ctl & (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)) ||
-            readl(regs + SOF_HDA_ADSP_REG_SD_BDLPL) ||
-            readl(regs + SOF_HDA_ADSP_REG_SD_BDLPU)) {
-            SofLogBreadcrumb("[HDA] Cold boot descriptor already in use.\n");
-            return STATUS_DEVICE_BUSY;
-        }
+    NTSTATUS status = SofAuditColdBootOwnership(Ctx);
+    if (status != STATUS_SUCCESS) {
+        SofLogBreadcrumb("[HDA] Cold boot idle ownership audit failed; no global write.\n");
+        return status;
     }
     PUCHAR reg = bar0 + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL;
     ULONG value = readl(reg);
-    if (value == MAXULONG) return STATUS_DEVICE_NOT_READY;
+    if (value == MAXULONG || !SofDmaPublicationGateOpen(Ctx)) return STATUS_DEVICE_NOT_READY;
+    /* Bits 0..29 decouple individual streams. Do not take over a foreign
+     * processing route, even if its stream base is currently zero. */
+    if (value & SOF_DMA_SLOT_MASK) return STATUS_DEVICE_BUSY;
     if (!(value & SOF_HDA_PPCTL_GPROCEN)) {
         Ctx->BootPpBitsAdded = SOF_HDA_PPCTL_GPROCEN;
         writel(value | SOF_HDA_PPCTL_GPROCEN, reg);
         value = readl(reg);
         if (value == MAXULONG || !(value & SOF_HDA_PPCTL_GPROCEN))
             return STATUS_DEVICE_NOT_READY;
-    }
-    if (!pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPCS, sizeof(ULONG)) ||
-        SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
-    ULONG core = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPCS);
-    const ULONG powered = HDA_DSP_ADSPCS_SPA_MASK(1) | HDA_DSP_ADSPCS_CPA_MASK(1);
-    if (core == MAXULONG) return STATUS_DEVICE_NOT_READY;
-    if ((core & powered) && !(core & HDA_DSP_ADSPCS_CRST_MASK(1))) {
-        SofLogBreadcrumb("[DSP] Powered core 0 outside reset. Cold boot ownership unavailable.\n");
-        return STATUS_DEVICE_BUSY;
     }
     return STATUS_SUCCESS;
 }
@@ -1394,6 +1512,7 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     NTSTATUS status;
     PUCHAR bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;
 
+    if (!SofDmaPublicationGateOpen(Ctx)) return STATUS_DEVICE_NOT_READY;
     if (!bar0 || Ctx->Bar0Length <= SOF_ADLN_LTRP_OFFSET ||
         !pj_hda_stream_slot(Ctx->NumCaptureStreams, Ctx->NumPlaybackStreams, 1u, 0u,
                             Ctx->Bar0Length, &slot) ||
@@ -1438,10 +1557,12 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     KeMemoryBarrier();
     Dma->OriginalGuardband = ltrp & SOF_ADLN_LTRP_GUARDBAND_MASK;
     Dma->OriginalDecoupled = (ppctl & 1u) != 0;
+    if (!SofClaimDmaPublication(Ctx, slot)) return STATUS_DEVICE_NOT_READY;
     Dma->Published = TRUE;
     Dma->Data.Published = TRUE;
     Dma->Bdl.Published = TRUE;
     Dma->RestorePending = TRUE;
+    if (!SofDmaPublicationGateOpen(Ctx)) return STATUS_DEVICE_NOT_READY;
     writel(Dma->Bdl.PhysicalAddress.LowPart, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPL);
     writel((ULONG)Dma->Bdl.PhysicalAddress.HighPart, Dma->Registers + SOF_HDA_ADSP_REG_SD_BDLPU);
     writel(PAGE_SIZE, Dma->Registers + SOF_HDA_ADSP_REG_SD_CBL);
@@ -1459,6 +1580,7 @@ static NTSTATUS SofStartIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     status = SofLoaderDmaAddressesMatch(Dma->Registers,
         Dma->Bdl.PhysicalAddress.LowPart, (ULONG)Dma->Bdl.PhysicalAddress.HighPart);
     if (!NT_SUCCESS(status)) return status;
+    if (!SofDmaPublicationGateOpen(Ctx)) return STATUS_DEVICE_NOT_READY;
     SofCodeLoaderWriteControl(Dma->Registers, SOF_HDA_SD_CTL_DMA_START);
     for (ULONG i = 0; i < 500u; ++i) {
         ctl = SofCodeLoaderReadControl(Dma->Registers);
@@ -1474,10 +1596,10 @@ static NTSTATUS SofStopIccmaxDma(PSOF_DEVICE_CONTEXT Ctx, SOF_ICCMAX_DMA *Dma)
     NTSTATUS status = STATUS_SUCCESS;
     if (Dma->Published) {
         UCHAR dmaStatus;
-        if (SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
+        if (!SofDmaDetachLeaseOwned(Ctx, 0)) return STATUS_DEVICE_NOT_READY;
         status = SofStopAndDetachBootStream(Ctx, Dma->Registers, &Dma->Bdl, &dmaStatus);
         if (!NT_SUCCESS(status)) return status;
-        if (SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
+        if (!SofConfirmDmaDetached(Ctx, 0)) return STATUS_DEVICE_NOT_READY;
         Dma->Data.Published = FALSE;
         Dma->Bdl.Published = FALSE;
         Dma->Published = FALSE;
@@ -1570,7 +1692,7 @@ VOID SofRetryRetainedDma(PSOF_DEVICE_CONTEXT Ctx)
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT
     for (ULONG slot = 0; slot < RTL_NUMBER_OF(Ctx->RetainedDma); ++slot) {
         PSOF_DMA_BUFFER bdl = &Ctx->RetainedDma[slot].Bdl;
-        if (!bdl->VirtualAddress) continue;
+        if (!bdl->VirtualAddress || !SofDmaDetachLeaseOwned(Ctx, slot)) continue;
         ULONG offset = SOF_HDA_ADSP_LOADER_BASE + slot * SOF_HDA_ADSP_SD_ENTRY_SIZE;
         if (SofDeviceRemoved(Ctx) || !Ctx->Bar0VirtualAddress ||
             !pj_ipc4_mmio_span_valid(Ctx->Bar0Length, offset, SOF_HDA_ADSP_SD_ENTRY_SIZE))
@@ -1586,6 +1708,7 @@ VOID SofRetryRetainedDma(PSOF_DEVICE_CONTEXT Ctx)
         UCHAR dmaStatus;
         if (!NT_SUCCESS(SofStopAndDetachBootStream(Ctx, regs, bdl, &dmaStatus)) || SofDeviceRemoved(Ctx))
             continue;
+        if (!SofConfirmDmaDetached(Ctx, slot)) continue;
         bdl->Published = FALSE;
         Ctx->RetainedDma[slot].Data.Published = FALSE;
         SofFreeDmaBuffer(Ctx, bdl);
@@ -1595,6 +1718,18 @@ VOID SofRetryRetainedDma(PSOF_DEVICE_CONTEXT Ctx)
     UNREFERENCED_PARAMETER(Ctx);
 #endif
 }
+
+#if defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) && !defined(PUJJO_DSP_BOOT_DIAGNOSTIC) && \
+    (!defined(PUJJO_DMIC_ENUMERATION_CANDIDATE) || defined(PUJJO_DMIC_ROM_BOOT_CANDIDATE))
+/* No registry setting, bus-master bit or advertised domain type can establish
+ * a platform's post-removal IOVA lifetime and in-flight drain. Only a future
+ * independently reviewed implementation may change this hard gate. */
+static BOOLEAN SofPlatformDmaQualified(PSOF_DEVICE_CONTEXT Ctx)
+{
+    UNREFERENCED_PARAMETER(Ctx);
+    return FALSE;
+}
+#endif
 
 /**
  * @brief Complete DSP firmware load, hardware initialization, and execution orchestrator.
@@ -1631,7 +1766,7 @@ SofStartFirmwareBoot(
     UNREFERENCED_PARAMETER(OptionalFwPath);
     return STATUS_NOT_SUPPORTED;
 #else
-#ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE
+#if defined(PUJJO_DMIC_ENUMERATION_CANDIDATE) && !defined(PUJJO_DMIC_ROM_BOOT_CANDIDATE)
     /* v0.0.10.0 source-only candidate: independent backing is integrated,
      * but active DMA and PnP/adapter lifetime are not qualified. */
     UNREFERENCED_PARAMETER(Ctx);
@@ -1754,12 +1889,27 @@ SofStartFirmwareBoot(
             Ctx->GainModule = Ctx->GainProfile.module;
     }
 
+    /* v11: no currently established Pujjo platform removal/drain contract.
+     * The independent hard gate sits before DMA mapping or hardware writes.
+     * A clean registry journal is necessary but never sufficient. */
+    if (!SofPlatformDmaQualified(Ctx)) {
+        SofFreeFirmwareBuffer(rawFw);
+        SofLogBreadcrumb("[Safety] Platform DMA isolation/drain not qualified; ROM boot blocked.\n");
+        return STATUS_NOT_SUPPORTED;
+    }
+    status = SofBeginDmaJournal(Ctx);
+    if (!NT_SUCCESS(status)) {
+        SofFreeFirmwareBuffer(rawFw);
+        return status;
+    }
+
     /* Allocate Contiguous DMA Buffer for Firmware Payload */
     status = SofAllocateOwnedDmaBuffer(Ctx, fwInfo.PayloadSize, WdfDmaDirectionWriteToDevice, &fwDma);
     if (!NT_SUCCESS(status)) {
         char err[128];
         RtlStringCbPrintfA(err, sizeof(err), "[12-ERR] Failed to allocate FW DMA buffer: 0x%08x\n", status);
         SofLogBreadcrumb(err);
+        SofCloseDmaPublicationGate(Ctx);
         SofFreeFirmwareBuffer(rawFw);
         return status;
     }
@@ -1771,6 +1921,7 @@ SofStartFirmwareBoot(
         RtlStringCbPrintfA(err, sizeof(err), "[12-ERR] Failed to allocate BDL DMA buffer: 0x%08x\n", status);
         SofLogBreadcrumb(err);
         SofFreeDmaBuffer(Ctx, &fwDma);
+        SofCloseDmaPublicationGate(Ctx);
         SofFreeFirmwareBuffer(rawFw);
         return status;
     }
@@ -2059,6 +2210,10 @@ SofStartFirmwareBoot(
             status = STATUS_DEVICE_NOT_READY;
             goto stop_dma;
         }
+        if (!SofDmaPublicationGateOpen(Ctx)) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto boot_failed;
+        }
         ctlVal |= SOF_HDA_SD_CTL_DMA_START;
         SofCodeLoaderWriteControl(streamRegs, ctlVal);
 
@@ -2151,10 +2306,14 @@ stop_dma:
     /* 7. Stop Code Loader DMA and disable SPIB */
     {
         UCHAR dmaStatus;
-        NTSTATUS stopStatus = SofDeviceRemoved(Ctx) ? STATUS_DEVICE_NOT_READY :
+        NTSTATUS stopStatus = !SofDmaDetachLeaseOwned(Ctx, streamIndex) ? STATUS_DEVICE_NOT_READY :
             SofStopAndDetachBootStream(Ctx, streamRegs, &bdlDma, &dmaStatus);
         if (!NT_SUCCESS(stopStatus) || SofDeviceRemoved(Ctx)) {
             status = NT_SUCCESS(stopStatus) ? STATUS_DEVICE_NOT_READY : stopStatus;
+            goto dma_unconfirmed;
+        }
+        if (!SofConfirmDmaDetached(Ctx, streamIndex)) {
+            status = STATUS_DEVICE_NOT_READY;
             goto dma_unconfirmed;
         }
         fwDma.Published = FALSE;
@@ -2308,6 +2467,7 @@ boot_failed:
     SofFreeDmaBuffer(Ctx, &bdlDma);
     SofFreeDmaBuffer(Ctx, &fwDma);
 dma_unconfirmed:
+    SofCloseDmaPublicationGate(Ctx);
     /* Do not free owned backing on unconfirmed stop. The HAL mapping and
      * adapter lifetime during PnP loss still need qualification. */
     KeAcquireSpinLock(&Ctx->IpcLock, &oldIrql);
