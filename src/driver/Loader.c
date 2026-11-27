@@ -1666,6 +1666,13 @@ static NTSTATUS SofQueryBootedFirmwareVersion(PSOF_DEVICE_CONTEXT Ctx,
         return STATUS_REVISION_MISMATCH;
     return STATUS_SUCCESS;
 }
+/* Relative thread delays may be rounded up to a system clock tick. Bound
+ * ROM polling by elapsed 100 ns interrupt time as well as sample count. */
+static BOOLEAN SofRomPollExpired(ULONGLONG Start, ULONG BudgetMs)
+{
+    return KeQueryInterruptTime() - Start >= (ULONGLONG)BudgetMs * 10000u;
+}
+
 /* The ROM status sampled while DMA was running is not enough: stop and
  * descriptor teardown can race a DSP halt or a disappearing MMIO window.
  * This pure admission check is exercised with host-side register samples.
@@ -1814,6 +1821,7 @@ SofStartFirmwareBoot(
     ULONG ipcHdr;
     ULONG statusReg = 0;
     ULONG timeout;
+    ULONGLONG pollStart;
     char bmsg[128];
     NTSTATUS status;
     KIRQL oldIrql;
@@ -2115,7 +2123,8 @@ SofStartFirmwareBoot(
     }
 
     /* Wait for ROM IPC ACK in HIPCIDA */
-    for (timeout = 0; timeout < 2000u; ++timeout) {
+    pollStart = KeQueryInterruptTime();
+    for (timeout = 0; timeout < 2000u && !SofRomPollExpired(pollStart, 2000u); ++timeout) {
         ULONG ack = SofDspRead32(bar4, Ctx->HwDesc->HipcIda);
         if (ack == 0xFFFFFFFFu) {
             status = STATUS_DEVICE_NOT_READY;
@@ -2125,7 +2134,7 @@ SofStartFirmwareBoot(
             break;
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
     }
-    if (timeout == 2000u) {
+    if (timeout == 2000u || SofRomPollExpired(pollStart, 2000u)) {
         /* Until the new ROM acknowledges PURGE its SRAM can still contain
          * the previous boot's state. Sample it at the timeout boundary. */
         statusReg = SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg);
@@ -2149,7 +2158,8 @@ SofStartFirmwareBoot(
     SofLogBreadcrumb(bmsg);
 
     /* Wait for ROM status FSR_STATE_INIT_DONE (0x1) before triggering DMA */
-    for (timeout = 0; timeout < 1000u; ++timeout) {
+    pollStart = KeQueryInterruptTime();
+    for (timeout = 0; timeout < 1000u && !SofRomPollExpired(pollStart, 1000u); ++timeout) {
         statusReg = SofDspRead32(bar4, Ctx->HwDesc->RomStatusReg);
         if (statusReg == 0xFFFFFFFFu) {
             status = STATUS_DEVICE_NOT_READY;
@@ -2170,7 +2180,7 @@ SofStartFirmwareBoot(
             break;
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
     }
-    if (timeout == 1000u) {
+    if (timeout == 1000u || SofRomPollExpired(pollStart, 1000u)) {
         RtlStringCbPrintfA(bmsg, sizeof(bmsg),
             "[12-ROM] INIT_DONE timeout: FSR=0x%08x ROM_ERR=0x%08x\n",
             statusReg, SofDspRead32(bar4, Ctx->HwDesc->RomErrorReg));
@@ -2277,7 +2287,8 @@ SofStartFirmwareBoot(
      * Polls ROM Status register (HFDSC) for up to 4 seconds.
      */
     timeout = 4000; /* 4 seconds */
-    while (timeout--) {
+    pollStart = KeQueryInterruptTime();
+    while (timeout-- && !SofRomPollExpired(pollStart, 4000u)) {
         UCHAR dmaStatus = READ_REGISTER_UCHAR(streamRegs + SOF_HDA_ADSP_REG_SD_STS);
         if (dmaStatus == 0xffu || (dmaStatus & SOF_HDA_SD_STS_DMA_ERRORS)) {
             status = dmaStatus == 0xffu ? STATUS_DEVICE_NOT_READY : STATUS_IO_DEVICE_ERROR;
@@ -2322,8 +2333,11 @@ SofStartFirmwareBoot(
         }
         KeDelayExecutionThread(KernelMode, FALSE, &(LARGE_INTEGER){.QuadPart = -10000LL}); /* 1ms */
     }
-    if (FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED)
+    if (FSR_TO_STATE_CODE(statusReg) != FSR_STATE_FW_ENTERED || SofRomPollExpired(pollStart, 4000u)) {
+        RtlStringCbPrintfA(bmsg, sizeof(bmsg), "[12-ROM] FW_ENTERED timeout: FSR=0x%08x\n", statusReg);
+        SofLogBreadcrumb(bmsg);
         status = STATUS_IO_TIMEOUT;
+    }
 
 stop_dma:
     /* 7. Stop Code Loader DMA and disable SPIB */

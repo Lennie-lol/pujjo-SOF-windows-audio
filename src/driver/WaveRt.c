@@ -90,6 +90,7 @@ static BOOLEAN SofWaveRtCopyVoicePeriod(PSOF_WAVERT_STREAM Stream)
     ULONG voiceOffset = (ULONG)InterlockedCompareExchange(&Stream->VoicePosition, 0, 0);
     ULONG offset;
     if (!period || period != Stream->BufferSizeBytes / 2u ||
+        Stream->VoiceBufferBytes != Stream->BufferSizeBytes / 8u ||
         (Stream->BufferSizeBytes & 31u) || (period & 15u) ||
         (voiceOffset != 0 && voiceOffset != period / 8u) ||
         !Stream->VoiceBuffer || !Stream->VoiceScratch || !Stream->KernelBuffer ||
@@ -913,7 +914,7 @@ NTSTATUS SofWaveRtSetState(
 #endif
 #ifdef _KERNEL_MODE
         if (Stream->VoiceBuffer)
-            RtlZeroMemory(Stream->VoiceBuffer, Stream->BufferSizeBytes / 8u);
+            RtlZeroMemory(Stream->VoiceBuffer, Stream->VoiceBufferBytes);
         InterlockedExchange(&Stream->VoicePosition, 0);
         Stream->VoicePacketCount = 0;
         Stream->VoiceReadCount = 0;

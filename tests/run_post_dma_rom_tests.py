@@ -15,10 +15,17 @@ loader = (root / "src/driver/Loader.c").read_text(encoding="utf-8")
 marker = "static NTSTATUS SofCheckPostDmaRomState("
 body = marker + loader.split(marker, 1)[1].split("\n}", 1)[0] + "\n}\n"
 
+marker = "static BOOLEAN SofRomPollExpired("
+poll = marker + loader.split(marker, 1)[1].split("\n}", 1)[0] + "\n}\n"
+
 shim = r"""
 #include <assert.h>
 #include <stdint.h>
 typedef uint32_t ULONG;
+typedef uint64_t ULONGLONG;
+typedef int BOOLEAN;
+static ULONGLONG clock_sample;
+#define KeQueryInterruptTime() clock_sample
 typedef int32_t NTSTATUS;
 typedef int SOF_FW_BOOT_STATE;
 #define MAXULONG UINT32_MAX
@@ -38,6 +45,13 @@ typedef int SOF_FW_BOOT_STATE;
 """
 cases = r"""
 int main(void) {
+    for (ULONG ms=1000;ms<=4000;ms*=2) {
+        ULONGLONG start=UINT64_MAX-5000;
+        clock_sample=start+ms*10000u-1;
+        assert(!SofRomPollExpired(start,ms));
+        ++clock_sample;
+        assert(SofRomPollExpired(start,ms));
+    }
     /* No fault; module bits in FSR may be populated. */
     assert(SofCheckPostDmaRomState(0x00000005u, SOF_FW_BOOT_IN_PROGRESS) == STATUS_SUCCESS);
     assert(SofCheckPostDmaRomState(0x20000005u, SOF_FW_BOOT_READY_RECEIVED) == STATUS_SUCCESS);
@@ -59,7 +73,7 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix="pujjo_post_dma_rom_") as d:
     source = Path(d) / "check.c"
     exe = Path(d) / ("check.exe" if os.name == "nt" else "check")
-    source.write_text(shim + body + cases, encoding="utf-8")
+    source.write_text(shim + poll + body + cases, encoding="utf-8")
     compiler = os.environ.get("CC", "cc")
     subprocess.run([compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
                     *shlex.split(os.environ.get("CFLAGS", "")),

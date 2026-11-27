@@ -129,6 +129,12 @@ static NTSTATUS AudioAttachVoice(PVOID Context, ULONG RequestedBytes, PVOID Voic
     status = SofWaveRtCreateStream(ctx, SOF_ENDPOINT_DMIC_PDM, TRUE, 0, &format, size,
                                    periodMs, &stream);
     if (!NT_SUCCESS(status)) goto Done;
+    if (stream->BufferSizeBytes != size || stream->PeriodSizeBytes != size / 2u ||
+        stream->PeriodMs != periodMs || stream->BdlPeriodCount != 2u) {
+        if (!NT_SUCCESS(SofWaveRtFreeStream(stream))) ctx->AudioDmaFaulted = TRUE;
+        status = STATUS_INVALID_BUFFER_SIZE;
+        goto Done;
+    }
     LARGE_INTEGER frequency;
     KeQueryPerformanceCounter(&frequency);
     stream->CounterFrequency = (ULONGLONG)frequency.QuadPart;
@@ -139,6 +145,7 @@ static NTSTATUS AudioAttachVoice(PVOID Context, ULONG RequestedBytes, PVOID Voic
         status = STATUS_INSUFFICIENT_RESOURCES;
         goto Done;
     }
+    stream->VoiceBufferBytes = ActualBytes;
     stream->VoiceBuffer = (SHORT *)VoiceAddress;
     RtlZeroMemory(VoiceAddress, ActualBytes);
     ctx->DmicStream = stream;

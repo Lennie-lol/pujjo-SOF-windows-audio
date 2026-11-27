@@ -37,6 +37,7 @@ typedef struct {
  SHORT *VoiceBuffer,*VoiceScratch;
  ULONGLONG VoiceLastCompletion, VoicePacketCount, VoiceTimestamp[2], CounterFrequency;
  int NotificationLock;
+ ULONG VoiceBufferBytes;
 } Stream,*PSOF_WAVERT_STREAM;
 static ULONG first,last,reads;
 static ULONGLONG now,delay;
@@ -54,7 +55,7 @@ int main(void) {
                  INT32_MIN,INT32_MIN,INT32_MIN,INT32_MIN,
                  65536,131072,196608,262144,0,0,0,0};
  SHORT pcm[4]={0},scratch[2]={0};
- Stream s={32,64,20,0,slots,pcm,scratch,0,0,{0},48000,0};
+ Stream s={32,64,20,0,slots,pcm,scratch,0,0,{0},48000,0,8};
  now=100; first=32; last=48; delay=1;
  assert(SofWaveRtCopyVoicePeriod(&s) && s.VoicePosition==4);
  assert(s.VoicePacketCount==1 && s.VoiceTimestamp[0]==98);
@@ -71,6 +72,10 @@ int main(void) {
  now=1020;delay=1;reads=0;first=0;last=4;
  assert(SofWaveRtCopyVoicePeriod(&s) && !s.VoicePosition && pcm[2]==2 && pcm[3]==0);
  assert(s.VoicePacketCount==2 && s.VoiceTimestamp[1]==1018);
+ /* Internally consistent DMA sizes must still fit the attached CPU lease. */
+ s.PeriodSizeBytes=64;s.BufferSizeBytes=128;reads=0;
+ assert(!SofWaveRtCopyVoicePeriod(&s) && !reads && s.VoicePacketCount==2);
+ s.PeriodSizeBytes=32;s.BufferSizeBytes=64;
  /* Corrupted geometry and missing private scratch cannot publish. */
  s.VoicePosition=2;assert(!SofWaveRtCopyVoicePeriod(&s));
  s.VoicePosition=0;s.VoiceScratch=0;assert(!SofWaveRtCopyVoicePeriod(&s));

@@ -146,6 +146,7 @@ typedef struct _SOF_WAVERT_STREAM {
     /** @brief Memory Descriptor List (MDL) for user-mode mapping into audiosrv. */
     PMDL                Mdl;
     SHORT              *VoiceBuffer; /* Borrowed PortCls CPU-only mapping. */
+    ULONG               VoiceBufferBytes; /* Exact negotiated CPU ring extent. */
     SHORT              *VoiceScratch; /* Private conversion workspace. */
     volatile LONG       VoicePosition;
     volatile LONG       VoiceCopyBusy;

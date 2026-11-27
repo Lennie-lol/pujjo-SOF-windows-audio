@@ -85,7 +85,7 @@ assert "All on-demand pipelines verified" not in d0
 print("PASS: cold boot ownership and no speculative audio activation on D0 entry")
 
 ack=boot[boot.index("/* Wait for ROM IPC ACK"):boot.index("/* Acknowledge ROM")]
-assert "ack == 0xFFFFFFFFu" in ack and "if (timeout == 2000u)" in ack
+assert "ack == 0xFFFFFFFFu" in ack and "if (timeout == 2000u || SofRomPollExpired(pollStart, 2000u))" in ack
 stop=boot[boot.index("stop_dma:"):boot.index("/* Re-read the ROM state AFTER")]
 detach = loader.split("static NTSTATUS SofStopAndDetachBootStream(", 1)[1].split("\n}", 1)[0]
 assert detach.index("!(ctl & SOF_HDA_SD_CTL_DMA_START)") < detach.index("if (attempt == 500u)") < detach.index("writel(0, Registers + SOF_HDA_ADSP_REG_SD_BDLPL)")
