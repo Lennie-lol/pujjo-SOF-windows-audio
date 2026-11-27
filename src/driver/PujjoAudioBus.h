@@ -10,6 +10,7 @@
 #define PUJJO_AUDIO_CHILD_ID L"PUJJO\\AudioDmic"
 #define PUJJO_DMIC_DETECTION_ID L"PUJJO\\AudioDmicDetectionTest"
 #define PUJJO_AUDIO_INTERFACE_VERSION 3
+#define PUJJO_AUDIO_PACKET_VERSION 4
 #if defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG) && !defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO)
 #error The analog path requires the experimental audio guard
 #endif
@@ -55,7 +56,10 @@ typedef struct _PUJJO_AUDIO_BUS {
     NTSTATUS (*Position)(PVOID Context, PVOID Stream, PULONG Position);
     NTSTATUS (*Notification)(PVOID Stream, PKEVENT Event, BOOLEAN Add);
     NTSTATUS (*JackPresent)(PVOID Context, PBOOLEAN Present);
+    NTSTATUS (*ReadPacket)(PVOID Context, PVOID Stream, PULONG Number, PULONGLONG Counter, PBOOLEAN More);
 } PUJJO_AUDIO_BUS;
+
+#define PUJJO_AUDIO_V3_SIZE ((USHORT)FIELD_OFFSET(PUJJO_AUDIO_BUS, ReadPacket))
 
 #ifdef __cplusplus
 extern "C" {

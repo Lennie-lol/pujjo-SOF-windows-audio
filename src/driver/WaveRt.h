@@ -145,6 +145,14 @@ typedef struct _SOF_WAVERT_STREAM {
 #ifdef _KERNEL_MODE
     /** @brief Memory Descriptor List (MDL) for user-mode mapping into audiosrv. */
     PMDL                Mdl;
+    SHORT              *VoiceBuffer;
+    volatile LONG       VoicePosition;
+    volatile LONG       VoiceCopyBusy;
+    ULONGLONG           VoiceLastCompletion;
+    ULONGLONG           VoicePacketCount;
+    ULONGLONG           VoiceReadCount;
+    ULONGLONG           VoiceTimestamp[2];
+    ULONGLONG           CounterFrequency;
     BOOLEAN             BuffersLeased;
     BOOLEAN             Detached;
     SOF_DMA_BUFFER      RingAllocation;

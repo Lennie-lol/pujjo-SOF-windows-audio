@@ -43,12 +43,14 @@ static BOOLEAN IsPcm(const KSDATAFORMAT *Format)
 /* Raw microphone slots have no proven speaker-position mapping. */
 static ULONG PcmChannelMask(const PUJJO_AUDIO_FORMAT &Format)
 {
+    if (Format.Channels == 1u) return KSAUDIO_SPEAKER_MONO;
     return Format.Channels == 4u ? 0u : KSAUDIO_SPEAKER_STEREO;
 }
 
 static NTSTATUS ValidateFormat(PKSDATAFORMAT Data, const PUJJO_AUDIO_FORMAT &Expected)
 {
-    if ((Expected.Channels != 2u && Expected.Channels != 4u) ||
+    if ((Expected.Channels != 1u && Expected.Channels != 2u && Expected.Channels != 4u) ||
+        (Expected.Channels == 1u && (Expected.ContainerBits != 16u || Expected.ValidBits != 16u)) ||
         (Expected.Channels == 4u && (Expected.ContainerBits != 32u || Expected.ValidBits != 32u)) ||
         !Data || Data->FormatSize < sizeof(KSDATAFORMAT_WAVEFORMATEX) || !IsPcm(Data))
         return STATUS_NO_MATCH;
@@ -59,7 +61,7 @@ static NTSTATUS ValidateFormat(PKSDATAFORMAT Data, const PUJJO_AUDIO_FORMAT &Exp
         format.nAvgBytesPerSec != Expected.Rate * block)
         return STATUS_NO_MATCH;
     if (format.wFormatTag == WAVE_FORMAT_PCM)
-        return Expected.Channels == 2u && !format.cbSize && Expected.ContainerBits == Expected.ValidBits ?
+        return Expected.Channels <= 2u && !format.cbSize && Expected.ContainerBits == Expected.ValidBits ?
                STATUS_SUCCESS : STATUS_NO_MATCH;
     if (format.wFormatTag != WAVE_FORMAT_EXTENSIBLE || format.cbSize != 22 ||
         Data->FormatSize < sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE))
@@ -71,7 +73,7 @@ static NTSTATUS ValidateFormat(PKSDATAFORMAT Data, const PUJJO_AUDIO_FORMAT &Exp
            STATUS_SUCCESS : STATUS_NO_MATCH;
 }
 
-class DmicStream final : public IMiniportWaveRTStreamNotification {
+class DmicStream final : public IMiniportWaveRTStreamNotification, public IMiniportWaveRTInputStream {
     LONG m_references = 1;
     PUJJO_AUDIO_BUS m_bus;
     PUJJO_AUDIO_FORMAT m_format;
@@ -102,6 +104,11 @@ public:
     {
         if (!Out) return STATUS_INVALID_PARAMETER;
         *Out = nullptr;
+        if (IsEqualGUID(Id, IID_IMiniportWaveRTInputStream) && m_bus.ReadPacket) {
+            *Out = static_cast<IMiniportWaveRTInputStream *>(this);
+            AddRef();
+            return STATUS_SUCCESS;
+        }
         if (!IsEqualGUID(Id, IID_IUnknown) && !IsEqualGUID(Id, IID_IMiniportWaveRTStream) &&
             !IsEqualGUID(Id, IID_IMiniportWaveRTStreamNotification))
             return STATUS_NOINTERFACE;
@@ -130,6 +137,20 @@ public:
                           STATUS_SUCCESS : STATUS_DEVICE_NOT_READY;
         if (m_buffer.Stream) status = m_bus.SetState(m_bus.Header.Context, m_buffer.Stream, State);
         Unlock();
+        return status;
+    }
+
+    STDMETHODIMP GetReadPacket(ULONG *Number, DWORD *Flags, ULONG64 *Counter, BOOL *More) override
+    {
+        if (!Number || !Flags || !Counter || !More) return STATUS_INVALID_PARAMETER;
+        BOOLEAN more = FALSE;
+        Lock();
+        NTSTATUS status = m_buffer.Stream && m_bus.ReadPacket ?
+            m_bus.ReadPacket(m_bus.Header.Context, m_buffer.Stream, Number, Counter, &more) :
+            STATUS_DEVICE_NOT_READY;
+        Unlock();
+        *Flags = 0;
+        *More = more;
         return status;
     }
 
@@ -230,6 +251,11 @@ static const KSDATARANGE_AUDIO CaptureRange = {
      STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM), STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)},
     2, 16, 32, 48000, 48000
 };
+static const KSDATARANGE_AUDIO DmicVoiceRange = {
+    {sizeof(KSDATARANGE_AUDIO), 0, 0, 0, STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
+     STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM), STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)},
+    1, 16, 16, 48000, 48000
+};
 static const KSDATARANGE_AUDIO DmicFourRange = {
     {sizeof(KSDATARANGE_AUDIO), 0, 0, 0, STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
      STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM), STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)},
@@ -240,6 +266,7 @@ static const KSDATARANGE BridgeRange = {
     STATICGUIDOF(KSDATAFORMAT_SUBTYPE_ANALOG), STATICGUIDOF(KSDATAFORMAT_SPECIFIER_NONE)
 };
 static PKSDATARANGE CaptureRanges[] = {(PKSDATARANGE)&CaptureRange};
+static PKSDATARANGE DmicVoiceRanges[] = {(PKSDATARANGE)&DmicVoiceRange};
 static PKSDATARANGE DmicFourRanges[] = {(PKSDATARANGE)&DmicFourRange};
 static PKSDATARANGE BridgeRanges[] = {(PKSDATARANGE)&BridgeRange};
 
@@ -247,6 +274,12 @@ static const PCPIN_DESCRIPTOR WavePins[] = {
     {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
         KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_NONE, &KSCATEGORY_AUDIO, nullptr, 0}},
     {1, 1, 0, nullptr, {0, nullptr, 0, nullptr, 1, CaptureRanges,
+        KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_SINK, &KSCATEGORY_AUDIO, nullptr, 0}}
+};
+static const PCPIN_DESCRIPTOR DmicVoicePins[] = {
+    {0, 0, 0, nullptr, {0, nullptr, 0, nullptr, 1, BridgeRanges,
+        KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_NONE, &KSCATEGORY_AUDIO, nullptr, 0}},
+    {1, 1, 0, nullptr, {0, nullptr, 0, nullptr, 1, DmicVoiceRanges,
         KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_SINK, &KSCATEGORY_AUDIO, nullptr, 0}}
 };
 static const PCPIN_DESCRIPTOR DmicFourPins[] = {
@@ -275,6 +308,11 @@ static const GUID WaveCategories[] = {
 static const GUID TopologyCategories[] = {STATICGUIDOF(KSCATEGORY_AUDIO)};
 static const PCFILTER_DESCRIPTOR WaveFilter = {
     0, nullptr, sizeof(PCPIN_DESCRIPTOR), RTL_NUMBER_OF(WavePins), WavePins,
+    0, 0, nullptr, RTL_NUMBER_OF(PinConnections), PinConnections,
+    RTL_NUMBER_OF(WaveCategories), WaveCategories
+};
+static const PCFILTER_DESCRIPTOR DmicVoiceFilter = {
+    0, nullptr, sizeof(PCPIN_DESCRIPTOR), RTL_NUMBER_OF(DmicVoicePins), DmicVoicePins,
     0, 0, nullptr, RTL_NUMBER_OF(PinConnections), PinConnections,
     RTL_NUMBER_OF(WaveCategories), WaveCategories
 };
@@ -386,7 +424,7 @@ public:
     {
         if (!Out) return STATUS_INVALID_PARAMETER;
         *Out = (PPCFILTER_DESCRIPTOR)(m_format.Role == PujjoAudioDmic && m_format.Channels == 4u ?
-            &DmicFourFilter : IsCaptureRole(m_format.Role) ? &WaveFilter : &RenderFilter);
+            &DmicFourFilter : m_format.Role == PujjoAudioDmic ? &DmicVoiceFilter : IsCaptureRole(m_format.Role) ? &WaveFilter : &RenderFilter);
         return STATUS_SUCCESS;
     }
     STDMETHODIMP Init(PUNKNOWN, PRESOURCELIST, PPORTWAVERT Port) override
@@ -596,7 +634,7 @@ static NTSTATUS CompleteQuery(PDEVICE_OBJECT, PIRP, PVOID Context)
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
-static NTSTATUS QueryAudioBus(PDEVICE_OBJECT Device, PUJJO_AUDIO_BUS *Bus)
+static NTSTATUS QueryAudioBus(PDEVICE_OBJECT Device, PUJJO_AUDIO_BUS *Bus, USHORT Version)
 {
     PDEVICE_OBJECT lower = IoGetLowerDeviceObject(Device);
     if (!lower) return STATUS_NO_SUCH_DEVICE;
@@ -616,8 +654,9 @@ static NTSTATUS QueryAudioBus(PDEVICE_OBJECT Device, PUJJO_AUDIO_BUS *Bus)
 #else
     stack->Parameters.QueryInterface.InterfaceType = &GUID_PUJJO_AUDIO_BUS;
 #endif
-    stack->Parameters.QueryInterface.Size = static_cast<USHORT>(sizeof(*Bus));
-    stack->Parameters.QueryInterface.Version = PUJJO_AUDIO_INTERFACE_VERSION;
+    stack->Parameters.QueryInterface.Size = Version == PUJJO_AUDIO_PACKET_VERSION ?
+        static_cast<USHORT>(sizeof(*Bus)) : PUJJO_AUDIO_V3_SIZE;
+    stack->Parameters.QueryInterface.Version = Version;
     stack->Parameters.QueryInterface.Interface = &Bus->Header;
     irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
     IoSetCompletionRoutine(irp, CompleteQuery, &done, TRUE, TRUE, TRUE);
@@ -661,9 +700,19 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT Device, PIRP Irp, PRESOURCELIST Resou
 {
     PUJJO_AUDIO_BUS bus = {};
     PUJJO_AUDIO_FORMAT format = {};
-    NTSTATUS status = QueryAudioBus(Device, &bus);
+    USHORT version = PUJJO_AUDIO_INTERFACE_VERSION;
+#ifndef PUJJO_DMIC_DETECTION_TEST_ADAPTER
+    version = PUJJO_AUDIO_PACKET_VERSION;
+#endif
+    NTSTATUS status = QueryAudioBus(Device, &bus, version);
+    if (version == PUJJO_AUDIO_PACKET_VERSION && status == STATUS_NOT_SUPPORTED) {
+        version = PUJJO_AUDIO_INTERFACE_VERSION;
+        bus = {};
+        status = QueryAudioBus(Device, &bus, version);
+    }
     if (!NT_SUCCESS(status)) return status;
-    if (bus.Header.Size != sizeof(bus) || bus.Header.Version != PUJJO_AUDIO_INTERFACE_VERSION ||
+    if (bus.Header.Size != (version == PUJJO_AUDIO_PACKET_VERSION ? sizeof(bus) : PUJJO_AUDIO_V3_SIZE) ||
+        bus.Header.Version != version || (version == PUJJO_AUDIO_PACKET_VERSION && !bus.ReadPacket) ||
         !bus.Header.Context || !bus.Header.InterfaceReference || !bus.Header.InterfaceDereference ||
         !bus.GetFormat || !bus.Allocate || !bus.Free || !bus.SetState || !bus.Position ||
         !bus.Notification) {

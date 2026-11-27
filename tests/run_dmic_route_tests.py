@@ -18,6 +18,8 @@ prefix = r'''
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+typedef unsigned long long ULONGLONG, *PULONGLONG;
+typedef int *PBOOLEAN;
 typedef unsigned ULONG, *PULONG;
 typedef int KIRQL;
 typedef int NTSTATUS, BOOLEAN;
@@ -31,8 +33,8 @@ typedef void *PVOID;
 #define STATUS_TEST_FAILURE -3
 #define NT_SUCCESS(s) ((s)>=0)
 typedef enum { KSSTATE_STOP, KSSTATE_ACQUIRE, KSSTATE_PAUSE, KSSTATE_RUN } KSSTATE;
-typedef struct { KSSTATE State; int Detached,DescriptorPublished; } STREAM, *PSOF_WAVERT_STREAM;
-typedef struct { STREAM *DmicStream; int AudioOnline,AudioDmaFaulted,Position,AudioPositionEnabled,AudioPositionLock; } DEVICE, *PSOF_DEVICE_CONTEXT;
+typedef struct { KSSTATE State; int Detached,DescriptorPublished,DmaFaulted,VoicePosition,NotificationLock; ULONGLONG VoicePacketCount,VoiceReadCount,VoiceTimestamp[2]; } STREAM, *PSOF_WAVERT_STREAM;
+typedef struct { STREAM *DmicStream; int Removed,AudioOnline,AudioDmaFaulted,Position,AudioPositionEnabled,AudioPositionLock; } DEVICE, *PSOF_DEVICE_CONTEXT;
 enum { MUTE=1,UNMUTE,RUN,STOP,PAUSE,DETACH,FREE,ACQUIRE };
 static int trace[32],n,fail1,fail2,locked;
 static int event(int op) {
@@ -46,7 +48,8 @@ static void AudioSetOnline(DEVICE *d,int v) { assert(locked);d->AudioOnline=v; }
 static void AudioSetPositionEnabled(DEVICE *d,int v) { assert(locked);d->Position=d->AudioPositionEnabled=v; }
 static void KeAcquireSpinLock(int *lock,KIRQL *irql) { assert(!*lock);*lock=1;*irql=0; }
 static void KeReleaseSpinLock(int *lock,KIRQL irql) { assert(*lock&&irql==0);*lock=0; }
-static int SofWaveRtGetPosition(STREAM *s,PULONG p) { assert(s&&p);*p=128;return 0; }
+#define InterlockedCompareExchange(p,x,y) (*(p))
+#define SofDeviceRemoved(d) ((d)->Removed)
 static int SofWaveRtSetMute(STREAM *s,int mute) { assert(s&&!s->Detached);return event(mute?MUTE:UNMUTE); }
 static int SofWaveRtSetState(STREAM *s,KSSTATE state) {
     assert(s&&!s->Detached);
@@ -96,9 +99,17 @@ int main(void) {
     reset();assert(AudioSetState(&d,&other,KSSTATE_RUN)==STATUS_DEVICE_NOT_READY&&!n);
     assert(AudioSetState(&d,&s,99)==STATUS_INVALID_PARAMETER&&!n);
     reset();assert(AudioSetState(&d,&s,KSSTATE_RUN)==0);
-    ULONG pos=99;
+    ULONG packet=99; ULONGLONG timestamp=0; int more=0;
+    assert(AudioReadPacket(&d,&s,&packet,&timestamp,&more)==STATUS_DEVICE_NOT_READY);
+    s.VoicePacketCount=5; s.VoiceTimestamp[0]=400; s.VoiceTimestamp[1]=300;
+    assert(AudioReadPacket(&d,&s,&packet,&timestamp,&more)==0 && packet==3 && timestamp==300 && more);
+    assert(AudioReadPacket(&d,&s,&packet,&timestamp,&more)==0 && packet==4 && timestamp==400 && !more);
+    assert(AudioReadPacket(&d,&s,&packet,&timestamp,&more)==STATUS_DEVICE_NOT_READY);
+    s.VoicePosition=128; ULONG pos=99;
     assert(AudioPosition(&d,&s,&pos)==0&&pos==128);
-    pos=99;assert(AudioPosition(&d,&other,&pos)==STATUS_DEVICE_NOT_READY&&pos==99);
+    s.DmaFaulted=1;pos=99;assert(AudioPosition(&d,&s,&pos)==STATUS_DEVICE_NOT_READY&&pos==99);
+    s.DmaFaulted=0;d.Removed=1;assert(AudioPosition(&d,&s,&pos)==STATUS_DEVICE_NOT_READY&&pos==99);
+    d.Removed=0;pos=99;assert(AudioPosition(&d,&other,&pos)==STATUS_DEVICE_NOT_READY&&pos==99);
     assert(AudioPosition(&d,NULL,&pos)==STATUS_INVALID_PARAMETER);
     assert(AudioPosition(&d,&s,NULL)==STATUS_INVALID_PARAMETER);
     AudioFree(&d,&s);
@@ -179,8 +190,8 @@ int main(void) {
     }
     first_status=0;calls=plan_calls=0;
     assert(AudioSelectFormat(&d)==0 && calls==1 && plan_calls==2);
-    assert(d.AudioFormat.Rate==48000 && d.AudioFormat.Channels==4 && d.AudioFormat.Role==0 &&
-           d.AudioFormat.ContainerBits==32 && d.AudioFormat.ValidBits==32);
+    assert(d.AudioFormat.Rate==48000 && d.AudioFormat.Channels==1 && d.AudioFormat.Role==0 &&
+           d.AudioFormat.ContainerBits==16 && d.AudioFormat.ValidBits==16);
     for(int fail=1;fail<=2;++fail) {
         reject_plan=fail;calls=plan_calls=0;
         assert(AudioSelectFormat(&d)==STATUS_NOT_SUPPORTED && calls==1 && plan_calls==fail);

@@ -81,6 +81,48 @@ static void SofWaveRtReleaseDescriptor(PSOF_WAVERT_STREAM Stream)
     KeReleaseSpinLock(&ctx->IpcLock, irql);
 }
 
+/* Copy only the inactive DMA half. A wrap during conversion invalidates
+ * the packet. The cursor and event are published only after revalidation. */
+static BOOLEAN SofWaveRtCopyVoicePeriod(PSOF_WAVERT_STREAM Stream)
+{
+    ULONG before, after;
+    ULONG period = Stream->PeriodSizeBytes;
+    ULONG offset = (ULONG)InterlockedCompareExchange(&Stream->VoicePosition, 0, 0) * 8u;
+    ULONGLONG counter;
+    ULONGLONG started = KeQueryInterruptTimePrecise(&counter);
+    if (started - Stream->VoiceLastCompletion >= (ULONGLONG)Stream->PeriodMs * 20000u ||
+        !NT_SUCCESS(SofWaveRtGetPosition(Stream, &before)) ||
+        (before < period) == (offset < period))
+        return FALSE;
+    /* DPIB counts bytes into the current DMA half. Backdate its observation
+     * by that progress plus one full period to timestamp the first frame. */
+    ULONGLONG frames = (period + before % period) / 16u;
+    ULONGLONG ticks = frames * Stream->CounterFrequency / PJ_DMIC_RATE;
+    if (counter < ticks) return FALSE;
+    ULONGLONG packetStart = counter - ticks;
+    const LONG *slots = (const LONG *)((PUCHAR)Stream->KernelBuffer + offset);
+    SHORT *scratch = (SHORT *)((PUCHAR)Stream->VoiceBuffer +
+        ROUND_TO_PAGES(Stream->BufferSizeBytes / 8u));
+    for (ULONG i = 0; i < period / 16u; ++i, slots += 4) {
+        LONGLONG sum = (LONGLONG)slots[0] + slots[1] + slots[2] + slots[3];
+        scratch[i] = (SHORT)(sum / (4 * 65536));
+    }
+    KeMemoryBarrier();
+    if (!NT_SUCCESS(SofWaveRtGetPosition(Stream, &after)) ||
+        (after < period) != (before < period) || after < before ||
+        KeQueryInterruptTimePrecise(&counter) - started >= (ULONGLONG)Stream->PeriodMs * 10000u)
+        return FALSE;
+    KIRQL irql;
+    KeAcquireSpinLock(&Stream->NotificationLock, &irql);
+    RtlCopyMemory(Stream->VoiceBuffer + offset / 16u, scratch, period / 8u);
+    Stream->VoiceTimestamp[Stream->VoicePacketCount % 2u] = packetStart;
+    ++Stream->VoicePacketCount;
+    Stream->VoiceLastCompletion = started;
+    InterlockedExchange(&Stream->VoicePosition, offset ? 0 : (LONG)(period / 8u));
+    KeReleaseSpinLock(&Stream->NotificationLock, irql);
+    return TRUE;
+}
+
 static KDEFERRED_ROUTINE SofWaveRtTimerDpc;
 
 /**
@@ -107,16 +149,19 @@ static VOID SofWaveRtTimerDpc(
 
     if (stream != NULL && stream->State == KSSTATE_RUN &&
         !InterlockedCompareExchange(&stream->DmaFaulted, 0, 0)) {
+        if (InterlockedCompareExchange(&stream->VoiceCopyBusy, 1, 0)) return;
         PUCHAR regs = SofWaveRtHdaDescriptor(stream);
         UCHAR flags = regs ? READ_REGISTER_UCHAR(regs + SOF_HDA_ADSP_REG_SD_STS) : 0xffu;
         if (flags == 0xffu || (flags & SOF_HDA_SD_STS_DMA_ERRORS)) {
             InterlockedExchange(&stream->DmaFaulted, TRUE);
-            return;
-        }
-        if (flags & SOF_HDA_PERIOD_COMPLETE) {
+        } else if (flags & SOF_HDA_PERIOD_COMPLETE) {
             WRITE_REGISTER_UCHAR(regs + SOF_HDA_ADSP_REG_SD_STS, SOF_HDA_PERIOD_COMPLETE);
-            SofWaveRtSignalNotification(stream);
+            if (!stream->VoiceBuffer || SofWaveRtCopyVoicePeriod(stream))
+                SofWaveRtSignalNotification(stream);
+            else
+                InterlockedExchange(&stream->DmaFaulted, TRUE);
         }
+        InterlockedExchange(&stream->VoiceCopyBusy, 0);
     }
 }
 #endif
@@ -612,6 +657,7 @@ NTSTATUS SofWaveRtFreeStream(
         if (NT_SUCCESS(status)) status = resetStatus;
     }
     if (Stream->Mdl) IoFreeMdl(Stream->Mdl);
+    if (Stream->VoiceBuffer) ExFreePoolWithTag(Stream->VoiceBuffer, SOF_DEVICE_TAG);
     if (stopped) {
         if (NT_SUCCESS(status) && NT_SUCCESS(deleteStatus) && !Stream->Detached)
             SofWaveRtReleaseDescriptor(Stream);
@@ -661,6 +707,11 @@ NTSTATUS SofWaveRtDetachStream(PSOF_WAVERT_STREAM Stream)
     }
     if (Stream->DescriptorPublished)
         Stream->DeviceContext->AudioDmaFaulted = TRUE;
+    if (Stream->VoiceBuffer && !Stream->DescriptorPublished) {
+        /* PortCls still owns its CPU pages. DMA has no mapping into them. */
+        SofFreeDmaBuffer(Stream->DeviceContext, &Stream->BdlAllocation);
+        SofFreeDmaBuffer(Stream->DeviceContext, &Stream->RingAllocation);
+    }
     Stream->Detached = TRUE;
     return status;
 }
@@ -754,6 +805,12 @@ NTSTATUS SofWaveRtSetState(
                 if (!NT_SUCCESS(status)) goto run_failed;
             }
             SofWaveRtStartLinkStream(Stream);
+#ifdef _KERNEL_MODE
+            if (Stream->VoiceBuffer) {
+                ULONGLONG counter;
+                Stream->VoiceLastCompletion = KeQueryInterruptTimePrecise(&counter);
+            }
+#endif
             status = SofWaveRtStartHdaStream(Stream);
             if (!NT_SUCCESS(status)) goto run_failed;
 
@@ -775,8 +832,9 @@ NTSTATUS SofWaveRtSetState(
         /* Start periodic notification timer */
         {
             LARGE_INTEGER dueTime;
-            dueTime.QuadPart = -10000LL * Stream->PeriodMs; /* Relative 100ns intervals */
-            KeSetTimerEx(&Stream->NotificationTimer, dueTime, Stream->PeriodMs, &Stream->NotificationDpc);
+            ULONG pollMs = Stream->VoiceBuffer ? max(1u, Stream->PeriodMs / 4u) : Stream->PeriodMs;
+            dueTime.QuadPart = -10000LL * pollMs; /* Relative 100ns intervals */
+            KeSetTimerEx(&Stream->NotificationTimer, dueTime, pollMs, &Stream->NotificationDpc);
         }
 #endif
         break;
@@ -816,6 +874,11 @@ NTSTATUS SofWaveRtSetState(
         KeCancelTimer(&Stream->NotificationTimer);
         KeRemoveQueueDpc(&Stream->NotificationDpc);
         KeFlushQueuedDpcs();
+#endif
+#ifdef _KERNEL_MODE
+        InterlockedExchange(&Stream->VoicePosition, 0);
+        Stream->VoicePacketCount = 0;
+        Stream->VoiceReadCount = 0;
 #endif
         Stream->LinearPositionBytes = 0;
         if (Stream->HostCopierInstance != 0xFFFFFFFF) {

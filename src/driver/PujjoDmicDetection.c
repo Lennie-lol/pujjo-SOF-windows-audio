@@ -144,7 +144,7 @@ NTSTATUS SofPublishDmicDetectionChild(PSOF_DEVICE_CONTEXT Ctx)
     state->Format.ContainerBits = PJ_DMIC_BITS;
     state->Format.ValidBits = PJ_DMIC_BITS;
     state->Format.Role = PujjoAudioDmic;
-    bus.Header.Size = (USHORT)sizeof(bus);
+    bus.Header.Size = PUJJO_AUDIO_V3_SIZE;
     bus.Header.Version = PUJJO_AUDIO_INTERFACE_VERSION;
     bus.Header.Context = child;
     bus.Header.InterfaceReference = DetectionReference;

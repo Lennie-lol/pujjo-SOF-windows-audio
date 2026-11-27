@@ -34,7 +34,8 @@ assert "g_CanaryArmed && ctx->ArmedTesting != 0 && ctx->EnablePortCls != 0" in d
 disconnect = bus.split("NTSTATUS SofDisconnectAudioChild", 1)[1].split("#ifdef", 1)[0]
 assert disconnect.index("AudioSetOnline(Ctx, FALSE)") < disconnect.index("SofWaveRtDetachStream")
 assert "&Ctx->DmicStream" not in device  # PortCls retains the buffer lease across parent teardown.
-assert bus.index("WdfObjectReference(stream->RingAllocation.CommonBuffer)") < bus.index("Buffer->Mdl =")
+assert bus.index("IoAllocateMdl(stream->VoiceBuffer") < bus.index("Buffer->Mdl =")
+assert "IoAllocateMdl(stream->KernelBuffer" not in bus
 assert wave.index("IoFreeMdl(Stream->Mdl)") < wave.index("WdfObjectDereference(ring)")
 assert "if (!stopped && !Stream->Detached)" in wave
 
@@ -109,7 +110,7 @@ const GUID KSDATAFORMAT_TYPE_AUDIO=1, KSDATAFORMAT_SUBTYPE_PCM=2,
            KSDATAFORMAT_SPECIFIER_WAVEFORMATEX=3;
 bool IsEqualGUID(GUID a, GUID b) { return a==b; }
 const int STATUS_NO_MATCH=-1, STATUS_SUCCESS=0, WAVE_FORMAT_PCM=1, WAVE_FORMAT_EXTENSIBLE=0xfffe;
-const ULONG KSAUDIO_SPEAKER_STEREO=3;
+const ULONG KSAUDIO_SPEAKER_STEREO=3, KSAUDIO_SPEAKER_MONO=4;
 struct KSDATAFORMAT { ULONG FormatSize; GUID MajorFormat,SubFormat,Specifier; };
 using PKSDATAFORMAT=KSDATAFORMAT*;
 #pragma pack(push,1)
@@ -149,6 +150,12 @@ int main() {
     assert(ValidateFormat(raw,{48000,2,16,16})==0);
     assert(ValidateFormat(raw,{48000,2,16,12})==-1);
     assert(ValidateFormat(nullptr,expected)==-1);
+    f.WaveFormatExt.Format={1,1,48000,96000,2,16,0};
+    assert(ValidateFormat(raw,{48000,1,16,16})==0);
+    f.WaveFormatExt={{0xfffe,1,48000,96000,2,16,22},{16},4,2};
+    assert(ValidateFormat(raw,{48000,1,16,16})==0);
+    f.WaveFormatExt.dwChannelMask=3;
+    assert(ValidateFormat(raw,{48000,1,16,16})==-1);
     PUJJO_AUDIO_FORMAT four{48000,4,32,32};
     f.WaveFormatExt={{0xfffe,4,48000,768000,16,32,22},{32},0,2};
     assert(ValidateFormat(raw,four)==0);

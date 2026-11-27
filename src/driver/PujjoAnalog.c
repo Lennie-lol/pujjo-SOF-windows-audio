@@ -591,7 +591,7 @@ static NTSTATUS PublishAnalogChildLocked(PSOF_DEVICE_CONTEXT parent,
     PUJJO_ANALOG_CHILD *childContext = GetAnalogChild(child);
     childContext->Parent = parent;
     childContext->Profile = *profile;
-    bus.Header.Size = (USHORT)sizeof(bus);
+    bus.Header.Size = PUJJO_AUDIO_V3_SIZE;
     bus.Header.Version = PUJJO_AUDIO_INTERFACE_VERSION;
     bus.Header.Context = childContext;
     bus.Header.InterfaceReference = ChildReference;
