@@ -1377,9 +1377,9 @@ static NTSTATUS SofAuditColdBootOwnership(PSOF_DEVICE_CONTEXT Ctx)
 
     ULONG core = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPCS);
     if (core == MAXULONG || SofDeviceRemoved(Ctx)) return STATUS_DEVICE_NOT_READY;
-    const ULONG powered = HDA_DSP_ADSPCS_SPA_MASK(1) | HDA_DSP_ADSPCS_CPA_MASK(1);
-    const ULONG otherPowered = HDA_DSP_ADSPCS_SPA_MASK(0xfeu) | HDA_DSP_ADSPCS_CPA_MASK(0xfeu);
-    if ((core & otherPowered) || ((core & powered) && !(core & HDA_DSP_ADSPCS_CRST_MASK(1))))
+    /* A core held in reset can still belong to another power owner.
+     * Cold rollback powers core zero off, so require it to start off. */
+    if (core & (HDA_DSP_ADSPCS_SPA_MASK(0xffu) | HDA_DSP_ADSPCS_CPA_MASK(0xffu)))
         return STATUS_DEVICE_BUSY;
     return STATUS_SUCCESS;
 }

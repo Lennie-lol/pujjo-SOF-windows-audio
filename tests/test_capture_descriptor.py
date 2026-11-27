@@ -58,6 +58,7 @@ typedef struct { Device *DeviceContext; int DescriptorReserved,DescriptorPublish
  struct {ULONG SamplingFrequency,ValidBitDepth,ChannelsCount;} Format;
  struct {ULONG LowPart,HighPart;} BdlPhysicalAddress;
  struct {int Published;} RingAllocation,BdlAllocation;
+ int StreamProcessingAdded;
 } Stream,*PSOF_WAVERT_STREAM;
 static unsigned char bar[256];
 static PUCHAR drop;
@@ -79,9 +80,14 @@ cases = r"""
 int main(void) {
  Device d={.Bar0VirtualAddress=bar,.Bar0Length=sizeof(bar),.PpCapOffset=128,.HardwarePrepared=1};
  assert(SofOpenDmaPublicationGate(&d));
- Stream s={&d,1,0,2,0,15360,1,{48000,32,4},{4096,1},{0},{0}};
+ Stream s={&d,1,0,2,0,15360,1,{48000,32,4},{4096,1},{0},{0},0};
  int offsets[]={8,12,18,24,28};
+ assert(SofWaveRtConfigureHdaStream(&s)==STATUS_DEVICE_NOT_READY && !writes);
+ writel(SOF_HDA_PPCTL_GPROCEN|1u,bar+132);
+ writes=0;
+ assert(SofWaveRtConfigureHdaStream(&s)==STATUS_DEVICE_BUSY && !writes);
  for(unsigned i=0;i<sizeof(offsets)/sizeof(offsets[0]);++i) {
+   writel(SOF_HDA_PPCTL_GPROCEN|4u,bar+132);
    drop=bar+offsets[i];
    assert(SofWaveRtConfigureHdaStream(&s)==STATUS_DEVICE_CONFIGURATION_ERROR);
    assert(s.DescriptorPublished && !(bar[0]&2));
@@ -93,9 +99,11 @@ int main(void) {
      writel(4096,bar+24); writel(1,bar+28);
    }
    assert(SofWaveRtResetHdaStream(&s)==0 && !s.DescriptorPublished);
+   assert(readl(bar+132)==(SOF_HDA_PPCTL_GPROCEN|4u));
    assert(!s.RingAllocation.Published && !s.BdlAllocation.Published && !SofDmaPublishedSlots(&d));
    memset(bar,0,sizeof(bar));
  }
+ writel(SOF_HDA_PPCTL_GPROCEN,bar+132);
  bar[0]=2; writes=0;
  assert(SofWaveRtConfigureHdaStream(&s)==STATUS_DEVICE_BUSY);
  assert(SofWaveRtStopHdaStream(&s)==0 && SofWaveRtResetHdaStream(&s)==0 && !writes);
@@ -107,8 +115,12 @@ int main(void) {
  assert(SofWaveRtResetHdaStream(&s)<0 && s.DescriptorPublished && !writes);
  d.removed=0;
  bar[0]=0; /* zero-detached descriptor must also be idle */
+ drop=bar+132;
+ assert(SofWaveRtResetHdaStream(&s)<0 && s.DescriptorPublished && SofDmaPublishedSlots(&d)==1);
+ drop=NULL;
  assert(SofWaveRtResetHdaStream(&s)==0 && !s.DescriptorPublished);
  memset(bar,0,sizeof(bar));
+ writel(SOF_HDA_PPCTL_GPROCEN,bar+132);
  assert(SofWaveRtConfigureHdaStream(&s)==0);
  SofInvalidateDmaPublicationGate(&d); /* same CAS as surprise removal */
  writes=0;

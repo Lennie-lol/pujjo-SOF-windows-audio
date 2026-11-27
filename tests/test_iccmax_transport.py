@@ -130,6 +130,8 @@ int main(void) {
     assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
     writel(0,bar+0xb8); writel(0x01010000,dsp+4);
     assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
+    writel(0x01010001,dsp+4); /* Reset asserted on a pre-powered primary core. */
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
     assert(readl(bar+0x204)==0);
     writel(0,dsp+4);
     /* Each engine/foreign address and an extra bidirectional stream

@@ -160,6 +160,7 @@ typedef struct _SOF_WAVERT_STREAM {
     SOF_DMA_BUFFER      RingAllocation;
     SOF_DMA_BUFFER      BdlAllocation;
     BOOLEAN             DescriptorPublished;
+    BOOLEAN             StreamProcessingAdded;
     BOOLEAN             DescriptorReserved;
     ULONG               BdlPeriodCount;
     volatile LONG       DmaFaulted;

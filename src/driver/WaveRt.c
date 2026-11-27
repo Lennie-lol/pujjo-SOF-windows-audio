@@ -1208,6 +1208,9 @@ NTSTATUS SofWaveRtConfigureHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     ppctl = (PUCHAR)ctx->Bar0VirtualAddress + ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL;
     ctl = readl(ppctl);
     if (ctl == MAXULONG) return STATUS_DEVICE_NOT_READY;
+    streamBit = 1u << Stream->StreamIndex;
+    if (!(ctl & SOF_HDA_PPCTL_GPROCEN)) return STATUS_DEVICE_NOT_READY;
+    if (ctl & streamBit) return STATUS_DEVICE_BUSY;
     if (!Stream->DescriptorPublished) {
         ULONG descriptor = readl(regs + SOF_HDA_ADSP_REG_SD_CTL);
         if (descriptor == MAXULONG) return STATUS_DEVICE_NOT_READY;
@@ -1219,14 +1222,24 @@ NTSTATUS SofWaveRtConfigureHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     format = SofHdaComputeFormatWord(Stream->Format.SamplingFrequency,
         Stream->Format.ValidBitDepth, Stream->Format.ChannelsCount);
     if (!format) return STATUS_NOT_SUPPORTED;
-    /* An idle descriptor has passed the ownership checks above. */
+    /* Own the complete descriptor transaction, including reset and PPCTL.
+     * A partial setup must take the same checked detach path as active DMA. */
+    if (!SofClaimDmaPublication(ctx, Stream->StreamIndex)) return STATUS_DEVICE_NOT_READY;
+    Stream->DescriptorPublished = TRUE;
+    Stream->RingAllocation.Published = TRUE;
+    Stream->BdlAllocation.Published = TRUE;
+    if (!SofDmaPublicationGateOpen(ctx)) return STATUS_DEVICE_NOT_READY;
     status = SofWaveRtSetHdaControl(regs, SOF_HDA_SD_CTL_DMA_RESET, SOF_HDA_SD_CTL_DMA_RESET);
     if (!NT_SUCCESS(status)) return status;
     status = SofWaveRtSetHdaControl(regs, SOF_HDA_SD_CTL_DMA_RESET | SOF_HDA_SD_CTL_DMA_START, 0);
     if (!NT_SUCCESS(status)) return status;
 
-    streamBit = 1u << Stream->StreamIndex;
-    writel(ctl | streamBit | SOF_HDA_PPCTL_GPROCEN, ppctl);
+    ctl = readl(ppctl);
+    if (ctl == MAXULONG || !(ctl & SOF_HDA_PPCTL_GPROCEN) ||
+        !SofDmaPublicationGateOpen(ctx)) return STATUS_DEVICE_NOT_READY;
+    if (ctl & streamBit) return STATUS_DEVICE_BUSY;
+    Stream->StreamProcessingAdded = TRUE;
+    writel(ctl | streamBit, ppctl);
     ctl = readl(ppctl);
     if (ctl == MAXULONG || !(ctl & streamBit)) return STATUS_DEVICE_NOT_READY;
     WRITE_REGISTER_UCHAR(regs + SOF_HDA_ADSP_REG_SD_STS,
@@ -1235,11 +1248,6 @@ NTSTATUS SofWaveRtConfigureHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
     writew((USHORT)(Stream->BdlPeriodCount - 1u), regs + SOF_HDA_ADSP_REG_SD_LVI);
     writew(format, regs + SOF_HDA_ADSP_REG_SD_FORMAT);
     KeMemoryBarrier();
-    /* Either address write can expose the BDL, even if readback fails. */
-    if (!SofClaimDmaPublication(ctx, Stream->StreamIndex)) return STATUS_DEVICE_NOT_READY;
-    Stream->DescriptorPublished = TRUE;
-    Stream->RingAllocation.Published = TRUE;
-    Stream->BdlAllocation.Published = TRUE;
     if (!SofDmaPublicationGateOpen(ctx)) return STATUS_DEVICE_NOT_READY;
     writel(Stream->BdlPhysicalAddress.LowPart, regs + SOF_HDA_ADSP_REG_SD_BDLPL);
     writel((ULONG)Stream->BdlPhysicalAddress.HighPart, regs + SOF_HDA_ADSP_REG_SD_BDLPU);
@@ -1318,8 +1326,22 @@ NTSTATUS SofWaveRtResetHdaStream(_In_ PSOF_WAVERT_STREAM Stream)
                 (SOF_HDA_SD_CTL_DMA_START | SOF_HDA_SD_CTL_DMA_RESET)) ||
             SofDeviceRemoved(Stream->DeviceContext))
             return STATUS_DEVICE_NOT_READY;
+        PSOF_DEVICE_CONTEXT ctx = Stream->DeviceContext;
+        ULONG streamBit = 1u << Stream->StreamIndex;
+        if (!SofDmaDetachLeaseOwned(ctx, Stream->StreamIndex) ||
+            !ctx->PpCapOffset || ctx->PpCapOffset > ctx->Bar0Length ||
+            SOF_HDA_REG_PP_PPCTL + sizeof(ULONG) > ctx->Bar0Length - ctx->PpCapOffset)
+            return STATUS_DEVICE_NOT_READY;
+        PUCHAR ppctl = (PUCHAR)ctx->Bar0VirtualAddress + ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL;
+        ULONG processing = readl(ppctl);
+        if (processing == MAXULONG) return STATUS_DEVICE_NOT_READY;
+        if (Stream->StreamProcessingAdded && (processing & streamBit)) {
+            writel(processing & ~streamBit, ppctl);
+            if (readl(ppctl) & streamBit) return STATUS_DEVICE_NOT_READY;
+        }
         if (!SofConfirmDmaDetached(Stream->DeviceContext, Stream->StreamIndex))
             return STATUS_DEVICE_NOT_READY;
+        Stream->StreamProcessingAdded = FALSE;
         Stream->DescriptorPublished = FALSE;
         Stream->RingAllocation.Published = FALSE;
         Stream->BdlAllocation.Published = FALSE;
