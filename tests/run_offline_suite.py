@@ -34,7 +34,7 @@ SUITES=[
  'tests/run_ipc4_protocol_tests.py','tests/test_ipc4_protocol_static.py',
  'tests/test_ipc4_evidence_collector_static.py',
  'tests/test_ipc4_pretest_safety.py','tests/run_dma_plan_tests.py',
- 'tests/test_interrupt_boot_preflight.py','tests/test_kmdf_irq_lifecycle.py','tests/run_notification_race.py','tests/test_capture_descriptor.py','tests/test_voice_period.py',
+ 'tests/test_interrupt_boot_preflight.py','tests/test_kmdf_irq_lifecycle.py','tests/run_notification_race.py','tests/test_capture_descriptor.py','tests/test_voice_period.py','tests/test_voice_page_lease.py','tests/test_rom_preflight.py',
  'tests/test_read_only_resource_discovery.py',
  'tests/test_prepare_hardware_rollback.py','tests/test_portcls_child.py','tests/test_dmic_review_package.py','tests/run_codec_control_tests.py',
 ]

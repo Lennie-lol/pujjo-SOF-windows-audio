@@ -80,15 +80,18 @@ class DmicStream final : public IMiniportWaveRTStreamNotification, public IMinip
     KMUTEX m_control;
     KSPIN_LOCK m_bufferLock;
     PUJJO_AUDIO_BUFFER m_buffer = {};
+    PPORTWAVERTSTREAM m_port;
+    PVOID m_voiceMapping = nullptr;
 
     void Lock() { KeWaitForSingleObject(&m_control, Executive, KernelMode, FALSE, nullptr); }
     void Unlock() { KeReleaseMutex(&m_control, FALSE); }
 
 public:
-    DmicStream(const PUJJO_AUDIO_BUS &Bus, const PUJJO_AUDIO_FORMAT &Format)
-        : m_bus(Bus), m_format(Format)
+    DmicStream(const PUJJO_AUDIO_BUS &Bus, const PUJJO_AUDIO_FORMAT &Format, PPORTWAVERTSTREAM Port)
+        : m_bus(Bus), m_format(Format), m_port(Port)
     {
         ReferenceBus(m_bus);
+        m_port->AddRef();
         KeInitializeMutex(&m_control, 0);
         KeInitializeSpinLock(&m_bufferLock);
     }
@@ -97,6 +100,7 @@ public:
     {
         if (m_buffer.Stream)
             FreeBufferWithNotification(m_buffer.Mdl, m_buffer.Bytes);
+        m_port->Release();
         ReleaseBus(m_bus);
     }
 
@@ -201,8 +205,46 @@ public:
 
         Lock();
         PUJJO_AUDIO_BUFFER fresh = {};
-        NTSTATUS status = m_buffer.Stream ? STATUS_DEVICE_BUSY :
-            m_bus.Allocate(m_bus.Header.Context, Requested, &fresh);
+        NTSTATUS status = STATUS_DEVICE_BUSY;
+        if (!m_buffer.Stream) {
+            if (m_format.Role == PujjoAudioDmic) {
+                ULONG bytes = 0;
+                status = m_bus.PlanVoice(m_bus.Header.Context, Requested, &bytes);
+                /* Whole dedicated pages: never expose pool padding/scratch. */
+                if (NT_SUCCESS(status) && (!bytes || bytes > 9600u || (bytes & 3u)))
+                    status = STATUS_INVALID_BUFFER_SIZE;
+                if (NT_SUCCESS(status)) {
+                    PHYSICAL_ADDRESS high;
+                    high.QuadPart = MAXLONGLONG;
+                    fresh.Mdl = m_port->AllocatePagesForMdl(high, ROUND_TO_PAGES(bytes));
+                    if (!fresh.Mdl) status = STATUS_INSUFFICIENT_RESOURCES;
+                    else if (MmGetMdlByteOffset(fresh.Mdl) || fresh.Mdl->Next ||
+                        MmGetMdlByteCount(fresh.Mdl) != ROUND_TO_PAGES(bytes))
+                        status = STATUS_INVALID_BUFFER_SIZE;
+                }
+                if (NT_SUCCESS(status)) {
+                    m_voiceMapping = m_port->MapAllocatedPages(fresh.Mdl, MmCached);
+                    if (!m_voiceMapping) status = STATUS_INSUFFICIENT_RESOURCES;
+                }
+                if (NT_SUCCESS(status)) {
+                    RtlZeroMemory(m_voiceMapping, ROUND_TO_PAGES(bytes));
+                    status = m_bus.AttachVoice(m_bus.Header.Context, Requested, m_voiceMapping,
+                        bytes, &fresh.Stream);
+                    if (NT_SUCCESS(status) && !fresh.Stream) status = STATUS_INVALID_DEVICE_STATE;
+                }
+                if (!NT_SUCCESS(status)) {
+                    if (fresh.Stream) m_bus.Free(m_bus.Header.Context, fresh.Stream);
+                    if (m_voiceMapping) m_port->UnmapAllocatedPages(m_voiceMapping, fresh.Mdl);
+                    if (fresh.Mdl) m_port->FreePagesFromMdl(fresh.Mdl);
+                    m_voiceMapping = nullptr;
+                } else {
+                    fresh.Bytes = bytes;
+                    fresh.CacheType = MmCached;
+                }
+            } else {
+                status = m_bus.Allocate(m_bus.Header.Context, Requested, &fresh);
+            }
+        }
         if (NT_SUCCESS(status)) {
             KIRQL irql;
             KeAcquireSpinLock(&m_bufferLock, &irql);
@@ -226,7 +268,14 @@ public:
             PVOID stream = m_buffer.Stream;
             m_buffer = {};
             KeReleaseSpinLock(&m_bufferLock, irql);
+            /* Free is synchronous: the parent cancels and drains all CPU
+             * copies before returning, even if DMA must be quarantined. */
             m_bus.Free(m_bus.Header.Context, stream);
+            if (m_voiceMapping) {
+                m_port->UnmapAllocatedPages(m_voiceMapping, Mdl);
+                m_port->FreePagesFromMdl(Mdl);
+                m_voiceMapping = nullptr;
+            }
         }
         Unlock();
     }
@@ -480,7 +529,7 @@ public:
         output->DataFormat.SampleSize = format.Format.nBlockAlign;
         return STATUS_SUCCESS;
     }
-    STDMETHODIMP NewStream(PMINIPORTWAVERTSTREAM *Out, PPORTWAVERTSTREAM,
+    STDMETHODIMP NewStream(PMINIPORTWAVERTSTREAM *Out, PPORTWAVERTSTREAM Port,
                            ULONG Pin, BOOLEAN Capture, PKSDATAFORMAT Format) override
     {
         if (!Out) return STATUS_INVALID_PARAMETER;
@@ -498,9 +547,14 @@ public:
             return STATUS_DEVICE_NOT_READY;
 #ifdef PUJJO_DMIC_DETECTION_TEST_ADAPTER
         /* Endpoint metadata is available, but never return a stream object. */
+        UNREFERENCED_PARAMETER(Port);
         return STATUS_DEVICE_NOT_READY;
 #else
-        auto stream = new (POOL_FLAG_NON_PAGED, AUDIO_POOL_TAG) DmicStream(m_bus, m_format);
+        if (!Port) return STATUS_INVALID_PARAMETER;
+        if (m_format.Role == PujjoAudioDmic &&
+            (m_bus.Header.Version != PUJJO_AUDIO_PACKET_VERSION || !m_bus.PlanVoice || !m_bus.AttachVoice))
+            return STATUS_DEVICE_NOT_READY;
+        auto stream = new (POOL_FLAG_NON_PAGED, AUDIO_POOL_TAG) DmicStream(m_bus, m_format, Port);
         if (!stream) return STATUS_INSUFFICIENT_RESOURCES;
         *Out = stream;
         return STATUS_SUCCESS;
@@ -733,6 +787,11 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT Device, PIRP Irp, PRESOURCELIST Resou
 #ifdef PUJJO_DMIC_DETECTION_TEST_ADAPTER
     if (NT_SUCCESS(status) && (format.Role != PujjoAudioDmic || format.Rate != 48000 ||
         format.Channels != 4 || format.ContainerBits != 32 || format.ValidBits != 32))
+        status = STATUS_NOT_SUPPORTED;
+#endif
+#ifndef PUJJO_DMIC_DETECTION_TEST_ADAPTER
+    if (NT_SUCCESS(status) && format.Role == PujjoAudioDmic &&
+        (version != PUJJO_AUDIO_PACKET_VERSION || !bus.PlanVoice || !bus.AttachVoice))
         status = STATUS_NOT_SUPPORTED;
 #endif
     if (NT_SUCCESS(status) && (unsigned)format.Role >= RTL_NUMBER_OF(waveNames))

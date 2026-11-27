@@ -1384,6 +1384,29 @@ static NTSTATUS SofAuditColdBootOwnership(PSOF_DEVICE_CONTEXT Ctx)
     return STATUS_SUCCESS;
 }
 
+#ifdef PUJJO_DMIC_ROM_PREFLIGHT
+/* Same audit as the future loader, with no call into its write path. */
+VOID SofLogColdBootReadiness(PSOF_DEVICE_CONTEXT Ctx)
+{
+    NTSTATUS status = SofAuditColdBootOwnership(Ctx);
+    ULONG pp = MAXULONG, core = MAXULONG, descriptors = 0;
+    char message[192];
+    if (!SofDeviceRemoved(Ctx) && Ctx->Bar0VirtualAddress &&
+        pj_ipc4_mmio_span_valid(Ctx->Bar0Length, Ctx->PpCapOffset,
+            SOF_HDA_REG_PP_PPCTL + sizeof(ULONG)) && Ctx->PpCapOffset)
+        pp = readl((PUCHAR)Ctx->Bar0VirtualAddress + Ctx->PpCapOffset + SOF_HDA_REG_PP_PPCTL);
+    if (!SofDeviceRemoved(Ctx) && Ctx->Bar4VirtualAddress &&
+        pj_ipc4_mmio_span_valid(Ctx->Bar4Length, HDA_DSP_REG_ADSPCS, sizeof(ULONG)))
+        core = SofDspRead32(Ctx->Bar4VirtualAddress, HDA_DSP_REG_ADSPCS);
+    if (pp != MAXULONG) descriptors = pp & SOF_DMA_SLOT_MASK;
+    RtlStringCbPrintfA(message, sizeof(message),
+        "[ROM-preflight] cold-idle-audit=0x%08x PPCTL=0x%08x foreign-stream-mask=0x%08x ADSPCS=0x%08x. No writes.\n",
+        status, pp, descriptors, core);
+    SofLogBreadcrumb(message);
+    SofLogBreadcrumb("[ROM-preflight] Idle snapshot is not a DMA drain or hardware authorization.\n");
+}
+#endif
+
 static NTSTATUS SofAcquireBootProcessing(PSOF_DEVICE_CONTEXT Ctx)
 {
     PUCHAR bar0 = (PUCHAR)Ctx->Bar0VirtualAddress;

@@ -87,7 +87,15 @@ static BOOLEAN SofWaveRtCopyVoicePeriod(PSOF_WAVERT_STREAM Stream)
 {
     ULONG before, after;
     ULONG period = Stream->PeriodSizeBytes;
-    ULONG offset = (ULONG)InterlockedCompareExchange(&Stream->VoicePosition, 0, 0) * 8u;
+    ULONG voiceOffset = (ULONG)InterlockedCompareExchange(&Stream->VoicePosition, 0, 0);
+    ULONG offset;
+    if (!period || period != Stream->BufferSizeBytes / 2u ||
+        (Stream->BufferSizeBytes & 31u) || (period & 15u) ||
+        (voiceOffset != 0 && voiceOffset != period / 8u) ||
+        !Stream->VoiceBuffer || !Stream->VoiceScratch || !Stream->KernelBuffer ||
+        !Stream->CounterFrequency || Stream->PeriodMs < 1u || Stream->PeriodMs > 50u)
+        return FALSE;
+    offset = voiceOffset * 8u;
     ULONGLONG counter;
     ULONGLONG started = KeQueryInterruptTimePrecise(&counter);
     if (started - Stream->VoiceLastCompletion >= (ULONGLONG)Stream->PeriodMs * 20000u ||
@@ -101,8 +109,7 @@ static BOOLEAN SofWaveRtCopyVoicePeriod(PSOF_WAVERT_STREAM Stream)
     if (counter < ticks) return FALSE;
     ULONGLONG packetStart = counter - ticks;
     const LONG *slots = (const LONG *)((PUCHAR)Stream->KernelBuffer + offset);
-    SHORT *scratch = (SHORT *)((PUCHAR)Stream->VoiceBuffer +
-        ROUND_TO_PAGES(Stream->BufferSizeBytes / 8u));
+    SHORT *scratch = Stream->VoiceScratch;
     for (ULONG i = 0; i < period / 16u; ++i, slots += 4) {
         LONGLONG sum = (LONGLONG)slots[0] + slots[1] + slots[2] + slots[3];
         scratch[i] = (SHORT)(sum / (4 * 65536));
@@ -114,6 +121,11 @@ static BOOLEAN SofWaveRtCopyVoicePeriod(PSOF_WAVERT_STREAM Stream)
         return FALSE;
     KIRQL irql;
     KeAcquireSpinLock(&Stream->NotificationLock, &irql);
+    if (Stream->VoicePacketCount &&
+        packetStart <= Stream->VoiceTimestamp[(Stream->VoicePacketCount - 1u) % 2u]) {
+        KeReleaseSpinLock(&Stream->NotificationLock, irql);
+        return FALSE;
+    }
     RtlCopyMemory(Stream->VoiceBuffer + offset / 16u, scratch, period / 8u);
     Stream->VoiceTimestamp[Stream->VoicePacketCount % 2u] = packetStart;
     ++Stream->VoicePacketCount;
@@ -160,7 +172,15 @@ static VOID SofWaveRtTimerDpc(
                 SofWaveRtSignalNotification(stream);
             else
                 InterlockedExchange(&stream->DmaFaulted, TRUE);
+        } else if (stream->VoiceBuffer) {
+            ULONGLONG qpc;
+            if (KeQueryInterruptTimePrecise(&qpc) - stream->VoiceLastCompletion >=
+                (ULONGLONG)stream->PeriodMs * 20000u)
+                /* A stalled stream must not masquerade as a working microphone. */
+                InterlockedExchange(&stream->DmaFaulted, TRUE);
         }
+        if (InterlockedCompareExchange(&stream->DmaFaulted, 0, 0))
+            SofWaveRtSignalNotification(stream); /* wake reader; GetReadPacket returns an error */
         InterlockedExchange(&stream->VoiceCopyBusy, 0);
     }
 }
@@ -665,7 +685,9 @@ NTSTATUS SofWaveRtFreeStream(
         if (NT_SUCCESS(status)) status = resetStatus;
     }
     if (Stream->Mdl) IoFreeMdl(Stream->Mdl);
-    if (Stream->VoiceBuffer) ExFreePoolWithTag(Stream->VoiceBuffer, SOF_DEVICE_TAG);
+    if (Stream->VoiceScratch) ExFreePoolWithTag(Stream->VoiceScratch, SOF_DEVICE_TAG);
+    /* Borrowed PortCls pages remain mapped until Free returns to child. */
+    Stream->VoiceBuffer = NULL;
     if (stopped) {
         if (NT_SUCCESS(status) && NT_SUCCESS(deleteStatus) && !Stream->Detached)
             SofWaveRtReleaseDescriptor(Stream);
@@ -890,6 +912,8 @@ NTSTATUS SofWaveRtSetState(
         KeFlushQueuedDpcs();
 #endif
 #ifdef _KERNEL_MODE
+        if (Stream->VoiceBuffer)
+            RtlZeroMemory(Stream->VoiceBuffer, Stream->BufferSizeBytes / 8u);
         InterlockedExchange(&Stream->VoicePosition, 0);
         Stream->VoicePacketCount = 0;
         Stream->VoiceReadCount = 0;

@@ -34,7 +34,11 @@ assert "g_CanaryArmed && ctx->ArmedTesting != 0 && ctx->EnablePortCls != 0" in d
 disconnect = bus.split("NTSTATUS SofDisconnectAudioChild", 1)[1].split("#ifdef", 1)[0]
 assert disconnect.index("AudioSetOnline(Ctx, FALSE)") < disconnect.index("SofWaveRtDetachStream")
 assert "&Ctx->DmicStream" not in device  # PortCls retains the buffer lease across parent teardown.
-assert bus.index("IoAllocateMdl(stream->VoiceBuffer") < bus.index("Buffer->Mdl =")
+assert "IoAllocateMdl(stream->VoiceBuffer" not in bus
+assert "stream->VoiceBuffer = (SHORT *)VoiceAddress" in bus
+assert "ExFreePoolWithTag(Stream->VoiceBuffer" not in wave
+assert "m_port->AllocatePagesForMdl" in port
+assert "m_port->MapAllocatedPages" in port
 assert "IoAllocateMdl(stream->KernelBuffer" not in bus
 assert wave.index("IoFreeMdl(Stream->Mdl)") < wave.index("WdfObjectDereference(ring)")
 assert "if (!stopped && !Stream->Detached)" in wave

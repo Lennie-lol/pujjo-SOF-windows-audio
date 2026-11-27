@@ -31,6 +31,7 @@ typedef void *PVOID;
 #define STATUS_DEVICE_NOT_READY -1
 #define STATUS_INVALID_PARAMETER -2
 #define STATUS_TEST_FAILURE -3
+#define STATUS_IO_DEVICE_ERROR -4
 #define NT_SUCCESS(s) ((s)>=0)
 typedef enum { KSSTATE_STOP, KSSTATE_ACQUIRE, KSSTATE_PAUSE, KSSTATE_RUN } KSSTATE;
 typedef struct { KSSTATE State; int Detached,DescriptorPublished,DmaFaulted,VoicePosition,NotificationLock; ULONGLONG VoicePacketCount,VoiceReadCount,VoiceTimestamp[2]; } STREAM, *PSOF_WAVERT_STREAM;
@@ -107,6 +108,8 @@ int main(void) {
     assert(AudioReadPacket(&d,&s,&packet,&timestamp,&more)==0 && packet==3 && timestamp==300 && more);
     assert(AudioReadPacket(&d,&s,&packet,&timestamp,&more)==0 && packet==4 && timestamp==400 && !more);
     assert(AudioReadPacket(&d,&s,&packet,&timestamp,&more)==STATUS_DEVICE_NOT_READY);
+    s.DmaFaulted=1; assert(AudioReadPacket(&d,&s,&packet,&timestamp,&more)==STATUS_IO_DEVICE_ERROR);
+    s.DmaFaulted=0;
     s.VoicePosition=128; ULONG pos=99;
     assert(AudioPosition(&d,&s,&pos)==0&&pos==128);
     s.DmaFaulted=1;pos=99;assert(AudioPosition(&d,&s,&pos)==STATUS_DEVICE_NOT_READY&&pos==99);

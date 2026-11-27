@@ -10,7 +10,7 @@
 #define PUJJO_AUDIO_CHILD_ID L"PUJJO\\AudioDmic"
 #define PUJJO_DMIC_DETECTION_ID L"PUJJO\\AudioDmicDetectionTest"
 #define PUJJO_AUDIO_INTERFACE_VERSION 3
-#define PUJJO_AUDIO_PACKET_VERSION 4
+#define PUJJO_AUDIO_PACKET_VERSION 5
 #if defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG) && !defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO)
 #error The analog path requires the experimental audio guard
 #endif
@@ -57,6 +57,12 @@ typedef struct _PUJJO_AUDIO_BUS {
     NTSTATUS (*Notification)(PVOID Stream, PKEVENT Event, BOOLEAN Add);
     NTSTATUS (*JackPresent)(PVOID Context, PBOOLEAN Present);
     NTSTATUS (*ReadPacket)(PVOID Context, PVOID Stream, PULONG Number, PULONGLONG Counter, PBOOLEAN More);
+    /* V5: PortCls owns the CPU-only voice ring. Plan returns its actual
+     * byte count; Attach borrows its mapping until the synchronous Free
+     * callback returns. The hardware DMA ring is never exposed to PortCls. */
+    NTSTATUS (*PlanVoice)(PVOID Context, ULONG RequestedBytes, PULONG ActualBytes);
+    NTSTATUS (*AttachVoice)(PVOID Context, ULONG RequestedBytes, PVOID VoiceAddress,
+                            ULONG ActualBytes, PVOID *Stream);
 } PUJJO_AUDIO_BUS;
 
 #define PUJJO_AUDIO_V3_SIZE ((USHORT)FIELD_OFFSET(PUJJO_AUDIO_BUS, ReadPacket))

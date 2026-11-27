@@ -1,6 +1,7 @@
 """Execute the production capture conversion with controlled DMA cursor/time samples."""
 from pathlib import Path
 import os
+import shlex
 import subprocess
 import tempfile
 
@@ -33,7 +34,7 @@ typedef struct {
  ULONG PeriodSizeBytes,BufferSizeBytes,PeriodMs;
  LONG VoicePosition;
  LONG *KernelBuffer;
- SHORT *VoiceBuffer;
+ SHORT *VoiceBuffer,*VoiceScratch;
  ULONGLONG VoiceLastCompletion, VoicePacketCount, VoiceTimestamp[2], CounterFrequency;
  int NotificationLock;
 } Stream,*PSOF_WAVERT_STREAM;
@@ -52,8 +53,8 @@ int main(void) {
  LONG slots[16]={INT32_MAX,INT32_MAX,INT32_MAX,INT32_MAX,
                  INT32_MIN,INT32_MIN,INT32_MIN,INT32_MIN,
                  65536,131072,196608,262144,0,0,0,0};
- SHORT pcm[2050]={0};
- Stream s={32,64,20,0,slots,pcm,0,0,{0},48000,0};
+ SHORT pcm[4]={0},scratch[2]={0};
+ Stream s={32,64,20,0,slots,pcm,scratch,0,0,{0},48000,0};
  now=100; first=32; last=48; delay=1;
  assert(SofWaveRtCopyVoicePeriod(&s) && s.VoicePosition==4);
  assert(s.VoicePacketCount==1 && s.VoiceTimestamp[0]==98);
@@ -70,6 +71,11 @@ int main(void) {
  now=1020;delay=1;reads=0;first=0;last=4;
  assert(SofWaveRtCopyVoicePeriod(&s) && !s.VoicePosition && pcm[2]==2 && pcm[3]==0);
  assert(s.VoicePacketCount==2 && s.VoiceTimestamp[1]==1018);
+ /* Corrupted geometry and missing private scratch cannot publish. */
+ s.VoicePosition=2;assert(!SofWaveRtCopyVoicePeriod(&s));
+ s.VoicePosition=0;s.VoiceScratch=0;assert(!SofWaveRtCopyVoicePeriod(&s));
+ s.VoiceScratch=scratch;s.BufferSizeBytes=65;assert(!SofWaveRtCopyVoicePeriod(&s));
+ assert(s.VoicePacketCount==2);
 }
 """
 with tempfile.TemporaryDirectory() as tmp:
@@ -77,5 +83,5 @@ with tempfile.TemporaryDirectory() as tmp:
     path.write_text("\n".join([fixture, function, cases]))
     binary = path.with_suffix("")
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
-                    str(path), "-o", str(binary)], check=True)
+                    *shlex.split(os.environ.get("CFLAGS", "")), str(path), "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)

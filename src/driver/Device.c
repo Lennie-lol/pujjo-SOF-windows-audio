@@ -56,6 +56,11 @@ NTSYSAPI NTSTATUS NTAPI ZwFlushKey(_In_ HANDLE KeyHandle);
 #error ROM boot candidate is compile-only and must not include any audio activation
 #endif
 
+#if defined(PUJJO_DMIC_ROM_PREFLIGHT) && (!defined(PUJJO_DSP_BOOT_DIAGNOSTIC) || \
+    defined(PUJJO_DMIC_DMA_PREFLIGHT) || defined(PUJJO_DMIC_DETECTION_TEST))
+#error ROM readiness preflight is strictly read-only and cannot allocate DMA or publish a child
+#endif
+
 static BOOLEAN SofHardwareDevelopmentAllowed(VOID)
 {
 #if defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)
@@ -321,6 +326,57 @@ static VOID SofLogEmbeddedDmicProfile(VOID)
     SofLogBreadcrumb(msg);
 }
 
+#ifdef PUJJO_DMIC_ROM_PREFLIGHT
+/* Inspect only the saved PCI header. Do not reset, change BME or touch
+ * extended config space. Malformed/truncated lists are not evidence. */
+static NTSTATUS SofInspectPciCapabilities(const UCHAR *Config, ULONG Bytes,
+    ULONG *Express, ULONG *Flr, ULONG *Pending, ULONG *PowerState)
+{
+    ULONG seen[2] = {0}, p, express=0, flr=0, pending=0, power=MAXULONG;
+    if (!Config || Bytes < 64u || !Express || !Flr || !Pending || !PowerState)
+        return STATUS_INVALID_PARAMETER;
+    if (Config[0x0e] == 0xffu || (Config[0x0e] & 0x7fu) != 0u)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    if (Config[6] & 0x10u) {
+        p = Config[0x34];
+        if (!p) return STATUS_DEVICE_CONFIGURATION_ERROR;
+        while (p) {
+            ULONG slot = p / 4u;
+            if (p < 0x40u || p > 0xfcu || (p & 3u) || p + 2u > Bytes ||
+                (seen[slot / 32u] & (1u << (slot % 32u))))
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+            seen[slot / 32u] |= 1u << (slot % 32u);
+            if (Config[p] == 0xffu) return STATUS_DEVICE_NOT_READY;
+            if (Config[p] == 0x10u) {
+                if (express || p + 12u > Bytes || p + 12u > 256u ||
+                    !(Config[p + 2u] & 0x0fu) || (Config[p + 2u] & 0x0fu) > 2u)
+                    return STATUS_DEVICE_CONFIGURATION_ERROR;
+                for (ULONG j = slot + 1u; j < slot + 3u; ++j) {
+                    if (seen[j / 32u] & (1u << (j % 32u)))
+                        return STATUS_DEVICE_CONFIGURATION_ERROR;
+                    seen[j / 32u] |= 1u << (j % 32u);
+                }
+                express = 1;
+                flr = (Config[p + 7u] & 0x10u) != 0; /* DevCap bit 28 */
+                pending = (Config[p + 10u] & 0x20u) != 0; /* DevSta bit 5 */
+            } else if (Config[p] == 0x01u) {
+                if (power != MAXULONG || p + 6u > Bytes || p + 6u > 256u ||
+                    !(Config[p + 2u] & 7u) || (Config[p + 2u] & 7u) > 3u)
+                    return STATUS_DEVICE_CONFIGURATION_ERROR;
+                ULONG j = slot + 1u;
+                if (seen[j / 32u] & (1u << (j % 32u)))
+                    return STATUS_DEVICE_CONFIGURATION_ERROR;
+                seen[j / 32u] |= 1u << (j % 32u);
+                power = Config[p + 4u] & 3u; /* PMCSR D-state */
+            }
+            p = Config[p + 1u];
+        }
+    }
+    *Express=express; *Flr=flr; *Pending=pending; *PowerState=power;
+    return STATUS_SUCCESS;
+}
+#endif
+
 /* Query only: never invoke DeviceReset or reset platform resources. */
 static VOID SofLogResetCapability(WDFDEVICE Device)
 {
@@ -483,6 +539,18 @@ SofEvtDevicePrepareHardware(
             goto PreparationFailed;
         }
     }
+#ifdef PUJJO_DMIC_ROM_PREFLIGHT
+    {
+        ULONG express=0, flr=0, pending=0, power=MAXULONG;
+        NTSTATUS capStatus = SofInspectPciCapabilities((const UCHAR *)&pciConfig,
+            bytesRead, &express, &flr, &pending, &power);
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[ROM-preflight] PCI caps=0x%08x PCIe=%u FLR-advertised=%u pending=%u PM-state=%u; snapshot only.\n",
+            capStatus, express, flr, pending, power);
+        SofLogBreadcrumb(msg);
+        SofLogColdBootReadiness(ctx);
+    }
+#endif
     SofUnmapPreparedBars(ctx);
     SofLogDmicProfile();
     SofLogEmbeddedDmicProfile();

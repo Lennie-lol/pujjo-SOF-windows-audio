@@ -66,17 +66,51 @@ static NTSTATUS AudioGetFormat(PVOID Context, PUJJO_AUDIO_FORMAT *Format)
     return status;
 }
 
+/* V3-style allocation is not accepted for a real DMIC child. The caller
+ * must use the v5 CPU-page lease, so older children cannot map DMA pages. */
 static NTSTATUS AudioAllocate(PVOID Context, ULONG RequestedBytes, PUJJO_AUDIO_BUFFER *Buffer)
+{
+    UNREFERENCED_PARAMETER(Context);
+    UNREFERENCED_PARAMETER(RequestedBytes);
+    if (Buffer) RtlZeroMemory(Buffer, sizeof(*Buffer));
+    return STATUS_NOT_SUPPORTED;
+}
+
+static NTSTATUS AudioPlanVoice(PVOID Context, ULONG RequestedBytes, PULONG ActualBytes)
+{
+    PSOF_DEVICE_CONTEXT ctx = Context;
+    ULONG size, periodMs;
+    NTSTATUS status = STATUS_DEVICE_NOT_READY;
+    if (!ActualBytes) return STATUS_INVALID_PARAMETER;
+    *ActualBytes = 0;
+    AudioLock(ctx);
+    if (ctx->AudioOnline && !ctx->AudioDmaFaulted && !SofDeviceRemoved(ctx)) {
+        if (!pj_dmic_voice_ring(RequestedBytes, &size, &periodMs))
+            status = STATUS_INVALID_BUFFER_SIZE;
+        else {
+            *ActualBytes = size / 8u;
+            status = STATUS_SUCCESS;
+        }
+    }
+    AudioUnlock(ctx);
+    return status;
+}
+
+static NTSTATUS AudioAttachVoice(PVOID Context, ULONG RequestedBytes, PVOID VoiceAddress,
+                                 ULONG ActualBytes, PVOID *Lease)
 {
     PSOF_DEVICE_CONTEXT ctx = Context;
     PSOF_WAVERT_STREAM stream;
     SOF_AUDIO_FORMAT_PARAMS format;
     ULONG size, periodMs;
     NTSTATUS status;
-
-    RtlZeroMemory(Buffer, sizeof(*Buffer));
+    if (!Lease) return STATUS_INVALID_PARAMETER;
+    *Lease = NULL;
+    if (!VoiceAddress || BYTE_OFFSET(VoiceAddress) ||
+        !pj_dmic_voice_ring(RequestedBytes, &size, &periodMs) || ActualBytes != size / 8u)
+        return STATUS_INVALID_BUFFER_SIZE;
     AudioLock(ctx);
-    if (!ctx->AudioOnline || ctx->AudioDmaFaulted) {
+    if (!ctx->AudioOnline || ctx->AudioDmaFaulted || SofDeviceRemoved(ctx)) {
         status = STATUS_DEVICE_NOT_READY;
         goto Done;
     }
@@ -85,42 +119,31 @@ static NTSTATUS AudioAllocate(PVOID Context, ULONG RequestedBytes, PUJJO_AUDIO_B
         goto Done;
     }
 
-    /* The firmware graph carries four signed 32-bit slots. PortCls sees one
-     * signed 16-bit voice channel per frame in an independent CPU buffer. */
+    /* The firmware carries four signed 32-bit slots; the CPU delivers
+     * one signed 16-bit voice sample per frame to the port-owned ring. */
     SofIpc4BuildDefaultStereoFormat(PJ_DMIC_RATE, PJ_DMIC_BITS, &format);
     format.ChannelsCount = PJ_DMIC_CHANNELS;
     format.ChannelMap = SOF_IPC4_CH_MAP_QUAD;
     format.ChannelConfig = SOF_IPC4_CHANNEL_CONFIG_3_POINT_1;
     format.ValidBitDepth = PJ_DMIC_BITS;
-    if (!pj_dmic_voice_ring(RequestedBytes, &size, &periodMs)) {
-        status = STATUS_INVALID_BUFFER_SIZE;
-        goto Done;
-    }
-
     status = SofWaveRtCreateStream(ctx, SOF_ENDPOINT_DMIC_PDM, TRUE, 0, &format, size,
                                    periodMs, &stream);
     if (!NT_SUCCESS(status)) goto Done;
     LARGE_INTEGER frequency;
     KeQueryPerformanceCounter(&frequency);
     stream->CounterFrequency = (ULONGLONG)frequency.QuadPart;
-    ULONG pcmBytes = size / 8u;
-    /* Allocate whole, zeroed pages: the MDL can be mapped into user mode. */
-    stream->VoiceBuffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, ROUND_TO_PAGES(pcmBytes) + pcmBytes / 2u, SOF_DEVICE_TAG);
-    if (stream->VoiceBuffer)
-        stream->Mdl = IoAllocateMdl(stream->VoiceBuffer, pcmBytes, FALSE, FALSE, NULL);
-    if (!stream->Mdl) {
+    /* Scratch is private kernel memory, separate from every mapped page. */
+    stream->VoiceScratch = ExAllocatePool2(POOL_FLAG_NON_PAGED, ActualBytes / 2u, SOF_DEVICE_TAG);
+    if (!stream->VoiceScratch) {
         if (!NT_SUCCESS(SofWaveRtFreeStream(stream))) ctx->AudioDmaFaulted = TRUE;
         status = STATUS_INSUFFICIENT_RESOURCES;
         goto Done;
     }
-    MmBuildMdlForNonPagedPool(stream->Mdl);
+    stream->VoiceBuffer = (SHORT *)VoiceAddress;
+    RtlZeroMemory(VoiceAddress, ActualBytes);
     ctx->DmicStream = stream;
-    Buffer->Stream = stream;
-    Buffer->Mdl = stream->Mdl;
-    Buffer->Bytes = pcmBytes;
+    *Lease = stream;
     AudioSetPositionEnabled(ctx, TRUE);
-    /* The application maps CPU-owned nonpaged pool. */
-    Buffer->CacheType = MmCached;
 Done:
     AudioUnlock(ctx);
     return status;
@@ -216,9 +239,13 @@ static NTSTATUS AudioReadPacket(PVOID Context, PVOID Stream, PULONG Number,
     PSOF_WAVERT_STREAM stream = Stream;
     NTSTATUS status = STATUS_DEVICE_NOT_READY;
     KIRQL irql;
+    if (!Number || !Counter || !More) return STATUS_INVALID_PARAMETER;
     AudioLock(ctx);
     if (ctx->AudioOnline && ctx->DmicStream == stream && stream &&
-        !SofDeviceRemoved(ctx) && !InterlockedCompareExchange(&stream->DmaFaulted, 0, 0)) {
+        !SofDeviceRemoved(ctx) && InterlockedCompareExchange(&stream->DmaFaulted, 0, 0)) {
+        status = STATUS_IO_DEVICE_ERROR;
+    } else if (ctx->AudioOnline && ctx->DmicStream == stream && stream &&
+        !SofDeviceRemoved(ctx)) {
         KeAcquireSpinLock(&stream->NotificationLock, &irql);
         if (stream->VoiceReadCount < stream->VoicePacketCount) {
             if (stream->VoicePacketCount - stream->VoiceReadCount > 2u)
@@ -340,6 +367,8 @@ NTSTATUS SofPublishAudioChild(PSOF_DEVICE_CONTEXT Ctx)
     bus.Position = AudioPosition;
     bus.Notification = AudioNotification;
     bus.ReadPacket = AudioReadPacket;
+    bus.PlanVoice = AudioPlanVoice;
+    bus.AttachVoice = AudioAttachVoice;
     WDF_QUERY_INTERFACE_CONFIG_INIT(&config, &bus.Header, &GUID_PUJJO_AUDIO_BUS, NULL);
     status = WdfDeviceAddQueryInterface(child, &config);
     if (NT_SUCCESS(status)) {

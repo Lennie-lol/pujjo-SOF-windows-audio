@@ -304,6 +304,10 @@ NTSTATUS SofPowerDownDsp(
     _In_ PSOF_DEVICE_CONTEXT Ctx
 );
 NTSTATUS SofRestoreBootController(_In_ PSOF_DEVICE_CONTEXT Ctx);
+#ifdef PUJJO_DMIC_ROM_PREFLIGHT
+VOID SofLogColdBootReadiness(PSOF_DEVICE_CONTEXT Ctx);
+#endif
+
 
 #endif /* _KERNEL_MODE */
 

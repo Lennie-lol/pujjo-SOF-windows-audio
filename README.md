@@ -140,6 +140,13 @@ A PnP node or a successful mock resource validator is not proof a real Windows `
 
 ### 4. Intel SOF firmware, DMA and Windows audio endpoints
 
+**Pujjo v0.0.12.0 checkpoint (2026-11-27):** the real DMIC capture bridge
+now uses PortCls-owned dedicated CPU pages and independent private conversion
+scratch; the hardware DMA ring remains separate. A new read-only ROM readiness
+diagnostic collects PCI capability and controller-idle evidence, without ROM
+execution, DMA publication or an audio endpoint. Firmware and recording remain
+locked. See [v12 capture bridge and ROM readiness](docs/PUJJO_CAPTURE_BRIDGE_V12.md).
+
 **Pujjo v0.0.11.0 source checkpoint (2026-11-27):** a durable one-shot
 DMA journal, atomic descriptor ownership ledger, cold-controller ownership
 audit and separate ROM-only compile candidate advance the firmware loader.

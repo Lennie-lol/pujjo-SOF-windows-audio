@@ -131,6 +131,7 @@ jobs:
             @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_DMIC_ENUMERATION_CANDIDATE /DPUJJO_DMIC_ROM_BOOT_CANDIDATE'; Name='dmic-rom-boot-compile-only' },
             @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_DSP_BOOT_DIAGNOSTIC /DPUJJO_DMIC_DETECTION_TEST'; Name='dmic-detection-parent' },
             @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_DSP_BOOT_DIAGNOSTIC /DPUJJO_DMIC_DMA_PREFLIGHT'; Name='dmic-dma-preflight' },
+            @{ Project='sof_dsp'; Defines='/DPUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT /DPUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED /DPUJJO_DSP_BOOT_DIAGNOSTIC /DPUJJO_DMIC_ROM_PREFLIGHT'; Name='dmic-rom-preflight' },
             @{ Project='pujjo_audio'; Defines='/DPUJJO_DMIC_DETECTION_TEST_ADAPTER'; Name='dmic-detection-child' },
             @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_READONLY_PROBE'; Name='codec-identity' },
             @{ Project='pujjo_rt5682_probe'; Defines='/DPJ5682S_ENABLE_CONTROL'; Name='codec-runtime' },
@@ -302,6 +303,28 @@ jobs:
         with:
           name: Pujjo-v0.0.9.2-DMA-PREFLIGHT-UNSIGNED
           path: ${{ runner.temp }}/pujjo-dmic-dma-preflight/
+          if-no-files-found: error
+      - name: Stage separate ROM readiness preflight
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $revision = (git rev-parse HEAD).Trim()
+          ./scripts/Stage-PujjoDspBootDiagnostic.ps1 -BinaryDirectory "$env:RUNNER_TEMP/guarded-dmic-rom-preflight/bin" -OutputDirectory "$env:RUNNER_TEMP/pujjo-dmic-rom-preflight" -SourceRevision $revision -RomPreflight
+          ./scripts/Verify-PujjoDspBootDiagnostic.ps1 -SubmissionDirectory "$env:RUNNER_TEMP/pujjo-dmic-rom-preflight" -ExpectedRevision $revision -RomPreflight
+      - name: Verify ROM readiness under Windows PowerShell
+        if: matrix.configuration == 'Release'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $revision = (git rev-parse HEAD).Trim()
+          ./scripts/Verify-PujjoDspBootDiagnostic.ps1 -SubmissionDirectory "$env:RUNNER_TEMP/pujjo-dmic-rom-preflight" -ExpectedRevision $revision -RomPreflight
+      - name: Upload unsigned ROM readiness preflight
+        if: success() && matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pujjo-v0.0.12.0-ROM-READINESS-UNSIGNED
+          path: ${{ runner.temp }}/pujjo-dmic-rom-preflight/
           if-no-files-found: error
       - name: Preserve logs even when checks or compilation fail
         if: always()
