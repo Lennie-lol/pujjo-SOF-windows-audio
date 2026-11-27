@@ -116,3 +116,56 @@ with tempfile.TemporaryDirectory(prefix="pj_dma_preflight_") as d:
                     *shlex.split(os.environ.get("CFLAGS","")),"-I"+str(root/"src/driver"),
                     str(c),str(root/"src/driver/PujjoDmaPlan.c"),"-o",str(exe)],check=True,timeout=45)
     subprocess.run([str(exe)],check=True,timeout=20)
+
+probe = loader[loader.index("static NTSTATUS SofInspectDmicDmaDomains("):
+               loader.index("/* Exercise the actual allocator")]
+probe_shim = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+typedef int NTSTATUS;
+typedef unsigned ULONG;
+typedef void *PIOMMU_DMA_DEVICE;
+typedef struct { void *WdfDevice; } CTX,*PSOF_DEVICE_CONTEXT;
+typedef struct { ULONG Size,Version; struct {
+ NTSTATUS (*CreateDevice)(void *,void *,void **);
+ void (*QueryAvailableDomainTypes)(void *,ULONG *);
+ NTSTATUS (*DeleteDevice)(void *);
+} V2; } DMA_IOMMU_INTERFACE_EX;
+#define STATUS_SUCCESS 0
+#define STATUS_NOT_SUPPORTED -1
+#define STATUS_DEVICE_NOT_READY -2
+#define NT_SUCCESS(s) ((s)>=0)
+#define RtlStringCbPrintfA snprintf
+#define SofLogBreadcrumb(s) ((void)(s))
+#define WdfDeviceWdmGetPhysicalDevice(d) (d)
+static int fault,queries,deletes;
+static int create(void *pdo, void *config,void **out) {
+ assert(pdo && !config); if(fault==3) return -3; if(fault!=4) *out=pdo; return 0;
+}
+static void query(void *token,ULONG *mask) {assert(token);++queries;*mask=1;}
+static int destroy(void *token) {assert(token);++deletes;return fault==5 ? -5 : 0;}
+static int IoGetIommuInterfaceEx(int version,ULONG flags,DMA_IOMMU_INTERFACE_EX *api) {
+ assert(version==2 && !flags && api->Size==sizeof(*api));
+ if(fault==1) return -1;
+ api->Version=2;api->V2.CreateDevice=create;api->V2.DeleteDevice=destroy;
+ if(fault!=2)api->V2.QueryAvailableDomainTypes=query;
+ return 0;
+}
+'''
+probe_cases = r'''
+int main(void) {
+ CTX ctx={&ctx};
+ for(fault=0;fault<=5;++fault) {
+   queries=deletes=0;
+   assert(SofInspectDmicDmaDomains(&ctx)==(fault==5?-5:0));
+   assert(queries==(fault==0||fault==5) && deletes==queries);
+ }
+}
+'''
+with tempfile.TemporaryDirectory() as d:
+    c=Path(d)/"domain.c"; exe=Path(d)/"domain"
+    c.write_text(probe_shim + probe + probe_cases)
+    subprocess.run([os.environ.get("CC","cc"),"-std=c11","-Wall","-Wextra","-Werror",
+                    str(c),"-o",str(exe)],check=True)
+    subprocess.run([str(exe)],check=True,timeout=10)

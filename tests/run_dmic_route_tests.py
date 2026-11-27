@@ -96,6 +96,8 @@ int main(void) {
     assert(!d.AudioOnline&&!d.Position&&d.AudioDmaFaulted&&s.Detached);
     n=0;AudioFree(&d,&s);expect((int[]){FREE},1);assert(!d.DmicStream);
     reset();s.State=KSSTATE_RUN;AudioFree(&d,&s);expect((int[]){MUTE,STOP,FREE},3);assert(!d.DmicStream&&!d.Position);
+    reset();s.State=KSSTATE_PAUSE;
+    assert(AudioSetState(&d,&s,KSSTATE_STOP)==0 && d.Position && !s.DescriptorPublished);
     reset();assert(AudioSetState(&d,&other,KSSTATE_RUN)==STATUS_DEVICE_NOT_READY&&!n);
     assert(AudioSetState(&d,&s,99)==STATUS_INVALID_PARAMETER&&!n);
     reset();assert(AudioSetState(&d,&s,KSSTATE_RUN)==0);

@@ -29,6 +29,12 @@ After the resource probe unmaps both BARs, it:
 - Parses the signed-payload metadata (does not authenticate via DSP ROM).
 - Checks a native DMIC profile or, only if native NHLT is absent, the
   embedded reference. Verifies copier/gain module budgets and mailbox fit.
+- Queries the Windows IOMMU v2 interface for the DSP PDO's available domain
+  types. The diagnostic INF opts this device into Windows 11 24H2 remapping.
+  The query logs NTSTATUS and the available domain mask, releases its token,
+  and leaves domain attachment to Windows. Mask bit 0 indicates that a
+  translation domain is available. Availability alone cannot establish that
+  removing this driver's WDF buffers will revoke in-flight device writes.
 - Creates a KMDF DMA enabler and concurrently allocates firmware payload and
   BDL, ICCMAX data and BDL, and 48 kHz four-slot 32-bit capture ring and BDL.
   The production common-buffer allocator requires the device-visible logical

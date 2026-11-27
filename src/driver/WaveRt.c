@@ -401,7 +401,7 @@ static NTSTATUS SofWaveRtCreateStreamCore(
             stream->PhysicalAddress = stream->RingAllocation.PhysicalAddress;
             stream->Bdl = (PSOF_INTEL_DSP_BDL)stream->BdlAllocation.VirtualAddress;
             stream->BdlPhysicalAddress = stream->BdlAllocation.PhysicalAddress;
-            if (BYTE_OFFSET(stream->KernelBuffer) ||
+            if ((EndpointType != SOF_ENDPOINT_DMIC_PDM && BYTE_OFFSET(stream->KernelBuffer)) ||
                 (stream->BdlPhysicalAddress.LowPart & 127u) ||
                 !pj_dma_period_count(stream->PhysicalAddress.LowPart,
                                      (ULONG)stream->PhysicalAddress.HighPart,

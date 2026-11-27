@@ -853,6 +853,43 @@ static NTSTATUS SofVerifyAdlNIpc4Candidate(PUCHAR Image, ULONG ImageBytes)
 #error DMA admission preflight must be isolated from all active firmware and audio paths
 #endif
 
+/* Inspect the exact PDO before allocating the WDF enabler. This diagnostic
+ * owns only a query token. It never creates, attaches or switches a domain. */
+static NTSTATUS SofInspectDmicDmaDomains(PSOF_DEVICE_CONTEXT Ctx)
+{
+    DMA_IOMMU_INTERFACE_EX api = {0};
+    PIOMMU_DMA_DEVICE token = NULL;
+    ULONG domains = 0;
+    char msg[160];
+    api.Size = sizeof(api);
+    NTSTATUS status = IoGetIommuInterfaceEx(2, 0, &api);
+    if (NT_SUCCESS(status)) {
+        if (api.Version != 2 || !api.V2.CreateDevice || !api.V2.QueryAvailableDomainTypes ||
+            !api.V2.DeleteDevice)
+            status = STATUS_NOT_SUPPORTED;
+        else
+            status = api.V2.CreateDevice(WdfDeviceWdmGetPhysicalDevice(Ctx->WdfDevice),
+                                         NULL, &token);
+    }
+    if (NT_SUCCESS(status) && token) {
+        api.V2.QueryAvailableDomainTypes(token, &domains);
+        status = api.V2.DeleteDevice(token);
+        if (!NT_SUCCESS(status)) {
+            SofLogBreadcrumb("[DMA-preflight] IOMMU query token cleanup failed.\n");
+            return status;
+        }
+    } else if (NT_SUCCESS(status)) {
+        status = STATUS_DEVICE_NOT_READY;
+    }
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[DMA-preflight] IOMMU query status=0x%08x available-domain-mask=0x%x. No domain attached.\n",
+        status, domains);
+    SofLogBreadcrumb(msg);
+    /* An unavailable interface is diagnostic evidence. Unpublished WDF
+     * allocations can still be checked on a platform without translation. */
+    return STATUS_SUCCESS;
+}
+
 /* Exercise the actual allocator and descriptor geometry without publishing
  * any address to hardware. All six buffers coexist. No DMA transaction,
  * interrupt, stream, or firmware execution can originate here. */
@@ -967,6 +1004,8 @@ NTSTATUS SofRunDmicDmaPreflight(PSOF_DEVICE_CONTEXT Ctx)
         info.PayloadSize, copierPages, gainPages);
     SofLogBreadcrumb(msg);
 
+    status = SofInspectDmicDmaDomains(Ctx);
+    if (!NT_SUCCESS(status)) goto Done;
     WdfDeviceSetAlignmentRequirement(Ctx->WdfDevice, FILE_128_BYTE_ALIGNMENT);
     WDF_DMA_ENABLER_CONFIG_INIT(&config, WdfDmaProfileScatterGather64, PJ_DMA_MAX_BYTES);
     status = WdfDmaEnablerCreate(Ctx->WdfDevice, &config, WDF_NO_OBJECT_ATTRIBUTES, &enabler);

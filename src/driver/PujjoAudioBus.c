@@ -180,7 +180,7 @@ static NTSTATUS AudioSetState(PVOID Context, PVOID Stream, ULONG State)
             if (!NT_SUCCESS(status))
                 (void)AudioStopCapture(ctx, stream, KSSTATE_STOP);
         }
-        if (NT_SUCCESS(status) && stream->DescriptorPublished)
+        if (NT_SUCCESS(status) && !ctx->AudioDmaFaulted)
             AudioSetPositionEnabled(ctx, TRUE);
     }
     AudioUnlock(ctx);

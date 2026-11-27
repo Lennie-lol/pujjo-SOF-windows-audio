@@ -42,6 +42,12 @@ CopyFiles = Drivers_Dir
 [Drivers_Dir]
 sof_dsp.sys
 
+[Sof_Device.NT.HW]
+AddReg = DmaRemapping
+
+[DmaRemapping]
+HKR,"DMA Management","RemappingSupported",0x00010001,1
+
 [Sof_Device.NT.Services]
 AddService = sof_dsp,%SPSVCINST_ASSOCSERVICE%,Sof_Service_Inst
 
