@@ -256,7 +256,7 @@ with tempfile.TemporaryDirectory(prefix="pj_loader_control_") as tmp:
 assert loader_source.count("WRITE_REGISTER_ULONG((PULONG)(StreamRegs + SOF_HDA_ADSP_REG_SD_CTL)") == 1
 assert "streamRegs + SOF_HDA_ADSP_REG_SD_CTL" not in loader_source
 assert configure.index("if (intctl == 0xFFFFFFFFu || ppctl == 0xFFFFFFFFu || spbfcctl == 0xFFFFFFFFu)") < configure.index("WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_BDLPL)")
-assert configure.index("WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_BDLPL)") < configure.index("*OutStreamIndex = streamIndex;")
+assert configure.index("FwDmaBuf->Published = TRUE;") < configure.index("BdlDmaBuf->Published = TRUE;") < configure.index("*OutStreamIndex = streamIndex;") < configure.index("WRITE_REGISTER_ULONG((PULONG)(streamRegs + SOF_HDA_ADSP_REG_SD_BDLPL)")
 print("PASS: code loader control preserves W1C status and rejects missing MMIO before BDL publication")
 
 # A failed gain request must not publish a successful control or stream.
@@ -295,8 +295,8 @@ assert timer.index("flags & SOF_HDA_PERIOD_COMPLETE") < timer.index("SofWaveRtSi
 stop = wave.split("NTSTATUS SofWaveRtStopHdaStream(",1)[1].split("\n}",1)[0]
 assert "SOF_HDA_SD_CTL_DMA_START, 0" in stop
 reset = wave.split("NTSTATUS SofWaveRtResetHdaStream(",1)[1].split("\n}",1)[0]
-assert reset.index("SofWaveRtStopHdaStream") < reset.index("SOF_HDA_SD_CTL_DMA_RESET")
-assert reset.index("if (NT_SUCCESS(status))") < reset.index("SOF_HDA_ADSP_REG_SD_BDLPL")
+assert reset.index("SofWaveRtStopHdaStream") < reset.index("SofWaveRtSetHdaControl(regs, SOF_HDA_SD_CTL_DMA_RESET, SOF_HDA_SD_CTL_DMA_RESET)")
+assert reset.index("if (NT_SUCCESS(status))") < reset.index("writel(0, regs + SOF_HDA_ADSP_REG_SD_BDLPL)") < reset.index("Stream->RingAllocation.Published = FALSE;")
 assert free.index("stopped = NT_SUCCESS(resetStatus)") < free.index("if (stopped)") < free.index("SofFreeDmaBuffer")
 assert "NTSTATUS status = ValidateFormat(Format, m_format);" in (root/"src/driver/PortClsAdapter.cpp").read_text()
 

@@ -17,8 +17,7 @@ def checksum(data):
     table[9] = -sum(table) & 255
     return bytes(table)
 
-def assemble(ssp, dmic):
-    audit_ssp(ssp)
+def dmic_endpoint(dmic):
     audit_dmic(dmic)
     # Generic capability: do not invent physical microphone array geometry.
     # Intel PDM device ID AE20 from ALSA nhlt.h, device type 1 per Windows
@@ -28,7 +27,16 @@ def assemble(ssp, dmic):
     body += struct.pack("<I", len(dmic)) + dmic
     ep = ENDPOINT.pack(ENDPOINT.size + len(body), 2, 0, 0x8086,
                        0xae20, 0, 0, 1, 1, 0) + body
-    return checksum(ssp[:36] + bytes([4]) + ssp[37:] + ep)
+    return ep
+
+def assemble(ssp, dmic):
+    audit_ssp(ssp)
+    return checksum(ssp[:36] + bytes([4]) + ssp[37:] + dmic_endpoint(dmic))
+
+def assemble_dmic_only(ssp, dmic):
+    # Reuse only the reviewed ACPI header, never an SSP descriptor.
+    audit_ssp(ssp)
+    return checksum(ssp[:36] + bytes([1]) + dmic_endpoint(dmic))
 
 def audit(data, ssp, dmic):
     # Compare complete serialization against the two separately checked
@@ -101,6 +109,20 @@ def main():
               "remaining": ["SSP clock selector/reserved bits and analog timing",
                             "physical microphone geometry and running DSP interpretation",
                             "signed diagnostic and physical testing"]}
+    microphone_only = assemble_dmic_only(ssp, dmic)
+    if microphone_only[37:] != data[len(ssp):] or microphone_only[36] != 1:
+        raise ValueError("microphone-only candidate must contain exactly the reviewed DMIC endpoint")
+    (folder/"dmic/dmic-only-candidate.nhlt").write_bytes(microphone_only)
+    (folder/"dmic/dmic-only-review.json").write_text(json.dumps({
+        "status": "DMIC_ONLY_CANDIDATE_NOT_HARDWARE_QUALIFIED",
+        "table_sha256": digest(microphone_only),
+        "table_bytes": len(microphone_only),
+        "source_reference": dm_report,
+        "routes": [routes[-1]],
+        "hardware_qualified": False,
+        "activation_authorized": False,
+        "contains_analog_routes": False,
+    }, indent=2)+"\n")
     (folder/"complete-candidate-only.nhlt").write_bytes(data)
     (folder/"complete-candidate-review.json").write_text(json.dumps(report,indent=2)+"\n")
     print("PASS: complete four-route NHLT candidate assembled and audited; %d bytes" % len(data))

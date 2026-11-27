@@ -44,25 +44,43 @@ for prohibited in (
 # build should default to forced-safe; guarded DSP startup must still require
 # the existing one-shot authorization at both PrepareHardware and D0Entry.
 assert "ULONG g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;" in driver
-assert 'SofReadRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE)' in driver
-assert "if (g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT)" in driver
+assert 'requestedPolicy = SofReadRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE)' in driver
+assert "RequestedPolicy == SOF_SAFE_BOOT_SINGLE_SHOT && RequestedToken == 1" in driver
 prepare = device.split("SofEvtDevicePrepareHardware(", 1)[1]
-assert "if (!g_CanaryArmed || g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT)" in prepare
+assert "#ifndef PUJJO_DSP_BOOT_DIAGNOSTIC" in add.split("SofSdcaFilterDeviceAdd")[0].rsplit("#endif", 1)[-1]
 assert prepare.index("g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT") < prepare.index(
     "WdfFdoQueryForInterface"
 )
 d0 = device.split("SofEvtDeviceD0Entry(", 1)[1]
-assert "g_CanaryArmed = FALSE;" in d0
-assert d0.index("g_CanaryArmed = FALSE;") < d0.index("SofStartFirmwareBoot(ctx, NULL);")
+assert "|| defined(PUJJO_DSP_BOOT_DIAGNOSTIC)" in d0.split("#else", 1)[0]
+assert "return STATUS_NOT_SUPPORTED;" in d0.split("#else", 1)[0]
 
 for name in ("SafeBootPolicy", "BootSafetyToken", "ArmedTesting", "EnablePortCls"):
     assert f"HKR,Parameters,{name},0x00010001,0" in inf
-assert re.findall(r"(?im)^\s*DriverVer\s*=\s*([^\r\n]+)", inf) == ["11/23/2026,0.0.3.0"]
+assert re.findall(r"(?im)^\s*DriverVer\s*=\s*([^\r\n]+)", inf) == ["11/26/2026,0.0.8.0"]
 assert "DriverVer=11/23/2026,0.0.2.0" not in inf
 stage = (ROOT / "scripts/Stage-PujjoDspBootDiagnostic.ps1").read_text(encoding="utf-8")
 verify = (ROOT / "scripts/Verify-PujjoDspBootDiagnostic.ps1").read_text(encoding="utf-8")
-assert "Package version 0.0.3.0;" in stage
-assert "Package version 0.0.3.0;" in verify
-assert "Wrong diagnostic package version; expected 0.0.3.0" in verify
+assert "Package version 0.0.8.0;" in stage
+assert "Package version 0.0.8.0;" in verify
+assert "Wrong diagnostic package version; expected 0.0.8.0" in verify
 assert "'tests/test_forced_safe_kmdf_stub.py'" in suite
-print("PASS: forced-safe KMDF-only stub precedes PnP callbacks/DMA; one-shot DSP guard preserved")
+entry = driver.split("DriverEntry(", 1)[1].split("WDF_DRIVER_CONFIG_INIT", 1)[0]
+diagnostic_entry = entry.split("#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC", 1)[1].split("#else", 1)[0]
+assert "SOF_SAFE_BOOT_PRODUCTION" not in diagnostic_entry and "ConsecutiveCrashCount" not in diagnostic_entry
+assert diagnostic_entry.index("SofCommitDiagnosticDisarm(") < diagnostic_entry.index("if (g_CanaryArmed)") < diagnostic_entry.index("InterlockedExchange(&g_DiagnosticPreparePermit, 1)")
+assert "g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;" in diagnostic_entry
+assert "flushStatus == STATUS_SUCCESS" in driver
+assert "#ifndef PUJJO_DSP_BOOT_DIAGNOSTIC\n    pnpPowerCallbacks.EvtDeviceSurpriseRemoval" in add
+probe_add = add.split("Read-only one-shot resource discovery only", 1)[1].split("#else", 1)[0]
+assert "return STATUS_SUCCESS;" in probe_add and "WdfDmaEnablerCreate(" not in probe_add
+probe = prepare.split("A physical read-only pre-DMA milestone", 1)[1].split("#else", 1)[0]
+for forbidden in ("writel(", "writew(", "WRITE_REGISTER_", "SofIpcInitialize(", "WdfInterruptCreate(", "SofStartFirmwareBoot(", "SofAllocateDmaBuffer("):
+    assert forbidden not in probe
+assert "SofDiscoverHdaCaps(ctx)" in probe and "SofUnmapPreparedBars(ctx)" in probe
+assert "InterlockedCompareExchange(&g_DiagnosticPreparePermit, 0, 1) != 1" in prepare.split("WdfFdoQueryForInterface", 1)[0]
+loader = (ROOT / "src/driver/Loader.c").read_text(encoding="utf-8")
+boot = loader.split("SofStartFirmwareBoot(", 1)[1]
+assert "#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) || defined(PUJJO_DSP_BOOT_DIAGNOSTIC)" in boot
+assert "return STATUS_NOT_SUPPORTED;" in boot.split("#else", 1)[0]
+print("PASS: persistent one-shot disarm, read-only resource probe and DMA activation hold")

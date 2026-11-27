@@ -70,11 +70,14 @@ void SofLogBreadcrumb(const char* text)
 NTSYSAPI NTSTATUS NTAPI ZwFlushKey(_In_ HANDLE KeyHandle);
 
 /** @brief Global flag indicating if the audio DSP stack is actively armed. */
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+volatile LONG g_DiagnosticPreparePermit = 0;
+#endif
 BOOLEAN g_CanaryArmed = FALSE;
 
 /** @brief Active safe boot policy governing driver recovery behavior. */
 /* Boot-only diagnostics fail closed even if the Parameters key is missing. */
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+#if defined(PUJJO_DSP_BOOT_DIAGNOSTIC) || defined(PUJJO_DMIC_ENUMERATION_CANDIDATE)
 ULONG g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
 #else
 ULONG g_SafeBootPolicy = SOF_SAFE_BOOT_PRODUCTION;
@@ -96,15 +99,24 @@ SofReadRegistryDword(
 )
 {
     UNICODE_STRING uName;
-    UCHAR buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
-    PKEY_VALUE_PARTIAL_INFORMATION pInfo = (PKEY_VALUE_PARTIAL_INFORMATION)buffer;
+    union {
+        KEY_VALUE_PARTIAL_INFORMATION Info;
+        UCHAR Bytes[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    } buffer;
+    PKEY_VALUE_PARTIAL_INFORMATION pInfo = &buffer.Info;
     ULONG resultLength = 0;
+    ULONG value;
     NTSTATUS status;
 
     RtlInitUnicodeString(&uName, ValueName);
-    status = ZwQueryValueKey(KeyHandle, &uName, KeyValuePartialInformation, buffer, sizeof(buffer), &resultLength);
-    if (NT_SUCCESS(status) && pInfo->Type == REG_DWORD && pInfo->DataLength >= sizeof(ULONG)) {
-        return *(PULONG)pInfo->Data;
+    status = ZwQueryValueKey(KeyHandle, &uName, KeyValuePartialInformation,
+                             buffer.Bytes, sizeof(buffer.Bytes), &resultLength);
+    if (status == STATUS_SUCCESS &&
+        resultLength >= FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG) &&
+        resultLength <= sizeof(buffer.Bytes) && pInfo->Type == REG_DWORD &&
+        pInfo->DataLength == sizeof(ULONG)) {
+        RtlCopyMemory(&value, pInfo->Data, sizeof(value));
+        return value;
     }
     return DefaultValue;
 }
@@ -129,6 +141,96 @@ SofWriteRegistryDword(
     return ZwSetValueKey(KeyHandle, &uName, 0, REG_DWORD, &Value, sizeof(ULONG));
 }
 
+/* One driver-wide attempt even across concurrent device objects. The durable
+ * marker is deliberately never cleared by DriverEntry, watchdog, D0 exit,
+ * registry defaults, rollback or driver unload. A review/cold recovery is
+ * required before a future authorized experiment. It is not a DMA fence. */
+static volatile LONG g_DmaJournalAttempted;
+
+NTSTATUS SofBeginDmaJournal(PSOF_DEVICE_CONTEXT Ctx)
+{
+    WDFKEY key = NULL;
+    UNICODE_STRING name;
+    ULONG value = MAXULONG;
+    NTSTATUS status;
+    if (!Ctx || KeGetCurrentIrql() != PASSIVE_LEVEL || KeAreAllApcsDisabled() ||
+        !Ctx->HardwarePrepared || SofDeviceRemoved(Ctx) ||
+        InterlockedCompareExchange(&g_DmaJournalAttempted, 1, 0) != 0)
+        return STATUS_INVALID_DEVICE_STATE;
+    RtlInitUnicodeString(&name, L"DmaSessionDirty");
+    status = WdfDriverOpenParametersRegistryKey(WdfGetDriver(), KEY_READ | KEY_WRITE,
+        WDF_NO_OBJECT_ATTRIBUTES, &key);
+    if (status != STATUS_SUCCESS) return STATUS_DEVICE_NOT_READY;
+    status = WdfRegistryQueryULong(key, &name, &value);
+    if (status != STATUS_SUCCESS || value != 0) {
+        status = STATUS_DEVICE_NOT_READY;
+        goto Done;
+    }
+    status = WdfRegistryAssignULong(key, &name, 1);
+    if (status != STATUS_SUCCESS) goto Done;
+    status = ZwFlushKey(WdfRegistryWdmGetHandle(key));
+    if (status != STATUS_SUCCESS) goto Done;
+    value = MAXULONG;
+    status = WdfRegistryQueryULong(key, &name, &value);
+    if (status != STATUS_SUCCESS || value != 1 ||
+        !SofOpenDmaPublicationGate(Ctx))
+        status = STATUS_DEVICE_NOT_READY;
+Done:
+    WdfRegistryClose(key);
+    if (status == STATUS_SUCCESS)
+        SofLogBreadcrumb("[DMA-journal] Durable dirty marker verified; one device generation admitted.\n");
+    else
+        SofLogBreadcrumb("[DMA-journal] Admission refused; no retry or automatic journal reset.\n");
+    return status == STATUS_SUCCESS ? STATUS_SUCCESS : STATUS_DEVICE_NOT_READY;
+}
+
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+/* The diagnostic never interprets a partial disarm as authorization. Even
+ * an incomplete/invalid request is retired where possible, and both writes
+ * are attempted independently so one failure cannot prevent the other reset.
+ * Readback is an additional check, NOT a substitute for a successful flush. */
+static BOOLEAN
+SofCommitDiagnosticDisarm(
+    _In_opt_ HANDLE ParamsKey,
+    _In_ ULONG RequestedPolicy,
+    _In_ ULONG RequestedToken,
+    _In_ BOOLEAN CanaryConsumed
+)
+{
+    char msg[256];
+    NTSTATUS tokenStatus, policyStatus, flushStatus;
+    ULONG tokenReadback, policyReadback;
+    BOOLEAN authorized;
+
+    if (ParamsKey == NULL) {
+        SofLogBreadcrumb("[Safety] Diagnostic parameters unavailable; no permit.\n");
+        return FALSE;
+    }
+    if (RequestedPolicy == SOF_SAFE_BOOT_FORCED_SAFE && RequestedToken == 0 && !CanaryConsumed)
+        return FALSE; /* Ordinary disarmed start does not flush the SYSTEM hive. */
+
+    tokenStatus = SofWriteRegistryDword(ParamsKey, L"BootSafetyToken", 0);
+    policyStatus = SofWriteRegistryDword(ParamsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE);
+    /* Persist even a partial reset when possible. Never grant on failure. */
+    flushStatus = ZwFlushKey(ParamsKey);
+    tokenReadback = SofReadRegistryDword(ParamsKey, L"BootSafetyToken", MAXULONG);
+    policyReadback = SofReadRegistryDword(ParamsKey, L"SafeBootPolicy", MAXULONG);
+    authorized = RequestedPolicy == SOF_SAFE_BOOT_SINGLE_SHOT && RequestedToken == 1 &&
+        CanaryConsumed && tokenStatus == STATUS_SUCCESS && policyStatus == STATUS_SUCCESS &&
+        flushStatus == STATUS_SUCCESS && tokenReadback == 0 &&
+        policyReadback == SOF_SAFE_BOOT_FORCED_SAFE;
+
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[Safety] Diagnostic disarm: Policy=%u Token=%u File=%u TokenWrite=0x%08x PolicyWrite=0x%08x Flush=0x%08x ReadbackToken=0x%08x ReadbackPolicy=0x%08x Permit=%u\n",
+        RequestedPolicy, RequestedToken, CanaryConsumed ? 1u : 0u,
+        (ULONG)tokenStatus, (ULONG)policyStatus, (ULONG)flushStatus,
+        tokenReadback, policyReadback, authorized ? 1u : 0u);
+    SofLogBreadcrumb(msg);
+    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_WARNING_LEVEL, "%s", msg);
+    return authorized;
+}
+#endif
+
 /**
  * @brief Atomically detects and consumes the single-shot canary file.
  *
@@ -138,13 +240,14 @@ SofWriteRegistryDword(
  * @return BOOLEAN TRUE if canary file was present and deleted; FALSE otherwise.
  */
 static BOOLEAN
-SofCheckAndConsumeCanaryFile(void)
+SofCheckAndConsumeCanaryFile(_In_ BOOLEAN LogAttempt)
 {
     UNICODE_STRING canPath;
     OBJECT_ATTRIBUTES canOa;
     IO_STATUS_BLOCK canIoStatus;
     HANDLE canHandle = NULL;
     NTSTATUS canStatus;
+    char msg[128];
     BOOLEAN filePresent = FALSE;
 
     /* Native NT kernel path to \SystemRoot\sof_canary.bin (C:\Windows\sof_canary.bin) */
@@ -158,19 +261,35 @@ SofCheckAndConsumeCanaryFile(void)
         &canIoStatus,
         NULL,
         FILE_ATTRIBUTE_NORMAL,
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+        0, /* Exclusive canary open: a sharing conflict denies the attempt. */
+#else
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+#endif
         FILE_OPEN,
         FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
         NULL,
         0
     );
 
+    if (LogAttempt) {
+        RtlStringCbPrintfA(msg, sizeof(msg), "[Safety] Canary open=0x%08x\n", (ULONG)canStatus);
+        SofLogBreadcrumb(msg);
+    }
     if (NT_SUCCESS(canStatus) && canHandle != NULL) {
         FILE_DISPOSITION_INFORMATION dispInfo;
+        NTSTATUS closeStatus;
         dispInfo.DeleteFile = TRUE;
         canStatus = ZwSetInformationFile(canHandle, &canIoStatus, &dispInfo, sizeof(dispInfo), FileDispositionInformation);
         filePresent = NT_SUCCESS(canStatus);
-        if (!NT_SUCCESS(ZwClose(canHandle))) filePresent = FALSE;
+        closeStatus = ZwClose(canHandle);
+        if (!NT_SUCCESS(closeStatus)) filePresent = FALSE;
+        if (LogAttempt) {
+            RtlStringCbPrintfA(msg, sizeof(msg),
+                "[Safety] Canary delete=0x%08x close=0x%08x consumed=%u\n",
+                (ULONG)canStatus, (ULONG)closeStatus, filePresent ? 1u : 0u);
+            SofLogBreadcrumb(msg);
+        }
     }
 
     return filePresent;
@@ -192,6 +311,14 @@ DriverEntry(
     _In_ PUNICODE_STRING RegistryPath
 )
 {
+#ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE
+    UNREFERENCED_PARAMETER(DriverObject);
+    UNREFERENCED_PARAMETER(RegistryPath);
+    /* Compile-only route integration: never consume a canary or grant hardware access. */
+    SofLogBreadcrumb("[Safety] DMIC enumeration candidate is compile-only; refusing driver load.\n");
+    return STATUS_NOT_SUPPORTED;
+#else
+
     WDF_DRIVER_CONFIG config;
     NTSTATUS status;
     char msg[256];
@@ -219,29 +346,55 @@ DriverEntry(
         ZwClose(serviceKey);
     }
 
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    ULONG requestedPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
+    SofLogBreadcrumb("[Safety] Pujjo resource diagnostic v0.0.8.0\n");
+#ifdef PUJJO_DMIC_ROM_PREFLIGHT
+    SofLogBreadcrumb("[Safety] Pujjo ROM readiness v0.0.12.0; no DMA, IRQ or firmware execution.\n");
+#endif
+#ifdef PUJJO_DMIC_DMA_PREFLIGHT
+    SofLogBreadcrumb("[Safety] Pujjo firmware/DMA admission v0.0.9.2; recording locked.\n");
+#endif
+#ifdef PUJJO_DMIC_DETECTION_TEST
+    SofLogBreadcrumb("[Safety] Pujjo microphone detection test v0.0.8.1; recording disabled.\n");
+#endif
+    if (!NT_SUCCESS(regStatus)) {
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[Safety] Open diagnostic parameters failed: 0x%08x\n", (ULONG)regStatus);
+        SofLogBreadcrumb(msg);
+        paramsKey = NULL;
+    }
+    if (paramsKey != NULL) {
+        requestedPolicy = SofReadRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE);
+        bootSafetyToken = SofReadRegistryDword(paramsKey, L"BootSafetyToken", 0);
+    }
+    canaryFilePresent = SofCheckAndConsumeCanaryFile(
+        requestedPolicy != SOF_SAFE_BOOT_FORCED_SAFE || bootSafetyToken != 0);
+
+    /* No production/watchdog authorization exists in the diagnostic binary.
+     * Only a durable disarm of a valid one-shot request can publish the permit. */
+    g_CanaryArmed = SofCommitDiagnosticDisarm(paramsKey, requestedPolicy, bootSafetyToken, canaryFilePresent);
+    if (g_CanaryArmed) {
+        g_SafeBootPolicy = SOF_SAFE_BOOT_SINGLE_SHOT;
+        InterlockedExchange(&g_DiagnosticPreparePermit, 1);
+        SofLogBreadcrumb("[Safety] Diagnostic canary consumed and persistent disarm verified; one resource probe authorized.\n");
+    } else {
+        g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
+        SofLogBreadcrumb("[Safety] SafeBootPolicy = FORCED_SAFE (0). Audio stack disabled.\n");
+    }
+#else
     ULONG crashCount = 0;
     ULONG crashMax = 1;
 
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
-    /*
-     * Missing or unexpected diagnostic policy is never a production watchdog
-     * authorization. Only the explicit SINGLE_SHOT path can arm DSP boot.
-     */
-    if (paramsKey != NULL) {
-        g_SafeBootPolicy = SofReadRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_FORCED_SAFE);
-        if (g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT)
-            g_SafeBootPolicy = SOF_SAFE_BOOT_FORCED_SAFE;
-#else
     if (paramsKey != NULL) {
         g_SafeBootPolicy = SofReadRegistryDword(paramsKey, L"SafeBootPolicy", SOF_SAFE_BOOT_PRODUCTION);
-#endif
         bootSafetyToken = SofReadRegistryDword(paramsKey, L"BootSafetyToken", 0);
         crashCount = SofReadRegistryDword(paramsKey, L"ConsecutiveCrashCount", 0);
         crashMax = SofReadRegistryDword(paramsKey, L"CrashWatchdogMax", 1);
         if (crashMax == 0) crashMax = 1;
     }
 
-    canaryFilePresent = SofCheckAndConsumeCanaryFile();
+    canaryFilePresent = SofCheckAndConsumeCanaryFile(FALSE);
 
     if (g_SafeBootPolicy == SOF_SAFE_BOOT_FORCED_SAFE) {
         g_CanaryArmed = FALSE;
@@ -295,6 +448,7 @@ DriverEntry(
         }
     }
 
+#endif
     if (paramsKey != NULL) {
         ZwClose(paramsKey);
     }
@@ -329,6 +483,7 @@ DriverEntry(
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] DriverEntry succeeded.\n");
     return STATUS_SUCCESS;
+#endif /* PUJJO_DMIC_ENUMERATION_CANDIDATE */
 }
 
 /**
@@ -359,9 +514,13 @@ SofIsPciDspDevice(
         if (pBuffer != NULL) {
             PWCHAR pCurrent = pBuffer;
             while (*pCurrent != L'\0') {
+#if defined(PUJJO_DSP_BOOT_DIAGNOSTIC) || defined(PUJJO_DMIC_ENUMERATION_CANDIDATE)
+                if (_wcsicmp(pCurrent, L"PCI\\VEN_8086&DEV_54C8&SUBSYS_00000000") == 0) {
+#else
                 if (wcsstr(pCurrent, L"PCI\\VEN_8086&DEV_E428") != NULL ||
                     wcsstr(pCurrent, L"PCI\\VEN_8086&DEV_4F80") != NULL ||
                     wcsstr(pCurrent, L"PCI\\VEN_8086") != NULL) {
+#endif
                     isPci = TRUE;
                     break;
                 }
@@ -403,6 +562,8 @@ SofEvtDeviceAdd(
 
     SofLogBreadcrumb("[5] SofEvtDeviceAdd entered!\n");
 
+#ifndef PUJJO_DSP_BOOT_DIAGNOSTIC
+#ifndef PUJJO_DMIC_ENUMERATION_CANDIDATE
     /* Check if this is a filter device (e.g. LowerFilter on SDCA Audio Function) */
     if (SofIsSdcaFunctionDevice(DeviceInit)) {
         if (!g_CanaryArmed) {
@@ -414,7 +575,9 @@ SofEvtDeviceAdd(
         SofLogBreadcrumb("[5-Filter] Canary Armed: SDCA Audio Function device detected! Attaching lower filter.\n");
         return SofSdcaFilterDeviceAdd(Driver, DeviceInit);
     }
+#endif
 
+#endif
     /* Reject any device that is not our PCI DSP */
     if (!SofIsPciDspDevice(DeviceInit)) {
         SofLogBreadcrumb("[5-Reject] Unrecognized non-PCI device in SofEvtDeviceAdd -> STATUS_NOT_SUPPORTED\n");
@@ -456,11 +619,16 @@ SofEvtDeviceAdd(
     WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpPowerCallbacks);
     pnpPowerCallbacks.EvtDevicePrepareHardware = SofEvtDevicePrepareHardware;
     pnpPowerCallbacks.EvtDeviceReleaseHardware = SofEvtDeviceReleaseHardware;
+#ifndef PUJJO_DSP_BOOT_DIAGNOSTIC
     pnpPowerCallbacks.EvtDeviceSurpriseRemoval = SofEvtDeviceSurpriseRemoval;
     /* FW_READY and stream shutdown require live WDF IRQ delivery. */
     pnpPowerCallbacks.EvtDeviceD0EntryPostInterruptsEnabled = SofEvtDeviceD0Entry;
     pnpPowerCallbacks.EvtDeviceD0ExitPreInterruptsDisabled  = SofEvtDeviceD0Exit;
+#endif
 
+#ifdef PUJJO_DMIC_DETECTION_TEST
+    pnpPowerCallbacks.EvtDeviceSurpriseRemoval = SofEvtDetectionSurpriseRemoval;
+#endif
     WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpPowerCallbacks);
 
     /* Allocate Device Context */
@@ -484,11 +652,19 @@ SofEvtDeviceAdd(
     KeInitializeSpinLock(&deviceContext->AudioPositionLock);
     deviceContext->CurrentPowerState = PowerDeviceD3;
 
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    /* Read-only one-shot resource discovery only. DMA common buffers are
+     * device-owned; retaining local handles cannot guarantee their lifetime
+     * after a failed start or removal. No interrupt or DMA owner is created. */
+    SofLogBreadcrumb("[Safety] DMA lifetime unqualified; read-only resource probe only.\n");
+    return STATUS_SUCCESS;
+#else
     /* Create KMDF DMA Enabler for IOMMU / VT-d Common Buffer mapping & Bus Mastering */
     {
         WDF_DMA_ENABLER_CONFIG dmaConfig;
         WdfDeviceSetAlignmentRequirement(device, FILE_128_BYTE_ALIGNMENT);
         WDF_DMA_ENABLER_CONFIG_INIT(&dmaConfig, WdfDmaProfileScatterGather64, 16 * 1024 * 1024);
+        dmaConfig.WdmDmaVersionOverride = 3;
         status = WdfDmaEnablerCreate(device, &dmaConfig, WDF_NO_OBJECT_ATTRIBUTES, &deviceContext->DmaEnabler);
         RtlStringCbPrintfA(msg, sizeof(msg), "[6a] WdfDmaEnablerCreate: status=0x%08x (Enabler=%p)\n",
                            status, deviceContext->DmaEnabler);
@@ -581,6 +757,7 @@ SofEvtDeviceAdd(
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] Device successfully created and initialized.\n");
     return STATUS_SUCCESS;
+#endif
 }
 
 /**

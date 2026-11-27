@@ -11,10 +11,13 @@ param(
     [string]$FirmwarePath,
     [string]$SignedPackageDirectory,
     [string]$SignToolPath,
-    [switch]$InspectLocalBoard
+    [switch]$InspectLocalBoard,
+    [switch]$DmaPreflight,
+    [switch]$RomPreflight
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($RomPreflight -and $DmaPreflight) { throw 'Conflicting diagnostic variants' }
 function Require([bool]$OK, [string]$Why) {
     if (-not $OK) { throw "DSP boot preflight FAILED: $Why" }
 }
@@ -54,8 +57,17 @@ foreach ($name in $names) {
 $infText = Get-Content -LiteralPath (Join-Path $package 'sof_dsp.inf') -Raw
 $versionLines = @($infText -split '\r?\n' | Where-Object { $_ -match '^\s*DriverVer\s*=' })
 Require ($versionLines.Count -eq 1) 'Expected exactly one DriverVer line'
-Require ($versionLines[0].Trim() -eq 'DriverVer=11/23/2026,0.0.3.0') 'Wrong diagnostic package version; expected 0.0.3.0'
-Require ($notice.Contains('Package version 0.0.3.0;')) 'Missing diagnostic package version in notice'
+if ($RomPreflight) {
+    Require ($versionLines[0].Trim() -eq 'DriverVer=11/27/2026,0.0.12.0') 'Wrong ROM readiness package version'
+    Require ($notice.Contains('Package version 0.0.12.0;') -and $notice.Contains('read-only controller and PCI capability snapshot; no DMA enabler or IRQ')) 'Missing ROM readiness notice'
+} elseif ($DmaPreflight) {
+    Require ($versionLines[0].Trim() -eq 'DriverVer=11/27/2026,0.0.9.2') 'Wrong DMA admission package version; expected 0.0.9.2'
+    Require ($notice.Contains('Package version 0.0.9.2;') -and $notice.Contains('unpublished common buffers and MDL-backed mappings only')) 'Missing DMA admission notice'
+} else {
+    Require ($versionLines[0].Trim() -eq 'DriverVer=11/26/2026,0.0.8.0') 'Wrong diagnostic package version; expected 0.0.8.0'
+    Require ($notice.Contains('Package version 0.0.8.0;')) 'Missing diagnostic package version in notice'
+}
+Require ($notice.Contains('DMA and firmware execution locked')) 'Missing DMA lifetime hold notice'
 Require ($infText.Contains('PCI\VEN_8086&DEV_54C8&SUBSYS_00000000')) 'Wrong DSP PCI ID'
 Require ($infText.Contains('AddService = sof_dsp')) 'Wrong or missing driver service'
 foreach ($setting in @('SafeBootPolicy','BootSafetyToken','ArmedTesting','EnablePortCls','EnableS0Idle','EnableUsbOffload')) {

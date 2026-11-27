@@ -27,6 +27,9 @@ int pj_pcm_period(PJ_DWORD rate, PJ_DWORD channels, PJ_DWORD bits,
 /* Round a WaveRT two-period request up to complete, DMA-aligned periods. */
 int pj_pcm_notification_ring(PJ_DWORD rate, PJ_DWORD channels, PJ_DWORD bits,
     PJ_DWORD valid_bits, PJ_DWORD requested, PJ_DWORD *ring_bytes, PJ_DWORD *period_ms);
+/* Two periods of four S32 slots at 48 kHz back each mono S16 client ring.
+ * Bound conversion work per DPC and allow for the Windows periodic timer. */
+int pj_dmic_voice_ring(PJ_DWORD requested_pcm_bytes, PJ_DWORD *dma_bytes, PJ_DWORD *period_ms);
 /* Resolve a direction-relative HDA descriptor only within reported counts
  * and the mapped BAR. Output unchanged on failure. No resource reservation
  * or hardware activation is implied by a successful geometry check. */

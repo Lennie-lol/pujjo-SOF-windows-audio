@@ -57,7 +57,8 @@ assert '#error DSP diagnostic must be boot-only' in device
 prepare=device.split("SofEvtDevicePrepareHardware(",1)[1]
 assert prepare.index('g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT') < prepare.index('WdfFdoQueryForInterface')
 d0=device.split("SofEvtDeviceD0Entry(",1)[1]
-assert d0.index('g_CanaryArmed = FALSE;') < d0.index('bootStatus = SofStartFirmwareBoot(ctx, NULL);')
+assert "|| defined(PUJJO_DSP_BOOT_DIAGNOSTIC)" in d0.split("#else", 1)[0]
+assert "return STATUS_NOT_SUPPORTED;" in d0.split("#else", 1)[0]
 diagnostic=(root / "packaging/diagnostics/pujjo_dsp_boot_only.inx").read_text()
 for setting in ("SafeBootPolicy","BootSafetyToken","ArmedTesting","EnablePortCls","EnableUsbOffload","EnableS0Idle"):
     assert f"HKR,Parameters,{setting},0x00010001,0" in diagnostic

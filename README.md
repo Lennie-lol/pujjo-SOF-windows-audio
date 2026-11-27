@@ -140,6 +140,28 @@ A PnP node or a successful mock resource validator is not proof a real Windows `
 
 ### 4. Intel SOF firmware, DMA and Windows audio endpoints
 
+**Pujjo v0.0.12.0 checkpoint (2026-11-27):** the real DMIC capture bridge
+now uses PortCls-owned dedicated CPU pages and independent private conversion
+scratch; the hardware DMA ring remains separate. A new read-only ROM readiness
+diagnostic collects PCI capability and controller-idle evidence, without ROM
+execution, DMA publication or an audio endpoint. Firmware and recording remain
+locked. See [v12 capture bridge and ROM readiness](docs/PUJJO_CAPTURE_BRIDGE_V12.md).
+
+**Pujjo v0.0.11.0 source checkpoint (2026-11-27):** a durable one-shot
+DMA journal, atomic descriptor ownership ledger, cold-controller ownership
+audit and separate ROM-only compile candidate advance the firmware loader.
+The platform DMA isolation/drain contract remains unqualified; the ROM
+candidate refuses DriverEntry and the loader gate stays closed. No new
+installable package or recording endpoint is provided.
+See [v11 ROM boot review](docs/PUJJO_ROM_BOOT_V11.md).
+
+**Pujjo v0.0.10.0 source checkpoint (2026-11-27):** the physical v9.2
+allocation/preflight passed; the active firmware and DMIC capture source
+now uses independent MDL backing with checked descriptor ownership and
+release guards. Boot remains locked because IOVA/adapter lifecycle on
+PnP loss is not qualified. See [v10 DMA lifetime review](docs/PUJJO_DMA_LIFETIME_V10.md).
+No new installable or recording-capable package is provided.
+
 - Candidate **Alder Lake-N** firmware filename: `sof-adl-n.ri` (not generic `sof-tgl.ri`). SOF publishes **different IPC3 and IPC4 variants** under different paths despite the shared filename; choosing the name does not prove runtime compatibility.
 - v0.0.16 parser tested the metadata of one official Intel-signed ADL-N **IPC4 2.12** image: `$AE1` extended manifest, `$AM1` binary header and **25 `$AME` modules**. **Metadata parsing is not cryptographic authentication**, ROM acceptance or proof that Pujjo can boot it. Firmware bytes are intentionally not distributed with this project.
 - Real WDF common-buffer DMA allocation now avoids substituting CPU physical addresses for device logical DMA addresses. Real DSP ROM boot, DMA descriptors, interrupts, IPC4 READY exchange, module discovery, graph/stream setup and teardown remain incomplete.

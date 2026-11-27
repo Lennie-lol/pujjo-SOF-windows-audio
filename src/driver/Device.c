@@ -24,6 +24,7 @@
 #include "Topo.h"
 #include "WaveRt.h"
 #include "PujjoAudioBus.h"
+#include "PujjoIpc4Protocol.h"
 #ifdef PUJJO_ENABLE_EXPERIMENTAL_ANALOG
 #include "PujjoAnalog.h"
 #endif
@@ -39,6 +40,25 @@ NTSYSAPI NTSTATUS NTAPI ZwFlushKey(_In_ HANDLE KeyHandle);
     !defined(PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED) || defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO) || \
     defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG) || defined(PUJJO_REVIEWED_TOPOLOGY_NHLT))
 #error DSP diagnostic must be boot-only and must not consume a replacement NHLT
+#endif
+
+#if defined(PUJJO_DMIC_ENUMERATION_CANDIDATE) && ( \
+    !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) || \
+    !defined(PUJJO_EXPLICIT_IPC4_FIRMWARE_REVIEWED) || \
+    (!defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO) && !defined(PUJJO_DMIC_ROM_BOOT_CANDIDATE)) || \
+    defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG) || \
+    defined(PUJJO_REVIEWED_TOPOLOGY_NHLT) || defined(PUJJO_DSP_BOOT_DIAGNOSTIC))
+#error The DMIC-only development candidate must not include analog or diagnostic activation
+#endif
+
+#if defined(PUJJO_DMIC_ROM_BOOT_CANDIDATE) && (!defined(PUJJO_DMIC_ENUMERATION_CANDIDATE) || \
+    defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO) || defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG))
+#error ROM boot candidate is compile-only and must not include any audio activation
+#endif
+
+#if defined(PUJJO_DMIC_ROM_PREFLIGHT) && (!defined(PUJJO_DSP_BOOT_DIAGNOSTIC) || \
+    defined(PUJJO_DMIC_DMA_PREFLIGHT) || defined(PUJJO_DMIC_DETECTION_TEST))
+#error ROM readiness preflight is strictly read-only and cannot allocate DMA or publish a child
 #endif
 
 static BOOLEAN SofHardwareDevelopmentAllowed(VOID)
@@ -255,6 +275,129 @@ static NTSTATUS SofSelectPciResources(
     return STATUS_SUCCESS;
 }
 
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+/* The native ACPI table is queried only after BARs have been unmapped.
+ * Missing/malformed NHLT is useful evidence, not a failure of PCI discovery.
+ * No fallback table is consulted and no route is enabled by this result. */
+static VOID SofLogDmicProfile(VOID)
+{
+    PVOID table = NULL;
+    ULONG bytes = 0;
+    pj_dmic_profile profile;
+    char msg[256];
+    NTSTATUS status = SofNhltQueryAcpiTable(&table, &bytes);
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[DMIC] Native ACPI NHLT status=0x%08x bytes=%u\n", status, bytes);
+    SofLogBreadcrumb(msg);
+    if (NT_SUCCESS(status) && table) {
+        status = SofNhltInspectPujjoDmic(table, bytes, &profile);
+        if (NT_SUCCESS(status)) {
+            ULONG fits = profile.bytes <= PJ_IPC4_MAX_MAILBOX_PAYLOAD -
+                (sizeof(struct sof_ipc4_copier_data) - sizeof(ULONG));
+            RtlStringCbPrintfA(msg, sizeof(msg),
+                "[DMIC] Native 48k/4ch/32bit structure valid: config=%u clock=%uHz divider=%u CIC=%u/%u FIR=%u/%u/%u/%u mailbox-fit=%u\n",
+                profile.bytes, profile.pdm_clock_hz, profile.clock_divider,
+                profile.cic_decimation[0], profile.cic_decimation[1],
+                profile.fir_decimation[0][0], profile.fir_decimation[0][1],
+                profile.fir_decimation[1][0], profile.fir_decimation[1][1], fits);
+        } else {
+            RtlStringCbPrintfA(msg, sizeof(msg),
+                "[DMIC] Native capture profile not admitted: status=0x%08x; no fallback activated.\n", status);
+        }
+        SofLogBreadcrumb(msg);
+    }
+    SofNhltFreeAcpiTable(table);
+    SofLogBreadcrumb("[DMIC] Evidence only; firmware, DMA and audio child locked.\n");
+}
+/* Verify the exact source fallback without attaching it to a device. */
+static VOID SofLogEmbeddedDmicProfile(VOID)
+{
+    pj_dmic_profile profile;
+    char msg[192];
+    NTSTATUS status = SofNhltInspectEmbeddedDmic(&profile);
+    if (NT_SUCCESS(status)) {
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[DMIC] Embedded microphone-only route valid: %u bytes %uHz PDM; NOT activated.\n",
+            profile.bytes, profile.pdm_clock_hz);
+    } else {
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[DMIC] Embedded microphone-only route rejected: 0x%08x\n", status);
+    }
+    SofLogBreadcrumb(msg);
+}
+
+#ifdef PUJJO_DMIC_ROM_PREFLIGHT
+/* Inspect only the saved PCI header. Do not reset, change BME or touch
+ * extended config space. Malformed/truncated lists are not evidence. */
+static NTSTATUS SofInspectPciCapabilities(const UCHAR *Config, ULONG Bytes,
+    ULONG *Express, ULONG *Flr, ULONG *Pending, ULONG *PowerState)
+{
+    ULONG seen[2] = {0}, p, express=0, flr=0, pending=0, power=MAXULONG;
+    if (!Config || Bytes < 64u || !Express || !Flr || !Pending || !PowerState)
+        return STATUS_INVALID_PARAMETER;
+    if (Config[0x0e] == 0xffu || (Config[0x0e] & 0x7fu) != 0u)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    if (Config[6] & 0x10u) {
+        p = Config[0x34];
+        if (!p) return STATUS_DEVICE_CONFIGURATION_ERROR;
+        while (p) {
+            ULONG slot = p / 4u;
+            if (p < 0x40u || p > 0xfcu || (p & 3u) || p + 2u > Bytes ||
+                (seen[slot / 32u] & (1u << (slot % 32u))))
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+            seen[slot / 32u] |= 1u << (slot % 32u);
+            if (Config[p] == 0xffu) return STATUS_DEVICE_NOT_READY;
+            if (Config[p] == 0x10u) {
+                if (express || p + 12u > Bytes || p + 12u > 256u ||
+                    !(Config[p + 2u] & 0x0fu) || (Config[p + 2u] & 0x0fu) > 2u)
+                    return STATUS_DEVICE_CONFIGURATION_ERROR;
+                for (ULONG j = slot + 1u; j < slot + 3u; ++j) {
+                    if (seen[j / 32u] & (1u << (j % 32u)))
+                        return STATUS_DEVICE_CONFIGURATION_ERROR;
+                    seen[j / 32u] |= 1u << (j % 32u);
+                }
+                express = 1;
+                flr = (Config[p + 7u] & 0x10u) != 0; /* DevCap bit 28 */
+                pending = (Config[p + 10u] & 0x20u) != 0; /* DevSta bit 5 */
+            } else if (Config[p] == 0x01u) {
+                if (power != MAXULONG || p + 6u > Bytes || p + 6u > 256u ||
+                    !(Config[p + 2u] & 7u) || (Config[p + 2u] & 7u) > 3u)
+                    return STATUS_DEVICE_CONFIGURATION_ERROR;
+                ULONG j = slot + 1u;
+                if (seen[j / 32u] & (1u << (j % 32u)))
+                    return STATUS_DEVICE_CONFIGURATION_ERROR;
+                seen[j / 32u] |= 1u << (j % 32u);
+                power = Config[p + 4u] & 3u; /* PMCSR D-state */
+            }
+            p = Config[p + 1u];
+        }
+    }
+    *Express=express; *Flr=flr; *Pending=pending; *PowerState=power;
+    return STATUS_SUCCESS;
+}
+#endif
+
+/* Query only: never invoke DeviceReset or reset platform resources. */
+static VOID SofLogResetCapability(WDFDEVICE Device)
+{
+    DEVICE_RESET_INTERFACE_STANDARD reset = {0};
+    char msg[160];
+    NTSTATUS status = WdfFdoQueryForInterface(Device, &GUID_DEVICE_RESET_INTERFACE_STANDARD,
+        (PINTERFACE)&reset, sizeof(reset), 1, NULL);
+    if (NT_SUCCESS(status)) {
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[Reset] Bus reset interface present: types=0x%08x handler=%u; not invoked.\n",
+            reset.SupportedResetTypes, reset.DeviceReset != NULL);
+        if (reset.InterfaceDereference) reset.InterfaceDereference(reset.Context);
+    } else {
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[Reset] Bus reset interface unavailable: 0x%08x\n", status);
+    }
+    SofLogBreadcrumb(msg);
+}
+
+#endif
+
 /**
  * @brief KMDF EvtDevicePrepareHardware callback.
  *
@@ -279,17 +422,25 @@ SofEvtDevicePrepareHardware(
     PHYSICAL_ADDRESS bar0Bus = {0}, bar4Bus = {0};
     PCM_PARTIAL_RESOURCE_DESCRIPTOR bars[2] = { NULL, NULL };
     PCM_PARTIAL_RESOURCE_DESCRIPTOR interruptRaw = NULL, interruptTranslated = NULL;
+#ifndef PUJJO_DSP_BOOT_DIAGNOSTIC
     WDF_INTERRUPT_CONFIG interruptConfig;
+#endif
     BUS_INTERFACE_STANDARD busInterface;
     PCI_COMMON_CONFIG pciConfig = {0};
     char msg[256];
 
     if (!SofHardwareDevelopmentAllowed()) return STATUS_NOT_SUPPORTED;
 #ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
-    if (!g_CanaryArmed || g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT)
+    if (g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT ||
+        InterlockedCompareExchange(&g_DiagnosticPreparePermit, 0, 1) != 1)
         return STATUS_NOT_SUPPORTED;
 #endif
 
+    /* Quarantined DMA records can only be inspected under the mapping that
+     * published them. A resources rebalance must never adopt an old slot. */
+    if (ctx->BootDmaStopUnconfirmed || ctx->AudioDmaFaulted ||
+        InterlockedCompareExchange(&ctx->DmaPublicationState, 0, 0) != 0)
+        return STATUS_DEVICE_NOT_READY;
     /* Pujjo-only fork. Fail closed before touching PCI registers. */
     if (!PujjoBoardIdentityMatches()) {
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
@@ -326,7 +477,7 @@ SofEvtDevicePrepareHardware(
 
     /* Only the Intel Alder Lake-N 54C8 controller is in scope.
      * Never silently default to another Intel DSP when PCI config access fails. */
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+#if defined(PUJJO_DSP_BOOT_DIAGNOSTIC) || defined(PUJJO_DMIC_ENUMERATION_CANDIDATE)
     if (pciConfig.u.type0.SubVendorID != 0 || pciConfig.u.type0.SubSystemID != 0)
         return STATUS_NOT_SUPPORTED;
 #endif
@@ -369,6 +520,55 @@ SofEvtDevicePrepareHardware(
     status = SofMapPreparedBars(ctx, bars);
     if (!NT_SUCCESS(status)) goto PreparationFailed;
 
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    /* A physical read-only pre-DMA milestone. No interrupt registration,
+     * IPC initialization, stream programming, power or firmware writes. */
+    status = SofDiscoverHdaCaps(ctx);
+    if (!NT_SUCCESS(status)) goto PreparationFailed;
+    {
+        ULONG gctl = readl((PUCHAR)ctx->Bar0VirtualAddress + SOF_HDA_GCTL);
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[Probe] BAR0=0x%x BAR4=0x%x MSI=%u PCI_CMD=0x%04x GCTL=0x%08x PP=0x%x SPIB=0x%x C%u/P%u\n",
+            ctx->Bar0Length, ctx->Bar4Length,
+            (interruptTranslated->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) != 0,
+            pciConfig.Command, gctl, ctx->PpCapOffset, ctx->SpbCapOffset,
+            ctx->NumCaptureStreams, ctx->NumPlaybackStreams);
+        SofLogBreadcrumb(msg);
+        if (gctl == MAXULONG) {
+            status = STATUS_DEVICE_NOT_READY;
+            goto PreparationFailed;
+        }
+    }
+#ifdef PUJJO_DMIC_ROM_PREFLIGHT
+    {
+        ULONG express=0, flr=0, pending=0, power=MAXULONG;
+        NTSTATUS capStatus = SofInspectPciCapabilities((const UCHAR *)&pciConfig,
+            bytesRead, &express, &flr, &pending, &power);
+        RtlStringCbPrintfA(msg, sizeof(msg),
+            "[ROM-preflight] PCI caps=0x%08x PCIe=%u FLR-advertised=%u pending=%u PM-state=%u; snapshot only.\n",
+            capStatus, express, flr, pending, power);
+        SofLogBreadcrumb(msg);
+        SofLogColdBootReadiness(ctx);
+    }
+#endif
+    SofUnmapPreparedBars(ctx);
+    SofLogDmicProfile();
+    SofLogEmbeddedDmicProfile();
+    SofLogResetCapability(Device);
+    SofLogBreadcrumb("[Probe] Read-only resource discovery complete; DMA and firmware boot locked.\n");
+#ifdef PUJJO_DMIC_DMA_PREFLIGHT
+    status = SofRunDmicDmaPreflight(ctx);
+    if (!NT_SUCCESS(status)) goto PreparationFailed;
+#endif
+#ifdef PUJJO_DMIC_DETECTION_TEST
+    status = SofPublishDmicDetectionChild(ctx);
+    RtlStringCbPrintfA(msg, sizeof(msg),
+        "[Detection] DMIC-only PDO publication status=0x%08x; recording disabled.\n", status);
+    SofLogBreadcrumb(msg);
+    if (!NT_SUCCESS(status)) goto PreparationFailed;
+#endif
+    return STATUS_SUCCESS;
+#else
     WDF_INTERRUPT_CONFIG_INIT(&interruptConfig, SofEvtInterruptIsr, SofEvtInterruptDpc);
     interruptConfig.AutomaticSerialization = FALSE;
     interruptConfig.InterruptRaw = interruptRaw;
@@ -431,11 +631,21 @@ SofEvtDevicePrepareHardware(
         NTSTATUS nhltStatus = SofNhltQueryAcpiTable(&nhltBuffer, &nhltSize);
         BOOLEAN topologySource = FALSE;
         if (nhltStatus == STATUS_NOT_FOUND || nhltStatus == STATUS_OBJECT_NAME_NOT_FOUND) {
+#ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE
+            nhltStatus = SofNhltQueryPujjoDmicFallback(nhltStatus, &nhltBuffer, &nhltSize);
+#else
             nhltStatus = SofNhltQueryPujjoFallback(nhltStatus, &nhltBuffer, &nhltSize);
+#endif
             topologySource = NT_SUCCESS(nhltStatus);
         }
         if (NT_SUCCESS(nhltStatus) && nhltBuffer != NULL) {
             nhltStatus = SofNhltParse(nhltBuffer, nhltSize, &ctx->NhltInfo);
+#ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE
+            if (NT_SUCCESS(nhltStatus)) {
+                pj_dmic_profile profile;
+                nhltStatus = SofNhltInspectPujjoDmic(nhltBuffer, nhltSize, &profile);
+            }
+#endif
             if (NT_SUCCESS(nhltStatus)) {
                 ctx->NhltTable = nhltBuffer;
                 ctx->NhltTableSize = nhltSize;
@@ -454,6 +664,14 @@ SofEvtDevicePrepareHardware(
         }
         SofLogBreadcrumb(msg);
     }
+
+#ifdef PUJJO_DMIC_ENUMERATION_CANDIDATE
+    /* Do not boot a DSP for which no microphone configuration was admitted. */
+    if (!ctx->NhltTable) {
+        status = STATUS_NOT_FOUND;
+        goto PreparationFailed;
+    }
+#endif
 
     /* These settings request an audio adapter after firmware boot. */
     ctx->ArmedTesting = 0;
@@ -476,6 +694,7 @@ SofEvtDevicePrepareHardware(
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] Mapped hardware resources.\n");
     return STATUS_SUCCESS;
+#endif
 
 PreparationFailed:
     /* KMDF retires any interrupt created in this PrepareHardware pass
@@ -530,10 +749,28 @@ SofEvtDeviceReleaseHardware(
 
     UNREFERENCED_PARAMETER(ResourcesTranslated);
     if (!SofHardwareDevelopmentAllowed()) return STATUS_SUCCESS;
+#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
+    /* No IPC, IRQ or published DMA state. The optional admission probe
+     * requests deletion of unpublished allocations and enabler before returning. */
+#ifdef PUJJO_DMIC_DETECTION_TEST
+    SofWithdrawDmicDetectionChild(Device);
+#endif
+#ifdef PUJJO_DMIC_DMA_PREFLIGHT
+    char counts[128];
+    RtlStringCbPrintfA(counts, sizeof(counts),
+        "[DMA-preflight] ReleaseHardware: WDF created=%ld destroyed=%ld.\n",
+        InterlockedCompareExchange(&ctx->PreflightBuffersCreated, 0, 0),
+        InterlockedCompareExchange(&ctx->PreflightBuffersDestroyed, 0, 0));
+    SofLogBreadcrumb(counts);
+#endif
+    SofUnmapPreparedBars(ctx);
+    return STATUS_SUCCESS;
+#else
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] SofEvtDeviceReleaseHardware starting...\n");
     SofLogBreadcrumb("[Teardown] SofEvtDeviceReleaseHardware starting...\n");
+    SofCloseDmaPublicationGate(ctx);
 
     NTSTATUS status = SofDisconnectAudioChild(ctx);
     NTSTATUS streamStatus = SofQuiesceDeviceStreams(ctx, TRUE);
@@ -555,9 +792,10 @@ SofEvtDeviceReleaseHardware(
 
     ctx->HardwarePrepared = FALSE;
     if (ctx->BootDmaStopUnconfirmed || ctx->DspNeedsPowerDown ||
-        ctx->BootPpBitsAdded || ctx->BootIntBitsAdded)
+        ctx->BootPpBitsAdded || ctx->BootIntBitsAdded || SofDmaPublishedSlots(ctx))
         return STATUS_DEVICE_NOT_READY;
     return status;
+#endif
 }
 
 /**
@@ -577,7 +815,7 @@ SofEvtDeviceD0Entry(
     _In_ WDF_POWER_DEVICE_STATE PreviousState
 )
 {
-#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT)
+#if !defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) || defined(PUJJO_DSP_BOOT_DIAGNOSTIC)
     /* Default development build is NEVER allowed to power or boot Pujjo DSP.
        This is not an installable or hardware-test-ready audio driver. */
     UNREFERENCED_PARAMETER(Device);
@@ -617,14 +855,6 @@ SofEvtDeviceD0Entry(
 
     /* The loader is the sole owner of the cold firmware boot sequence.
      * No speculative HDMI/HDA/SSP graph creation or codec programming here. */
-#ifdef PUJJO_DSP_BOOT_DIAGNOSTIC
-    if (!g_CanaryArmed || g_SafeBootPolicy != SOF_SAFE_BOOT_SINGLE_SHOT ||
-        ctx->EnablePortCls != 0)
-        return STATUS_NOT_SUPPORTED;
-    /* Consume the in-memory authorization too, before any firmware boot.
-     * DriverEntry already consumed persistent authorization. */
-    g_CanaryArmed = FALSE;
-#endif
     /* Re-read at D0 entry. The bus owns these PCI command bits and their
      * state during PrepareHardware need not be their state at DMA start. */
     BUS_INTERFACE_STANDARD busInterface;
@@ -662,6 +892,23 @@ SofEvtDeviceD0Entry(
         return STATUS_DEVICE_NOT_READY;
     }
 
+#ifdef PUJJO_DMIC_ROM_BOOT_CANDIDATE
+    /* Future one-shot test ends after authenticated ROM entry, FW_READY
+     * and the version IPC performed by the loader. No audio child/stream,
+     * watchdog, dump or ongoing powered session is part of this candidate. */
+    SofCloseDmaPublicationGate(ctx);
+    BOOLEAN masked = SofIpcDisableInterrupts(ctx);
+    SofIpcQuiesce(ctx);
+    NTSTATUS shutdownStatus = SofDeviceRemoved(ctx) ?
+        STATUS_DEVICE_REMOVED : SofPowerDownDsp(ctx);
+    if (!NT_SUCCESS(shutdownStatus)) return shutdownStatus;
+    shutdownStatus = SofRestoreBootController(ctx);
+    if (!NT_SUCCESS(shutdownStatus)) return shutdownStatus;
+    if (!masked || SofDmaPublishedSlots(ctx) || ctx->BootDmaStopUnconfirmed ||
+        ctx->AudioDmaFaulted || SofDeviceRemoved(ctx)) return STATUS_DEVICE_NOT_READY;
+    SofLogBreadcrumb("[ROM] FW_READY/version IPC and shutdown complete; journal remains dirty. No audio.\n");
+    return STATUS_SUCCESS;
+#else
     if (g_CanaryArmed && ctx->ArmedTesting != 0 && ctx->EnablePortCls != 0) {
         NTSTATUS portStatus = SofPublishAudioChild(ctx);
         if (portStatus == STATUS_NOT_FOUND) {
@@ -712,6 +959,7 @@ SofEvtDeviceD0Entry(
     /* Pujjo USB offload is not a verified part of cold boot. */
     SofLogBreadcrumb("[17] SofEvtDeviceD0Entry completed successfully!\n");
     return STATUS_SUCCESS;
+#endif /* PUJJO_DMIC_ROM_BOOT_CANDIDATE */
 #endif /* PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT */
 }
 
@@ -735,6 +983,7 @@ SofEvtDeviceD0Exit(
 {
     PSOF_DEVICE_CONTEXT ctx = GetDeviceContext(Device);
     if (!SofHardwareDevelopmentAllowed() || !ctx->HardwarePrepared) return STATUS_SUCCESS;
+    SofCloseDmaPublicationGate(ctx);
 
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
                "[SOF] EvtDeviceD0Exit: Transitioning from D0 to Target State %d\n",
@@ -766,6 +1015,12 @@ SofEvtDeviceD0Exit(
     NTSTATUS streamStatus = SofDisconnectAudioChild(ctx);
     NTSTATUS otherStatus = SofQuiesceDeviceStreams(ctx, FALSE);
     if (NT_SUCCESS(streamStatus)) streamStatus = otherStatus;
+
+    /* The child is offline and its timer is drained. Free may still return
+     * the CPU mapping concurrently, so serialize access to retained pairs. */
+    KeWaitForSingleObject(&ctx->AudioMutex, Executive, KernelMode, FALSE, NULL);
+    SofRetryRetainedDma(ctx);
+    KeReleaseMutex(&ctx->AudioMutex, FALSE);
 
     /* Stop device IRQs and drain the DPC and IPC senders before core reset. */
     ctx->CurrentPowerState = PowerDeviceUnspecified;
@@ -817,6 +1072,7 @@ SofEvtDeviceSurpriseRemoval(_In_ WDFDEVICE Device)
 
     /* The device can already be absent. Close the software IRQ gate without
      * touching registers, and release any outstanding IPC waiters. */
+    SofInvalidateDmaPublicationGate(ctx);
     InterlockedExchange(&ctx->SurpriseRemoved, 1);
     SofIpcDisableInterrupts(ctx);
     SofIpcQuiesce(ctx);

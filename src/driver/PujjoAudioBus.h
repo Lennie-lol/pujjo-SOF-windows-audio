@@ -3,15 +3,24 @@
 
 #include <ntddk.h>
 #include <guiddef.h>
+#if defined(_KERNEL_MODE) && defined(PUJJO_DMIC_DETECTION_TEST) && !defined(PUJJO_AUDIO_PORTCLS)
+#include <wdf.h>
+#endif
 
 #define PUJJO_AUDIO_CHILD_ID L"PUJJO\\AudioDmic"
+#define PUJJO_DMIC_DETECTION_ID L"PUJJO\\AudioDmicDetectionTest"
 #define PUJJO_AUDIO_INTERFACE_VERSION 3
+#define PUJJO_AUDIO_PACKET_VERSION 5
 #if defined(PUJJO_ENABLE_EXPERIMENTAL_ANALOG) && !defined(PUJJO_ENABLE_EXPERIMENTAL_AUDIO)
 #error The analog path requires the experimental audio guard
 #endif
 
 DEFINE_GUID(GUID_PUJJO_AUDIO_BUS, 0xd18a381b, 0xaa4b, 0x4565,
             0x99, 0x89, 0x85, 0x9a, 0xdf, 0x80, 0x01, 0xd3);
+
+/* Separate interface GUID for the non-recording detection test. */
+DEFINE_GUID(GUID_PUJJO_DMIC_DETECTION_BUS, 0xe7dd257f, 0x35ce, 0x4f57,
+            0x82, 0x91, 0x7a, 0x73, 0x94, 0x22, 0x1e, 0x86);
 
 typedef enum {
     PujjoAudioDmic = 0,
@@ -47,7 +56,16 @@ typedef struct _PUJJO_AUDIO_BUS {
     NTSTATUS (*Position)(PVOID Context, PVOID Stream, PULONG Position);
     NTSTATUS (*Notification)(PVOID Stream, PKEVENT Event, BOOLEAN Add);
     NTSTATUS (*JackPresent)(PVOID Context, PBOOLEAN Present);
+    NTSTATUS (*ReadPacket)(PVOID Context, PVOID Stream, PULONG Number, PULONGLONG Counter, PBOOLEAN More);
+    /* V5: PortCls owns the CPU-only voice ring. Plan returns its actual
+     * byte count; Attach borrows its mapping until the synchronous Free
+     * callback returns. The hardware DMA ring is never exposed to PortCls. */
+    NTSTATUS (*PlanVoice)(PVOID Context, ULONG RequestedBytes, PULONG ActualBytes);
+    NTSTATUS (*AttachVoice)(PVOID Context, ULONG RequestedBytes, PVOID VoiceAddress,
+                            ULONG ActualBytes, PVOID *Stream);
 } PUJJO_AUDIO_BUS;
+
+#define PUJJO_AUDIO_V3_SIZE ((USHORT)FIELD_OFFSET(PUJJO_AUDIO_BUS, ReadPacket))
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,6 +75,11 @@ extern "C" {
 struct _SOF_DEVICE_CONTEXT;
 NTSTATUS SofPublishAudioChild(struct _SOF_DEVICE_CONTEXT *Ctx);
 NTSTATUS SofDisconnectAudioChild(struct _SOF_DEVICE_CONTEXT *Ctx);
+#ifdef PUJJO_DMIC_DETECTION_TEST
+NTSTATUS SofPublishDmicDetectionChild(struct _SOF_DEVICE_CONTEXT *Ctx);
+VOID SofWithdrawDmicDetectionChild(WDFDEVICE Device);
+EVT_WDF_DEVICE_SURPRISE_REMOVAL SofEvtDetectionSurpriseRemoval;
+#endif
 #endif
 #endif
 #ifdef __cplusplus

@@ -4,9 +4,12 @@ param(
     [Parameter(Mandatory)] [string]$BinaryDirectory,
     [Parameter(Mandatory)] [string]$OutputDirectory,
     [Parameter(Mandatory)] [ValidatePattern('^[0-9a-f]{40}$')] [string]$SourceRevision,
-    [string]$KitVersion = '10.0.26100.0'
+    [string]$KitVersion = '10.0.26100.0',
+    [switch]$DmaPreflight,
+    [switch]$RomPreflight
 )
 $ErrorActionPreference = 'Stop'
+if ($RomPreflight -and $DmaPreflight) { throw 'Conflicting diagnostic variants' }
 $kitRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
 $infVerif = @(
     (Join-Path $kitRoot "Tools\$KitVersion\x64\InfVerif.exe")
@@ -20,7 +23,8 @@ $package = New-Item -ItemType Directory -Path (Join-Path $output 'submission') -
 $inf = Join-Path $package.FullName 'sof_dsp.inf'
 $sys = Join-Path $package.FullName 'sof_dsp.sys'
 $cat = Join-Path $package.FullName 'sof_dsp.cat'
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\packaging\diagnostics\pujjo_dsp_boot_only.inx') -Destination $inf
+$sourceInf = if ($RomPreflight) { 'pujjo_dsp_rom_preflight.inx' } elseif ($DmaPreflight) { 'pujjo_dsp_dma_preflight.inx' } else { 'pujjo_dsp_boot_only.inx' }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot ('..\packaging\diagnostics\' + $sourceInf)) -Destination $inf
 Copy-Item -LiteralPath (Join-Path $BinaryDirectory 'sof_dsp.sys') -Destination $sys
 if ((Get-AuthenticodeSignature $sys).Status -ne 'NotSigned') { throw 'Expected unsigned diagnostic' }
 & $infVerif /w /v $inf
@@ -30,11 +34,20 @@ if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $cat -PathType Leaf)) { thr
 Get-FileHash -Algorithm SHA256 -LiteralPath $inf,$sys,$cat |
     Select-Object Algorithm,Hash,@{Name='File';Expression={Split-Path -Leaf $_.Path}} |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'sha256.json')
-Set-Content -LiteralPath (Join-Path $output 'UNSIGNED-SUBMISSION-ONLY.txt') -Value @(
+$notice = @(
     "Source revision $SourceRevision"
-    'Package version 0.0.3.0; distinct from the signed 0.0.2.0 recovery baseline.'
-    'UNSIGNED DSP boot-only submission input; forced-safe defaults; not hardware verified, signed or authorized for installation.'
+    $(if ($RomPreflight) { 'Package version 0.0.12.0; distinct from previous signed packages.' } elseif ($DmaPreflight) { 'Package version 0.0.9.2; distinct from previous signed packages.' } else { 'Package version 0.0.8.0; distinct from previous signed packages.' })
+    $(if ($RomPreflight) { 'UNSIGNED ROM readiness diagnostic; forced-safe defaults; read-only controller and PCI capability snapshot; no DMA enabler or IRQ; DMA and firmware execution locked; not hardware verified, signed or authorized for installation.' } elseif ($DmaPreflight) { 'UNSIGNED host-buffer admission preflight; forced-safe defaults; unpublished common buffers and MDL-backed mappings only; DMA and firmware execution locked; not hardware verified, signed or authorized for installation.' } else { 'UNSIGNED DSP diagnostic submission input; forced-safe defaults; one-shot read-only resource probe only; DMA and firmware execution locked; not hardware verified, signed or authorized for installation.' })
     'Microsoft kernel-policy signing and catalog membership verification required.'
     'No firmware is bundled. Required pinned firmware: 707036 bytes; SHA256 bc83cffa1bb5a4a8da24bbc7bb7040bd744f1e0c63e3d16151d1769ac8ae8214.'
-    'No replacement NHLT, PortCls package, codec or amplifier control. No installer.'
+    'Embedded DMIC bytes are read-only evidence; no replacement NHLT activated, PortCls package, codec or amplifier control. No installer.'
 )
+
+Set-Content -LiteralPath (Join-Path $output 'UNSIGNED-SUBMISSION-ONLY.txt') -Value $notice
+if ($DmaPreflight -or $RomPreflight) {
+    foreach ($script in @('Verify-PujjoDspBootDiagnostic.ps1','Verify-PujjoLocalDiagnostic.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination $output
+    }
+    $review = if ($RomPreflight) { 'PUJJO_CAPTURE_BRIDGE_V12.md' } else { 'PUJJO_DMIC_DMA_PREFLIGHT_V9.md' }
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot ('..\docs\' + $review)) -Destination $output
+}

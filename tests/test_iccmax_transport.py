@@ -4,6 +4,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import tempfile
+from dma_publication_fixture import ledger
 
 driver = Path(__file__).resolve().parents[1] / "src/driver"
 loader = (driver / "Loader.c").read_text()
@@ -12,12 +13,17 @@ functions = loader[loader.index("static NTSTATUS SofLoaderDmaAddressesMatch("):
 shim = r"""
 #include <assert.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include "PujjoDmaPlan.h"
 typedef uint8_t UCHAR, BOOLEAN, *PUCHAR;
 typedef uint32_t ULONG;
 typedef int NTSTATUS;
 #define MAXULONG UINT32_MAX
+#define VOID void
+#define PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT
+#define NT_ASSERT assert
+#define RtlZeroMemory(p,n) memset(p,0,n)
 #define TRUE 1
 #define FALSE 0
 #define STATUS_SUCCESS 0
@@ -30,6 +36,7 @@ typedef int NTSTATUS;
 #define NT_SUCCESS(s) ((s) >= 0)
 #define _In_
 #define RTL_NUMBER_OF(a) (sizeof(a)/sizeof((a)[0]))
+#define SOF_HDA_GCAP 0u
 #define SOF_HDA_GCTL 8u
 #define SOF_HDA_GCTL_RESET 1u
 #define SOF_HDA_INTCTL 32u
@@ -39,6 +46,7 @@ typedef int NTSTATUS;
 #define HDA_DSP_ADSPCS_CPA_MASK(c) ((c)<<24)
 #define HDA_DSP_ADSPCS_CRST_MASK(c) (c)
 #define SofLogBreadcrumb(s) ((void)(s))
+#define RtlStringCbPrintfA snprintf
 #define KeMemoryBarrier() ((void)0)
 #define PAGE_SIZE 4096u
 #define SOF_HDA_ADSP_LOADER_BASE 0x80u
@@ -54,10 +62,13 @@ typedef int NTSTATUS;
 #define SOF_HDA_SD_STS_DMA_ERRORS 0x18u
 #define SOF_HDA_CL_DMA_SD_INT_MASK 0x1cu
 typedef struct { ULONG AddrLow, AddrHigh, Size, Ioc; } BDL, *PSOF_INTEL_DSP_BDL;
-typedef struct { void *VirtualAddress; struct {ULONG LowPart, HighPart;} PhysicalAddress; } SOF_DMA_BUFFER;
+typedef struct { void *VirtualAddress, *CommonBuffer; struct {ULONG LowPart, HighPart;} PhysicalAddress; BOOLEAN Published; } SOF_DMA_BUFFER, *PSOF_DMA_BUFFER;
 typedef struct { PUCHAR Bar0VirtualAddress; ULONG Bar0Length, NumCaptureStreams,
     NumPlaybackStreams, PpCapOffset, BootPpBitsAdded, BootIntBitsAdded;
-    BOOLEAN Removed, DspNeedsPowerDown, BootDmaStopUnconfirmed, IrqMaskNeeded;
+    BOOLEAN Removed, DspNeedsPowerDown, BootDmaStopUnconfirmed, IrqMaskNeeded, AudioDmaFaulted;
+    BOOLEAN HardwarePrepared;
+    volatile int32_t DmaPublicationState;
+    struct { SOF_DMA_BUFFER Data,Bdl; } RetainedDma[30];
     PUCHAR Bar4VirtualAddress; ULONG Bar4Length;
 } CTX, *PSOF_DEVICE_CONTEXT;
 static int SofDeviceRemoved(CTX *c) { return c->Removed; }
@@ -66,7 +77,7 @@ static int pj_ipc4_mmio_span_valid(ULONG length, ULONG offset, ULONG bytes) {
 }
 static UCHAR bar[8192];
 static BDL storage[2][PAGE_SIZE/sizeof(BDL)];
-static unsigned allocs, frees, starts;
+static unsigned allocs, frees, starts, ctl_reads, poison_ctl_read;
 static PUCHAR drop;
 static ULONG readl(PUCHAR p) { ULONG v; memcpy(&v,p,4); return v; }
 #define SofDspRead32(base,off) readl((base)+(off))
@@ -78,22 +89,24 @@ static void WRITE_REGISTER_UCHAR(PUCHAR p, UCHAR v) {
     if (p == drop) return;
     if (p == bar+0x83) *p &= (UCHAR)~v; else *p=v;
 }
-static ULONG SofCodeLoaderReadControl(PUCHAR p) { return *p; }
+static ULONG SofCodeLoaderReadControl(PUCHAR p) { ++ctl_reads; return ctl_reads==poison_ctl_read ? MAXULONG : *p; }
 static void SofCodeLoaderWriteControl(PUCHAR p, ULONG v) {
     if (v & SOF_HDA_SD_CTL_DMA_START) ++starts;
     if (p != drop) *p=(UCHAR)v;
 }
 static void KeStallExecutionProcessor(unsigned us) { assert(us == 10); }
-static NTSTATUS SofAllocateDmaBuffer(CTX *c, ULONG n, SOF_DMA_BUFFER *b) {
-    assert(c && allocs<2 && n==PAGE_SIZE);
-    b->VirtualAddress=storage[allocs++]; b->PhysicalAddress.LowPart=allocs*PAGE_SIZE;
+#define WdfDmaDirectionReadFromDevice 1
+#define WdfDmaDirectionWriteToDevice 2
+static NTSTATUS SofAllocateOwnedDmaBuffer(CTX *c, ULONG n, int direction, SOF_DMA_BUFFER *b) {
+    assert(c && allocs<2 && n==PAGE_SIZE && direction==(allocs ? 2 : 1));
+    b->CommonBuffer=b->VirtualAddress=storage[allocs++]; b->PhysicalAddress.LowPart=allocs*PAGE_SIZE;
     return 0;
 }
 static void SofFreeDmaBuffer(CTX *c, SOF_DMA_BUFFER *b) {
     assert(c);
     if (b->VirtualAddress) {
-        assert(!(bar[0x80]&2) && !readl(bar+0x98) && !readl(bar+0x9c));
-        ++frees; b->VirtualAddress=NULL;
+        assert(!b->Published && !(bar[0x80]&2) && !readl(bar+0x98) && !readl(bar+0x9c));
+        ++frees; b->CommonBuffer=b->VirtualAddress=NULL;
     }
 }
 """
@@ -108,20 +121,51 @@ int main(void) {
     UCHAR dsp[8]={0};
     CTX c={.Bar0VirtualAddress=bar,.Bar0Length=sizeof(bar),.Bar4VirtualAddress=dsp,
            .Bar4Length=sizeof(dsp),.NumCaptureStreams=1,
-           .NumPlaybackStreams=1,.PpCapOffset=0x200};
+           .NumPlaybackStreams=1,.PpCapOffset=0x200,.HardwarePrepared=1};
+    assert(SofOpenDmaPublicationGate(&c));
     assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_NOT_READY); /* controller held in reset */
     writel(1,bar+SOF_HDA_GCTL);
+    writew(0x1101,bar+SOF_HDA_GCAP);
     bar[0x80]=2;
+    const char *stage;
+    ULONG index;
+    assert(SofAuditColdBootOwnership(&c,&stage,&index)==STATUS_DEVICE_BUSY);
+    assert(!strcmp(stage,"stream descriptor") && index==0);
     assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
     bar[0x80]=0; writel(0x1000,bar+0xb8);
     assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
     writel(0,bar+0xb8); writel(0x01010000,dsp+4);
-    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && c.BootPpBitsAdded);
-    assert(SofRestoreBootController(&c)==0 && readl(bar+0x204)==0);
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
+    writel(0x01010001,dsp+4); /* Reset asserted on a pre-powered primary core. */
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
+    assert(readl(bar+0x204)==0);
+    writel(0,dsp+4);
+    /* Each engine/foreign address and an extra bidirectional stream
+       must prevent any global PP write. */
+    unsigned offsets[]={0x40,0x44,0x50,0x54,0x70,0x74};
+    for(unsigned i=0;i<sizeof(offsets)/sizeof(offsets[0]);++i) {
+        writel(0x1000,bar+offsets[i]);
+        assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !readl(bar+0x204));
+        writel(0,bar+offsets[i]);
+        writel(MAXULONG,bar+offsets[i]);
+        assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_NOT_READY && !readl(bar+0x204));
+        writel(0,bar+offsets[i]);
+    }
+    bar[0x4c]=2; assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY); bar[0x4c]=0;
+    bar[0x5c]=2; assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY); bar[0x5c]=0;
+    writew(0x1109,bar+SOF_HDA_GCAP); bar[0xc0]=2;
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !readl(bar+0x204));
+    bar[0xc0]=0; writew(0x1101,bar+SOF_HDA_GCAP);
+    writel(0x02000000,dsp+4);
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !readl(bar+0x204));
     writel(0,dsp+4);
     writel(8,bar+0x204);
+    assert(SofAcquireBootProcessing(&c)==STATUS_DEVICE_BUSY && !c.BootPpBitsAdded);
+    writel(0,bar+0x204);
+    assert(SofAuditColdBootOwnership(&c,&stage,&index)==STATUS_SUCCESS);
+    assert(!strcmp(stage,"complete") && index==MAXULONG);
     assert(SofAcquireBootProcessing(&c)==0 && c.BootPpBitsAdded==SOF_HDA_PPCTL_GPROCEN);
-    assert(readl(bar+0x204)==(8|SOF_HDA_PPCTL_GPROCEN));
+    assert(readl(bar+0x204)==SOF_HDA_PPCTL_GPROCEN);
     c.BootIntBitsAdded=1u<<31; writel(c.BootIntBitsAdded|2,bar+SOF_HDA_INTCTL);
     c.BootDmaStopUnconfirmed=1;
     assert(SofRestoreBootController(&c)==STATUS_DEVICE_NOT_READY && c.BootIntBitsAdded);
@@ -129,7 +173,7 @@ int main(void) {
     assert(SofRestoreBootController(&c)==STATUS_DEVICE_NOT_READY && c.BootPpBitsAdded);
     assert(!c.BootIntBitsAdded && readl(bar+SOF_HDA_INTCTL)==2);
     drop=NULL;
-    assert(SofRestoreBootController(&c)==0 && readl(bar+0x204)==8);
+    assert(SofRestoreBootController(&c)==0 && readl(bar+0x204)==0);
     writel(SOF_HDA_PPCTL_GPROCEN,bar+0x204);
     assert(SofAcquireBootProcessing(&c)==0 && !c.BootPpBitsAdded);
     assert(SofRestoreBootController(&c)==0 && readl(bar+0x204)==SOF_HDA_PPCTL_GPROCEN);
@@ -148,15 +192,77 @@ int main(void) {
             assert(d.Published && frees==0);
             drop=NULL; assert(SofStopIccmaxDma(&c,&d)==0);
         }
-        assert(!d.Published && frees==2);
+        assert(!d.Published && frees==2 && !SofDmaPublishedSlots(&c));
+        if(offset==0x204 || offset==0x1048) {
+            assert(d.RestorePending);
+            drop=NULL; assert(SofStopIccmaxDma(&c,&d)==0 && !d.RestorePending && frees==2);
+        }
         if (offset!=0x204) assert(readl(bar+0x204)==0x40000000u);
         if (offset!=0x1048) assert(bar[0x1048]==0x43);
+    }
+    /* Lost access on the final control read, even after BDL zero,
+       must retain buffers; zero BDL alone is not a stop proof. */
+    {
+        SOF_ICCMAX_DMA d={0};
+        memset(bar,0,sizeof(bar)); drop=NULL; allocs=frees=starts=0;
+        assert(SofStartIccmaxDma(&c,&d)==0);
+        ctl_reads=0; poison_ctl_read=5;
+        assert(SofStopIccmaxDma(&c,&d)==STATUS_DEVICE_NOT_READY);
+        assert(d.Published && frees==0);
+        poison_ctl_read=0;
+        assert(SofStopIccmaxDma(&c,&d)==0 && frees==2);
+    }
+    {
+        SOF_ICCMAX_DMA d={0};
+        memset(bar,0,sizeof(bar)); drop=NULL; allocs=frees=starts=0;
+        assert(SofStartIccmaxDma(&c,&d)==0);
+        bar[0x83]=0xff;
+        assert(SofStopIccmaxDma(&c,&d)==STATUS_DEVICE_NOT_READY);
+        assert(d.Published && frees==0);
+        bar[0x83]=0;
+        assert(SofStopIccmaxDma(&c,&d)==0 && frees==2);
+    }
+    /* A foreign BDL cannot be reset by this owner's teardown. */
+    {
+        SOF_ICCMAX_DMA d={0};
+        memset(bar,0,sizeof(bar)); drop=NULL; allocs=frees=starts=0;
+        assert(SofStartIccmaxDma(&c,&d)==0);
+        writel(0xa000,bar+0x98);
+        assert(SofStopIccmaxDma(&c,&d)==STATUS_DEVICE_NOT_READY);
+        assert(d.Published && d.Data.Published && d.Bdl.Published && !frees);
+        assert(bar[0x80]==2 && readl(bar+0x98)==0xa000);
+        writel(8192,bar+0x98);
+        /* With RUN already clear, an ignored RESET assertion still blocks free. */
+        bar[0x80]=0; drop=bar+0x80;
+        assert(SofStopIccmaxDma(&c,&d)==STATUS_IO_TIMEOUT && !frees);
+        assert(d.Published && d.Data.Published && d.Bdl.Published);
+        drop=NULL;
+        assert(SofStopIccmaxDma(&c,&d)==0 && frees==2);
     }
     for (unsigned i=0;i<2;++i) {
         SOF_ICCMAX_DMA d={0};
         memset(bar,0,sizeof(bar)); allocs=starts=0; bar[0x83]=i ? 0xff : 0x10;
         assert(SofStartIccmaxDma(&c,&d)==(i ? STATUS_DEVICE_NOT_READY : STATUS_IO_DEVICE_ERROR));
         assert(!allocs && !starts);
+    }
+    {
+        SOF_ICCMAX_DMA d={0};
+        memset(bar,0,sizeof(bar)); drop=NULL; allocs=frees=starts=0;
+        assert(SofStartIccmaxDma(&c,&d)==0);
+        drop=bar+0x80;
+        assert(SofStopIccmaxDma(&c,&d)==STATUS_IO_TIMEOUT && !frees);
+        SofRetainDmaPair(&c,0,&d.Data,&d.Bdl);
+        assert(!d.Data.CommonBuffer && !d.Bdl.CommonBuffer);
+        SofRetryRetainedDma(&c); assert(!frees);
+        drop=NULL; c.Removed=1;
+        unsigned previous=ctl_reads;
+        SofRetryRetainedDma(&c); assert(!frees && ctl_reads==previous);
+        c.Removed=0;
+        writel(0xa000,bar+0x98);
+        SofRetryRetainedDma(&c); assert(!frees && readl(bar+0x98)==0xa000 && bar[0x80]==2);
+        writel(8192,bar+0x98);
+        SofRetryRetainedDma(&c); assert(frees==2 && !c.RetainedDma[0].Bdl.CommonBuffer);
+        SofRetryRetainedDma(&c); assert(frees==2);
     }
     return 0;
 }
@@ -165,10 +271,11 @@ with tempfile.TemporaryDirectory() as temp:
     src = Path(temp) / "iccmax.c"
     exe = Path(temp) / ("iccmax.exe" if os.name == "nt" else "iccmax")
     restore = loader[loader.index("NTSTATUS SofRestoreBootController("):
-                     loader.index("#ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT\nstatic NTSTATUS SofAcquireBootProcessing")]
-    acquire = loader[loader.index("static NTSTATUS SofAcquireBootProcessing("):
+                     loader.index("#ifdef PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT\n/* Intel HD Audio rev 1.0a")]
+    acquire = loader[loader.index("static NTSTATUS SofAuditColdBootOwnership("):
                      loader.index("/* Confirm both halves of the descriptor address")]
-    src.write_text(shim + restore + acquire + functions + cases)
+    retained = loader[loader.index("VOID SofRetainDmaPair("):loader.index("#if defined(PUJJO_ENABLE_EXPERIMENTAL_DSP_BOOT) && !defined(PUJJO_DSP_BOOT_DIAGNOSTIC)", loader.index("VOID SofRetryRetainedDma("))]
+    src.write_text(shim + ledger + restore + acquire + functions + retained + cases)
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra",
                     "-Werror", *shlex.split(os.environ.get("CFLAGS", "")),
                     "-I", str(driver), str(src), str(driver / "PujjoDmaPlan.c"),

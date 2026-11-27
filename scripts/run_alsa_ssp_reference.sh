@@ -46,4 +46,13 @@ python3 "$root/scripts/audit_pujjo_dmic_reference.py" \
     "$out/dmic/dmic0-reference.bin" "$out/dmic/dmic0-review.json"
 
 python3 "$root/scripts/assemble_pujjo_complete_nhlt.py" "$out"
+python3 "$root/scripts/generate_pujjo_dmic_header.py" "$out/dmic/dmic-only-candidate.nhlt" \
+    "$root/src/driver/PujjoDmicNhltBytes.h" --check
 python3 "$root/tests/run_nhlt_bounds_tests.py" --candidate-dir "$out" --complete
+
+# The actual production validator must also accept the independently generated
+# configuration, not just synthetic test bytes.
+cc -std=c11 -Wall -Wextra -Werror -O2 \
+    "$root/src/driver/PujjoDmicProfile.c" "$root/tests/test_pujjo_dmic_profile.c" \
+    -o "$tmp/dmic-profile"
+"$tmp/dmic-profile" "$out/dmic/dmic0-reference.bin" | tee "$out/dmic/production-validation.txt"

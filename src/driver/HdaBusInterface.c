@@ -713,15 +713,6 @@ NTSTATUS SofHdaCreateCodecChildPdo(
         goto Error;
     }
 
-    /* Protect HDA codec child PDO against IopDecrementDeviceObjectRef underflow */
-    PDEVICE_OBJECT wdmHdaPdo = WdfDeviceWdmGetDeviceObject(childDevice);
-    if (wdmHdaPdo != NULL) {
-        for (ULONG i = 0; i < 100000; i++) {
-            ObReferenceObject(wdmHdaPdo);
-        }
-        InterlockedExchange(&wdmHdaPdo->ReferenceCount, 100000);
-    }
-
     /* 4. Set Power Capabilities */
     WDF_DEVICE_POWER_CAPABILITIES_INIT(&powerCaps);
     powerCaps.DeviceD1 = WdfFalse;

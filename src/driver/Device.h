@@ -19,6 +19,7 @@
 #include <ntstrsafe.h>
 #include <hdaudio.h>
 #include "UsbOffload.h"
+#include "Loader.h"
 #include "PujjoAudioBus.h"
 #else
 #include <windows.h>
@@ -254,6 +255,22 @@ typedef struct _SOF_DEVICE_CONTEXT {
     ULONG               BootPpBitsAdded;
     ULONG               BootIntBitsAdded;
     BOOLEAN             BootDmaStopUnconfirmed;
+    /* Atomic admission/descriptor ledger: bits 0..29 own published or
+     * potentially published slots; bit 30 is journal admission, bit 31
+     * permanently closes this WDF-device generation. Never reset on resume. */
+    volatile LONG       DmaPublicationState;
+#ifdef PUJJO_DMIC_DMA_PREFLIGHT
+    volatile LONG       PreflightBuffersCreated;
+    volatile LONG       PreflightBuffersDestroyed;
+#endif
+#ifdef _KERNEL_MODE
+    /* Each slot remains exclusively reserved through failed detach. These
+     * handles belong to the current WDF device and prepared BAR generation. */
+    struct {
+        SOF_DMA_BUFFER Data;
+        SOF_DMA_BUFFER Bdl;
+    } RetainedDma[30];
+#endif
     ULONG               StreamDescriptorMask;
     ULONG               StreamTagMask[2];
     /** @brief Current power state (PowerDeviceD0, PowerDeviceD3, etc.). */

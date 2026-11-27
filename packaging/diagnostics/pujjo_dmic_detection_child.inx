@@ -1,0 +1,87 @@
+; SPDX-License-Identifier: BSD-3-Clause
+; Metadata-only DMIC detection test. Recording is always rejected.
+; Requires a separately verified local test signature.
+[Version]
+Signature="$WINDOWS NT$"
+Class=MEDIA
+ClassGuid={4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider=%Provider%
+CatalogFile=pujjo_audio_detection.cat
+DriverVer=11/26/2026,0.0.8.1
+PnpLockdown=1
+
+[Manufacturer]
+%Provider%=Models,NTamd64.10.0...22000
+
+[Models.NTamd64.10.0...22000]
+%Device%=Dmic,PUJJO\AudioDmicDetectionTest
+
+[DestinationDirs]
+DriverFiles=13
+
+[SourceDisksNames]
+1=%Disk%,,,""
+
+[SourceDisksFiles]
+pujjo_audio_detection.sys=1,,
+
+[Dmic.NT]
+Include=ks.inf,wdmaudio.inf
+Needs=KS.Registration,WDMAUDIO.Registration
+CopyFiles=DriverFiles
+AddReg=PinNameRegistration
+
+[PinNameRegistration]
+HKR,MediaCategories\%DetectionPinName%,Name,,%Device%
+
+[DriverFiles]
+pujjo_audio_detection.sys
+
+[Dmic.NT.Services]
+AddService=pujjo_audio_detection,0x00000002,Service
+
+[Service]
+DisplayName=%Device%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\pujjo_audio_detection.sys
+
+[Dmic.NT.Interfaces]
+AddInterface=%Audio%,DmicWave,WaveInterface
+AddInterface=%Capture%,DmicWave,WaveInterface
+AddInterface=%Realtime%,DmicWave,WaveInterface
+AddInterface=%Audio%,DmicTopology,TopologyInterface
+AddInterface=%Topology%,DmicTopology,TopologyInterface
+
+[WaveInterface]
+AddReg=WaveMetadata
+
+[TopologyInterface]
+AddReg=TopologyMetadata
+
+[WaveMetadata]
+HKR,,FriendlyName,,%Device%
+HKR,,CLSID,,%Proxy%
+
+[TopologyMetadata]
+HKR,,FriendlyName,,%Device%
+HKR,,CLSID,,%Proxy%
+HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
+HKR,EP\0,%PKEY_AudioDevice_NeverSetAsDefaultEndpoint%,0x00010001,0x00000307
+HKR,EP\0,%PKEY_AudioEngine_OEMFormat%,0x00000001,41,00,00,00,28,00,00,00,fe,ff,04,00,80,bb,00,00,00,b8,0b,00,10,00,20,00,16,00,20,00,00,00,00,00,01,00,00,00,00,00,10,00,80,00,00,aa,00,38,9b,71
+
+[Strings]
+Provider="Sound Open Firmware"
+Device="Pujjo Internal Microphone (Detection test - recording disabled)"
+Disk="Pujjo DMIC detection-only test media"
+Audio="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+Capture="{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
+Realtime="{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
+Topology="{DDA54A40-1E4C-11D1-A050-405705C10000}"
+Proxy="{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+DetectionPinName="{AE810C69-1A6D-4CBE-B084-9B9F7C11A257}"
+KSNODETYPE_ANY="{00000000-0000-0000-0000-000000000000}"
+PKEY_AudioEndpoint_Association="{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},2"
+PKEY_AudioDevice_NeverSetAsDefaultEndpoint="{F3E80BEF-1723-4FF2-BCC4-7F83DC5E46D4},3"
+PKEY_AudioEngine_OEMFormat="{E4870E26-3CC5-4CD2-BA46-CA0A9A70ED04},3"

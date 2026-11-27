@@ -6,6 +6,10 @@ evidence that sample capture works; audio data must be separately verified.
 
 ## Working status
 
+- The physical v0.0.6.0 resource-only probe passed. The v0.0.7.0
+  native DMIC profile verifier and read-only diagnostic are documented in
+  [the v7 microphone milestone](PUJJO_DMIC_PROFILE_V7.md). Firmware and DMA remain locked.
+
 - The signed v0.0.2.0 **forced-safe DSP KMDF stub** starts with Code 0 on
   Google Pujjo rev3. It deliberately does **not** boot firmware or publish
   a microphone PDO.

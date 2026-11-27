@@ -126,3 +126,11 @@ int pj_pcm_notification_ring(PJ_DWORD rate, PJ_DWORD channels, PJ_DWORD bits,
     }
     return 0;
 }
+
+int pj_dmic_voice_ring(PJ_DWORD requested_pcm_bytes, PJ_DWORD *dma_bytes, PJ_DWORD *period_ms)
+{
+    if (!requested_pcm_bytes || requested_pcm_bytes > 9600u) return 0;
+    if (requested_pcm_bytes < 3840u) requested_pcm_bytes = 3840u;
+    return pj_pcm_notification_ring(48000u, 4u, 32u, 32u,
+        requested_pcm_bytes * 8u, dma_bytes, period_ms);
+}

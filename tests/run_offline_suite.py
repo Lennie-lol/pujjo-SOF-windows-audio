@@ -24,6 +24,7 @@ SUITES=[
  'tests/test_windows_ci_v017.py','tests/run_kernel_mock_abi_tests.py',
  'tests/test_preinstall_guards.py','tests/test_dsp_submission_preflight_static.py',
  'tests/test_forced_safe_kmdf_stub.py',
+ 'tests/test_diagnostic_prepare.py','tests/test_diagnostic_disarm.py','tests/test_dmic_diagnostic.py','tests/test_v8_dmic_candidate.py','tests/test_dmic_detection.py','tests/test_dmic_dma_preflight.py','tests/test_owned_dma_preflight.py','tests/test_dma_journal.py',
  'tests/test_rom_halt_fail_closed.py',
  'tests/run_post_dma_rom_tests.py',
  'tests/test_iccmax_transport.py',
@@ -33,7 +34,7 @@ SUITES=[
  'tests/run_ipc4_protocol_tests.py','tests/test_ipc4_protocol_static.py',
  'tests/test_ipc4_evidence_collector_static.py',
  'tests/test_ipc4_pretest_safety.py','tests/run_dma_plan_tests.py',
- 'tests/test_interrupt_boot_preflight.py','tests/test_kmdf_irq_lifecycle.py','tests/run_notification_race.py',
+ 'tests/test_interrupt_boot_preflight.py','tests/test_kmdf_irq_lifecycle.py','tests/run_notification_race.py','tests/test_capture_descriptor.py','tests/test_voice_period.py','tests/test_voice_page_lease.py','tests/test_rom_preflight.py',
  'tests/test_read_only_resource_discovery.py',
  'tests/test_prepare_hardware_rollback.py','tests/test_portcls_child.py','tests/test_dmic_review_package.py','tests/run_codec_control_tests.py',
 ]
